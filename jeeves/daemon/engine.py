@@ -95,8 +95,8 @@ class Engine:
         self.queue: list[tuple[str, Any]] = []              # requests waiting for a suspended model
         self.listeners: dict[str, Listener] = {}
         self._app_cache: tuple[float, list[str], str] = (0.0, [], "")
-        self._overlay: subprocess.Popen | None = None
-        self._overlay_fails = 0
+        self._overlays: dict[str, subprocess.Popen] = {}
+        self._overlay_fails: dict[str, tuple[int, float]] = {}
         self._stop = threading.Event()
         self.start_io = start_io
 
@@ -123,8 +123,8 @@ class Engine:
         if self.keyboard:
             self.keyboard.stop()
         self.control.close()
-        if self._overlay is not None:
-            self._overlay.terminate()
+        for proc in self._overlays.values():
+            proc.terminate()
         self.pool.shutdown(wait=False, cancel_futures=True)
 
     def apply_settings(self) -> None:
@@ -745,10 +745,10 @@ class Engine:
     def speak(self, ctx: FunctionContext, text: str) -> None:
         agent = ctx.agent
         try:
-            tts, voice = self.models.tts(agent)
-            pcm, rate = tts.synth(text, voice)
-        except (ModelUnavailable, Exception) as exc:   # speech failing must never lose the answer
+            pcm, rate = self._synth(agent, text)
+        except Exception as exc:   # speech failing must never lose the answer
             ctx.trace("tts_failed", reason=str(exc))
+            self._tts_problem(f"Text to speech failed: {exc}")
             return
         targets = output_targets(agent.get("output_to", "speakers"), self.settings.get("audio.speaker", ""),
                                  self.settings.get("audio.virtual_mic_sink", "jeeves-mic"))
@@ -758,7 +758,28 @@ class Engine:
             pb.play()
         finally:
             ctx.playback = None
+        if pb.error:
+            ctx.trace("playback_failed", reason=pb.error)
+            self._tts_problem(f"Couldn't play speech: {pb.error}")
         ctx.check_cancelled()
+
+    def _synth(self, agent: dict[str, Any], text: str) -> tuple[bytes, int]:
+        """The agent's TTS; if that fails, eSpeak NG so there's always a voice."""
+        try:
+            tts, voice = self.models.tts(agent)
+            return tts.synth(text, voice)
+        except Exception as exc:
+            from ..models.backends import EspeakTTS
+            log.warning("TTS failed (%s); falling back to eSpeak NG", exc)
+            self._tts_problem(f"Text to speech: {exc} -- using eSpeak NG instead")
+            return EspeakTTS().synth(text, None)
+
+    def _tts_problem(self, text: str) -> None:
+        # once per distinct problem, so a broken voice doesn't spam a notice per sentence
+        if text != getattr(self, "_last_tts_problem", None):
+            self._last_tts_problem = text
+            log.warning("%s", text)
+            self.publish("notice", {"text": text})
 
     # ------------------------------------------------------------------ abort
     def abort(self) -> dict[str, Any]:
@@ -920,28 +941,44 @@ class Engine:
         return actions
 
     # ------------------------------------------------------------------ overlay process
+    def _overlay_argv(self, popups: bool) -> list[str]:
+        """``jeeves overlay [--popups]`` through the real command: inside the Nix
+        wrapper a bare ``python -m`` child wouldn't find PySide6 or the Qt plugins."""
+        extra = ["--popups"] if popups else []
+        exe = os.environ.get("JEEVES_BIN") or shutil.which("jeeves")
+        if exe:
+            return [exe, "overlay", *extra]
+        return [sys.executable, "-m", "jeeves.overlay", *extra]
+
     def _ensure_overlay(self) -> None:
-        # always wanted when there's a display: besides indicators it shows the
-        # popups (Manual Response Review, import approval, Text Request)
+        """Keep both overlay processes running while there's a display: the indicator
+        process (layer-shell) and the popups process (Review, Text Request, imports)."""
         if os.environ.get("JEEVES_NO_OVERLAY"):
             return
         env = graphical_env()
         if not (env.get("WAYLAND_DISPLAY") or env.get("DISPLAY")):
             return
-        if self._overlay is not None and self._overlay.poll() is None:
-            return
-        if self._overlay is not None:
-            self._overlay_fails += 1
-            self._overlay = None
-            if self._overlay_fails > 5:
-                return            # keeps crashing: leave it (logged once)
-        cmd = os.environ.get("JEEVES_OVERLAY_CMD")
-        argv = [cmd] if cmd else [sys.executable, "-m", "jeeves.overlay"]
-        try:
-            self._overlay = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL)
-        except OSError as exc:
-            log.warning("couldn't start the overlay: %s", exc)
-            self._overlay_fails += 1
+        now = time.time()
+        for name, popups in (("indicators", False), ("popups", True)):
+            proc = self._overlays.get(name)
+            if proc is not None and proc.poll() is None:
+                continue
+            fails, retry_at = self._overlay_fails.get(name, (0, 0.0))
+            if proc is not None:
+                if proc.returncode != 0:
+                    fails += 1
+                    log.warning("overlay (%s) exited with %s; restarting in %ds", name, proc.returncode,
+                                min(60, 2 ** fails))
+                    retry_at = now + min(60, 2 ** fails)
+                self._overlays.pop(name, None)
+                self._overlay_fails[name] = (fails, retry_at)
+            if now < retry_at:
+                continue
+            try:
+                self._overlays[name] = subprocess.Popen(self._overlay_argv(popups), env=env, stdin=subprocess.DEVNULL)
+            except OSError as exc:
+                log.warning("couldn't start the overlay (%s): %s", name, exc)
+                self._overlay_fails[name] = (fails + 1, now + 30)
 
     # ------------------------------------------------------------------ status
     def status(self) -> dict[str, Any]:

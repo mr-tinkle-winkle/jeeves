@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("args", nargs="*")
     p.add_argument("-o", "--output")
     p.add_argument("--json", action="store_true", help="raw JSON output")
+    p.add_argument("--popups", action="store_true", help="overlay: run the popups process")
     a = p.parse_args(argv)
 
     try:
@@ -95,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if cmd == "overlay":
             from .overlay import main as overlay_main
-            return overlay_main()
+            return overlay_main(popups=a.popups)
         if cmd in ("say", "request"):
             _print(ipc.call("request.text", text=" ".join(a.args), agent=a.agent))
         elif cmd in ("dry-run", "dry_run"):

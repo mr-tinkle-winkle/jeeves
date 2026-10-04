@@ -277,7 +277,7 @@ class LLM:
                 data = _post_json(self.base + "/v1/chat/completions", body)
             except (urllib.error.URLError, ValueError) as exc:
                 raise BackendError(f"model server failed: {exc}") from exc
-            return data["choices"][0]["message"]["content"] or ""
+            return strip_thinking(data["choices"][0]["message"].get("content") or "")
         body["stream"] = True
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
@@ -294,21 +294,37 @@ class LLM:
                     if payload == "[DONE]":
                         break
                     try:
-                        delta = json.loads(payload)["choices"][0].get("delta", {}).get("content") or ""
+                        d = json.loads(payload)["choices"][0].get("delta", {})
                     except (ValueError, KeyError, IndexError):
                         continue
+                    # a thinking model's reasoning: shown in the thoughts view, never spoken
+                    thought = d.get("reasoning_content") or ""
+                    if thought:
+                        on_token(thought)
+                    delta = d.get("content") or ""
                     if delta:
                         out.append(delta)
                         on_token(delta)
         except urllib.error.URLError as exc:
             raise BackendError(f"model server failed: {exc}") from exc
-        return "".join(out)
+        return strip_thinking("".join(out))
+
+
+def strip_thinking(text: str) -> str:
+    """Drop <think>...</think> blocks some models put in the answer itself."""
+    import re
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    if "</think>" in text:                 # opening tag was in the prompt template
+        text = text.split("</think>", 1)[1]
+    return text.strip()
 
 
 class LlamaCppLLM(LLM):
-    def __init__(self, entry: ModelEntry, threads: int = 0, gpu_layers: int = 0, ctx_size: int = 8192) -> None:
+    def __init__(self, entry: ModelEntry, threads: int = 0, gpu_layers: int = 0, ctx_size: int = 8192,
+                 reasoning: str = "off") -> None:
         self.entry = entry
         self.threads, self.gpu_layers, self.ctx_size = threads, gpu_layers, ctx_size
+        self.reasoning = reasoning
         self.server = ManagedServer(f"llama-server ({entry.id})")
 
     @property
@@ -325,6 +341,8 @@ class LlamaCppLLM(LLM):
                str(self.ctx_size), "-t", str(env_threads(self.threads))]
         if self.gpu_layers:
             cmd += ["-ngl", str(self.gpu_layers)]
+        # thinking models (Qwen3, gpt-oss): off = answer straight away (fast); auto = let them think
+        cmd += ["--reasoning", self.reasoning if self.reasoning in ("on", "off", "auto") else "off"]
         self.server.start(cmd, "/health")
 
     def unload(self) -> None:
@@ -429,9 +447,9 @@ def make_stt(entry: ModelEntry, threads: int) -> STT:
     raise BackendError(f"{entry.id} isn't a speech-to-text model")
 
 
-def make_llm(entry: ModelEntry, threads: int, gpu_layers: int) -> LLM:
+def make_llm(entry: ModelEntry, threads: int, gpu_layers: int, reasoning: str = "off") -> LLM:
     if entry.engine == "llama.cpp":
-        return LlamaCppLLM(entry, threads, gpu_layers)
+        return LlamaCppLLM(entry, threads, gpu_layers, reasoning=reasoning)
     if entry.engine == "endpoint":
         return EndpointLLM(entry)
     raise BackendError(f"{entry.id} isn't a text model")

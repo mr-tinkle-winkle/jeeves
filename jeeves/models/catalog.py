@@ -27,6 +27,10 @@ class ModelFile:
     path: str                    # relative to the model's folder
     sha256: str | None = None
     unzip: bool = False
+    # Hugging Face repo + filename suffix: the exact file is looked up through the
+    # HF API at download time (used when ``url`` is empty, or if it 404s)
+    hf_repo: str | None = None
+    hf_suffix: str = "Q4_K_M.gguf"
 
 
 @dataclass
@@ -55,7 +59,13 @@ def _whisper(id_: str, file: str, name: str, size: int, ram: int, desc: str) -> 
 
 def _gguf(id_: str, repo: str, file: str, name: str, size: int, ram: int, desc: str) -> ModelEntry:
     return ModelEntry(id_, "llm", name, "llama.cpp", size, ram, desc,
-                      [ModelFile(f"{HF}/{repo}/resolve/main/{file}", file)])
+                      [ModelFile(f"{HF}/{repo}/resolve/main/{file}", file, hf_repo=repo)])
+
+
+def _hf(id_: str, repo: str, name: str, size: int, ram: int, desc: str, suffix: str = "Q4_K_M.gguf") -> ModelEntry:
+    """A GGUF model whose exact file name is resolved from the repo at download time."""
+    return ModelEntry(id_, "llm", name, "llama.cpp", size, ram, desc,
+                      [ModelFile("", "model.gguf", hf_repo=repo, hf_suffix=suffix)])
 
 
 def _piper(lang: str, speaker: str, quality: str, name: str, desc: str) -> ModelEntry:
@@ -99,6 +109,19 @@ CATALOG: list[ModelEntry] = [
                [ModelFile("https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip", ".", unzip=True)]),
 
     # ---- text models (intent + local response) --------------------------
+    # fastest (tiny; fine for intent picking and one-line answers)
+    _hf("gemma3-270m", "unsloth/gemma-3-270m-it-GGUF", "Gemma 3 270M", 250, 600,
+        "Fastest option. Instant on any CPU; simple requests only."),
+    _hf("smollm2-360m", "bartowski/SmolLM2-360M-Instruct-GGUF", "SmolLM2 360M", 270, 650,
+        "Tiny and very fast; short answers."),
+    _hf("qwen3-0.6b", "bartowski/Qwen_Qwen3-0.6B-GGUF", "Qwen3 0.6B", 480, 900,
+        "Very fast, surprisingly capable for intent picking."),
+    _hf("llama3.2-1b", "bartowski/Llama-3.2-1B-Instruct-GGUF", "Llama 3.2 1B", 810, 1400,
+        "Fast, friendly short answers."),
+    _hf("gemma3-1b", "bartowski/google_gemma-3-1b-it-GGUF", "Gemma 3 1B", 810, 1400,
+        "Fast, good general knowledge for its size."),
+    _hf("qwen3-1.7b", "bartowski/Qwen_Qwen3-1.7B-GGUF", "Qwen3 1.7B", 1280, 2200,
+        "Fast and reliable; a good intent model."),
     _gguf("qwen2.5-0.5b", "bartowski/Qwen2.5-0.5B-Instruct-GGUF", "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
           "Qwen2.5 0.5B Instruct", 400, 900, "Tiny; quick intent picking for simple dictionaries."),
     _gguf("qwen2.5-1.5b", "bartowski/Qwen2.5-1.5B-Instruct-GGUF", "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
@@ -111,6 +134,27 @@ CATALOG: list[ModelEntry] = [
           "Qwen2.5 7B Instruct", 4680, 6500, "Good local responses and macro writing."),
     _gguf("qwen2.5-14b", "bartowski/Qwen2.5-14B-Instruct-GGUF", "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
           "Qwen2.5 14B Instruct", 8990, 11000, "Best local answers; needs a strong GPU or lots of RAM."),
+    # smarter (bigger = better answers, slower; GPU strongly recommended past ~8B)
+    _hf("qwen3-4b", "bartowski/Qwen_Qwen3-4B-GGUF", "Qwen3 4B", 2500, 4000,
+        "Smart for its size; good default for local responses on a CPU."),
+    _hf("qwen3-8b", "bartowski/Qwen_Qwen3-8B-GGUF", "Qwen3 8B", 5000, 7000,
+        "Strong answers and macro writing; comfortable on an 8 GB GPU."),
+    _hf("gemma3-12b", "bartowski/google_gemma-3-12b-it-GGUF", "Gemma 3 12B", 7300, 10000,
+        "Very good writing and general knowledge."),
+    _hf("gpt-oss-20b", "ggml-org/gpt-oss-20b-GGUF", "gpt-oss 20B (MoE)", 12100, 14000,
+        "OpenAI's open model; mixture-of-experts, so much faster than its size suggests.", suffix="mxfp4.gguf"),
+    _hf("qwen3-14b", "bartowski/Qwen_Qwen3-14B-GGUF", "Qwen3 14B", 9000, 12000,
+        "Excellent answers; needs a 12 GB+ GPU to be quick."),
+    _hf("qwen3-30b-a3b", "bartowski/Qwen_Qwen3-30B-A3B-GGUF", "Qwen3 30B-A3B (MoE)", 18600, 21000,
+        "30B-class smarts at roughly 3B speed (only 3B active per word). Best smart-and-fast pick if you have the RAM."),
+    _hf("mistral-small-3.2-24b", "bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF",
+        "Mistral Small 3.2 24B", 14300, 17000, "Very capable, follows instructions well; 16 GB+ GPU."),
+    _hf("gemma3-27b", "bartowski/google_gemma-3-27b-it-GGUF", "Gemma 3 27B", 16500, 20000,
+        "Top-tier local answers; 24 GB GPU."),
+    _hf("qwen3-32b", "bartowski/Qwen_Qwen3-32B-GGUF", "Qwen3 32B", 19800, 23000,
+        "Among the smartest models that fit a 24 GB GPU."),
+    _hf("llama3.3-70b", "bartowski/Llama-3.3-70B-Instruct-GGUF", "Llama 3.3 70B", 42500, 46000,
+        "Smartest option here; needs ~48 GB of VRAM (or lots of RAM and patience)."),
 
     # ---- tts engines -----------------------------------------------------
     ModelEntry("espeak-ng", "tts", "eSpeak NG", "espeak-ng", 0, 20,

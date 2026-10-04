@@ -190,6 +190,7 @@ class Server:
             "training.intent_remove": lambda id: e.training.remove_intent_phrase(id),
             "ui.review": lambda: self.publish("show_review", {}),
             "ui.text_request": lambda: self.publish("show_text_request", {}),
+            "ui.popup": lambda kind, data=None: self.publish("popup", {"kind": kind, "data": data or {}}),
             "puppetry.macros": e.puppetry.macro_names,
             "desktop.apps": lambda: {"open": dk.open_apps(), "processes": dk.processes()[:400]},
             "audio.devices": audio_devices,

@@ -3,6 +3,8 @@
 { lib
 , python3
 , makeWrapper
+, stdenv
+, cmake
 , qt6
 , makeDesktopItem
 , copyDesktopItems
@@ -27,6 +29,18 @@
 let
   py = python3.pkgs;
   extras = callPackage ./python-extras.nix { inherit python3; };
+
+  # The overlay's layer-shell shim (native/, same as afterglow's clip indicator).
+  # LayerShellQt has a C++ API only, so a tiny C shim is loaded with ctypes. It must use
+  # the same Qt as PySide6 -- both come from this nixpkgs.
+  layerShell = if kdePackages != null && kdePackages ? layer-shell-qt then stdenv.mkDerivation {
+    pname = "jeeves-layershell";
+    version = "0.1.0";
+    src = ../native;
+    nativeBuildInputs = [ cmake ];
+    buildInputs = [ qt6.qtbase kdePackages.layer-shell-qt ];
+    dontWrapQtApps = true;
+  } else null;
 in
 py.buildPythonApplication {
   pname = "jeeves";
@@ -40,8 +54,15 @@ py.buildPythonApplication {
   nativeBuildInputs = [ makeWrapper copyDesktopItems ];
 
   makeWrapperArgs = [
-    # native Wayland for the settings window (the overlay prefers XWayland, see overlay.py)
-    "--prefix" "QT_PLUGIN_PATH" ":" (lib.makeSearchPath qt6.qtbase.qtPluginPrefix [ qt6.qtbase qt6.qtwayland ])
+    # native Wayland for the settings window and the indicator overlay
+    # (+ layer-shell-qt's wayland-shell-integration plugin for the indicator overlay)
+    "--prefix" "QT_PLUGIN_PATH" ":" (lib.makeSearchPath qt6.qtbase.qtPluginPrefix
+      ([ qt6.qtbase qt6.qtwayland ] ++ lib.optional (layerShell != null) kdePackages.layer-shell-qt))
+    # the daemon starts the overlay processes through this wrapper
+    "--set-default" "JEEVES_BIN" "${placeholder "out"}/bin/jeeves"
+  ] ++ lib.optionals (layerShell != null) [
+    "--set-default" "JEEVES_LAYERSHELL_LIB" "${layerShell}/lib/libjeeves_layershell.so"
+  ] ++ [
     "--prefix" "PATH" ":" (lib.makeBinPath ([
       whisper-cpp llama-cpp piper-tts espeak-ng tesseract wl-clipboard xclip libnotify
       pipewire pulseaudio grim kdotool

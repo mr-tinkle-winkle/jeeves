@@ -25,6 +25,17 @@ log = logging.getLogger("jeeves.models")
 KINDS = ("stt", "intent", "tts", "local_response")
 
 
+def runtime_available(engine: str) -> bool:
+    """Is the program/library that runs this kind of model installed?"""
+    import importlib.util
+    import shutil
+    if engine in ("vosk", "kokoro"):
+        return importlib.util.find_spec("vosk" if engine == "vosk" else "kokoro_onnx") is not None
+    exe = {"whisper.cpp": ("whisper-server", "whisper-cpp-server"), "llama.cpp": ("llama-server",),
+           "piper": ("piper",), "espeak-ng": ("espeak-ng", "espeak")}.get(engine)
+    return exe is None or any(shutil.which(x) for x in exe)
+
+
 class ModelUnavailable(RuntimeError):
     def __init__(self, kind: str, reason: str, queueable: bool = False) -> None:
         super().__init__(reason)
@@ -110,7 +121,8 @@ class ModelManager:
         entry = self._check(kind, self.model_id(kind, agent))
         threads = int(self.settings.get("models.threads", 0))
         ngl = int(self.settings.get("models.gpu_layers", 0))
-        return self._loaded(self._instance(entry, lambda: make_llm(entry, threads, ngl)), kind)
+        reasoning = self.settings.get("models.reasoning", "off")
+        return self._loaded(self._instance(entry, lambda: make_llm(entry, threads, ngl, reasoning)), kind)
 
     def tts(self, agent: dict[str, Any] | None = None) -> tuple[TTS, catalog.ModelEntry | None]:
         entry = self._check("tts", self.model_id("tts", agent))
@@ -253,7 +265,8 @@ class ModelManager:
         return {
             "kinds": kinds,
             "voice": self.model_id("tts_voice"),
-            "catalog": [dict(m.to_dict(), installed=is_installed(m)) for m in catalog.CATALOG],
+            "catalog": [dict(m.to_dict(), installed=is_installed(m), runtime=runtime_available(m.engine))
+                        for m in catalog.CATALOG],
             "downloads": self.downloads,
             "loaded": sorted(loaded),
         }

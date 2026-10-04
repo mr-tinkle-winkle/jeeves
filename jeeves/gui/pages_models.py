@@ -59,6 +59,10 @@ class ModelsPage(Page):
         self.b.number(p, "GPU layers (llama.cpp -ngl)", "models.gpu_layers", 0, 200, 1,
                       hint="0 = CPU only. Higher offloads more of the model to the GPU.")
         self.b.number(p, "CPU threads", "models.threads", 0, 128, 1, hint="0 = automatic")
+        self.b.choice(p, "Thinking models (Qwen3, gpt-oss)", "models.reasoning",
+                      [("Answer straight away (fast)", "off"), ("Think first when the model wants to (smarter, slower)", "auto")],
+                      hint="Thinking shows up in the indicator's thoughts view; it's never spoken. Takes effect "
+                           "when the model next loads (Unload all models now).")
         unload = CustomButton("Unload all models now")
         unload.clicked.connect(lambda: daemon.call("models.unload_all", None, None))
         p.addWidget(unload)
@@ -84,7 +88,9 @@ class ModelsPage(Page):
         box.addItem("(none)", None)
         for m in self.catalog:
             if m["kind"] == kind:
-                box.addItem(f"{m['name']}{'' if m['installed'] else '  — not downloaded'}", m["id"])
+                note = "" if m.get("runtime", True) else "  — engine not installed"
+                note = note or ("" if m["installed"] else "  — not downloaded")
+                box.addItem(f"{m['name']}{note}", m["id"])
         i = box.findData(cur)
         box.setCurrentIndex(max(0, i))
 
@@ -125,6 +131,8 @@ class ModelsPage(Page):
                 btn.setText("Cancel")
             else:
                 state.setText("✓ installed" if m["installed"] else (f"failed: {dl['error']}" if dl and dl.get("state") == "error" else ""))
+                if not m.get("runtime", True):
+                    state.setText(state.text() + "  (its engine isn't installed)")
                 btn.setText("Remove" if m["installed"] else "Download")
         self._st = st
 

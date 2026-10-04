@@ -55,7 +55,8 @@ def to_wav(pcm: bytes, rate: int = RATE) -> bytes:
 def capture_command(source: str, kind: str) -> list[str]:
     """kind: 'microphone' | 'desktop'."""
     if which("pw-record"):
-        cmd = ["pw-record", "--format", "s16", "--rate", str(RATE), "--channels", "1"]
+        # --raw: plain PCM on stdout (otherwise pw-record writes a WAV container)
+        cmd = ["pw-record", "--raw", "--format", "s16", "--rate", str(RATE), "--channels", "1"]
         if kind == "desktop":
             # capture the default output's monitor
             cmd += ["-P", "stream.capture.sink=true"]
@@ -108,7 +109,8 @@ def _player(raw: bool, rate: int, target: str) -> list[str]:
     if which("pw-play"):
         cmd = ["pw-play"]
         if raw:
-            cmd += ["--format", "s16", "--rate", str(rate), "--channels", "1"]
+            # --raw is required: without it pw-play parses stdin as a sound file and plays nothing
+            cmd += ["--raw", "--format", "s16", "--rate", str(rate), "--channels", "1"]
         if target:
             cmd += ["--target", target]
         return cmd + ["-"]
@@ -133,12 +135,13 @@ class Playback:
         self.paused = threading.Event()
         self.stopped = threading.Event()
         self.done = threading.Event()
+        self.error: str | None = None
 
     def play(self) -> None:
         procs = []
         try:
             procs = [subprocess.Popen(_player(True, self.rate, t), stdin=subprocess.PIPE,
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for t in self.targets]
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) for t in self.targets]
             step = self.rate * 2 // 20   # 50 ms chunks so pause/stop react quickly
             for i in range(0, len(self.pcm), step):
                 if self.stopped.is_set():
@@ -166,6 +169,11 @@ class Playback:
                     p.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     p.kill()
+                    continue
+                err = p.stderr.read() if p.stderr else b""
+                if p.returncode not in (0, None) and not self.stopped.is_set():
+                    self.error = (err or b"").decode(errors="replace").strip()[-300:] or f"exit {p.returncode}"
+                    log.warning("audio player %s failed: %s", p.args[0], self.error)
         finally:
             self.done.set()
 

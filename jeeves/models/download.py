@@ -70,6 +70,21 @@ def fetch(url: str, dest: Path, progress: Callable[[int, int], None] | None = No
     return dest
 
 
+def resolve_hf(repo: str, suffix: str) -> str:
+    """The download URL of the file in a Hugging Face repo whose name ends with suffix
+    (top-level files first; split multi-part files are skipped)."""
+    import json
+    req = urllib.request.Request(f"https://huggingface.co/api/models/{repo}", headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        files = [s["rfilename"] for s in json.loads(r.read().decode()).get("siblings", [])]
+    want = suffix.lower()
+    hits = [f for f in files if f.lower().endswith(want) and "-of-0" not in f]
+    if not hits:
+        raise FileNotFoundError(f"no *{suffix} file in {repo}")
+    hits.sort(key=lambda f: (f.count("/"), len(f)))
+    return f"https://huggingface.co/{repo}/resolve/main/{hits[0]}"
+
+
 def model_dir(entry: ModelEntry) -> Path:
     return paths.models_dir() / entry.kind / entry.id
 
@@ -97,7 +112,14 @@ def install(entry: ModelEntry, progress: Callable[[dict[str, Any]], None] | None
             if progress:
                 progress({"model": entry.id, "file": i + 1, "files": total_files, "done": done, "total": total})
 
-        fetch(f.url, target, report, cancel, f.sha256)
+        url = f.url or resolve_hf(f.hf_repo, f.hf_suffix)
+        try:
+            fetch(url, target, report, cancel, f.sha256)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404 or not f.hf_repo or not f.url:
+                raise
+            # the file was renamed upstream: look it up in the repo
+            fetch(resolve_hf(f.hf_repo, f.hf_suffix), target, report, cancel, f.sha256)
         if f.unzip:
             with zipfile.ZipFile(target) as z:
                 z.extractall(d)

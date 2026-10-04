@@ -13,9 +13,16 @@ everything here works without the settings GUI open.
 * Popups: Manual Response Review, Text Request, imported-function approval,
   typed answers, notices.
 
-Runs through XWayland when available (QT_QPA_PLATFORM=xcb): an X11 window can
-be override-redirect and stay above everything, which a plain Wayland client
-can't ask for.
+Two processes, both started by the daemon:
+
+* ``jeeves overlay`` -- the indicators, timers, screen marks and notices. On
+  Wayland they are layer-shell surfaces on the overlay layer (``layershell.py``,
+  the same way afterglow's clip indicator works); without the layer-shell shim
+  it falls back to XWayland override-redirect windows.
+* ``jeeves overlay --popups`` -- Manual Response Review, Text Request, typed
+  answers, thoughts and import approval: ordinary windows that need the
+  keyboard, so they can't live in the layer-shell process (that setting turns
+  every window of a process into a layer surface).
 """
 from __future__ import annotations
 
@@ -29,14 +36,14 @@ from typing import Any
 from .util import format_duration, graphical_env
 
 
-def _single_instance() -> Any:
+def _single_instance(name: str) -> Any:
     """One overlay per session: a second copy exits (the first keeps working and
     reconnects to a restarted daemon by itself)."""
     import fcntl
 
     from . import paths
     paths.ensure(paths.runtime_dir())
-    f = open(paths.runtime_dir() / "overlay.lock", "w")
+    f = open(paths.runtime_dir() / f"{name}.lock", "w")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -44,16 +51,24 @@ def _single_instance() -> Any:
     return f
 
 
-def main() -> int:
-    lock = _single_instance()
+def main(popups: bool = False) -> int:
+    lock = _single_instance("popups" if popups else "overlay")
     if lock is None:
         return 0
     env = graphical_env()
-    for k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"):
+    for k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP"):
         if k in env and k not in os.environ:
             os.environ[k] = env[k]
-    if "QT_QPA_PLATFORM" not in os.environ:
-        os.environ["QT_QPA_PLATFORM"] = "xcb" if os.environ.get("DISPLAY") else "wayland"
+    from . import layershell
+    use_layer = False
+    if not popups:
+        forced = os.environ.get("QT_QPA_PLATFORM", "")
+        if os.environ.get("WAYLAND_DISPLAY") and forced in ("", "wayland") and layershell.enable_in_this_process():
+            os.environ["QT_QPA_PLATFORM"] = "wayland"
+            use_layer = True
+        elif not forced:
+            # no layer-shell: XWayland override-redirect windows are the next best thing
+            os.environ["QT_QPA_PLATFORM"] = "xcb" if os.environ.get("DISPLAY") else "wayland"
 
     from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
     from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
@@ -66,7 +81,54 @@ def main() -> int:
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("jeeves-overlay")
+    app.setApplicationName("jeeves-popups" if popups else "jeeves-overlay")
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("jeeves.overlay").info("%s on %s (layer-shell: %s)", "popups" if popups else "indicators",
+                                             QGuiApplication.platformName(), use_layer)
+
+    def present(w: QWidget, edges: list[str], margins: tuple[int, int, int, int] = (0, 0, 0, 0)) -> None:
+        """Show an overlay window: a layer surface anchored to edges (Wayland), or
+        placed by geometry beforehand (X11). Re-anchors if the edges changed."""
+        key = (tuple(edges), tuple(margins))
+        if use_layer and w.isVisible() and getattr(w, "_layer_key", None) != key:
+            w.hide()
+        if not w.isVisible():
+            if use_layer:
+                w.winId()
+                win = w.windowHandle()
+                if getattr(w, "_layer_key", None) != key:
+                    layershell.configure(win, edges, margins)
+                    w._layer_key = key
+            w.show()
+
+    def set_input(w: QWidget, rects: list[Any]) -> None:
+        """Wayland layer surface: clicks only land on these rects; elsewhere they pass
+        through to the windows below (Qt maps the mask to the input region)."""
+        if not use_layer:
+            return
+        win = w.windowHandle()
+        if win is None:
+            return
+        from PySide6.QtGui import QRegion
+        key = tuple(tuple(int(v) for v in (r.left(), r.top(), r.width(), r.height())) for r in rects)
+        if key == getattr(w, "_input_key", None):
+            return
+        w._input_key = key
+        if rects:
+            region = QRegion()
+            for r in rects:
+                region = region.united(QRegion(r.toAlignedRect()))
+            win.setFlags(win.flags() & ~Qt.WindowTransparentForInput)
+            win.setMask(region)
+        else:
+            win.setMask(QRegion())
+            win.setFlags(win.flags() | Qt.WindowTransparentForInput)
+
+    def open_popup(kind: str, **data: Any) -> None:
+        """From the indicator process: ask the popups process to open a window."""
+        daemon.call("ui.popup", None, lambda _e: None, kind=kind, data=data)
+
     install_theme()
     daemon = Daemon()
     settings: dict[str, Any] = {}
@@ -122,14 +184,17 @@ def main() -> int:
             w = max(420, size * 8)
             rows = max(1, len(self.visible_states()))
             h = size * rows + 140
-            scr = QGuiApplication.primaryScreen().availableGeometry()
             corner = self.cfg("corner", "top-right")
             pad = 16
-            x = scr.x() + pad if "left" in corner else scr.x() + scr.width() - w - pad
-            y = scr.y() + pad if corner.startswith("top") else scr.y() + scr.height() - h - pad
-            self.setGeometry(int(x), int(y), int(w), int(h))
+            if use_layer:
+                self.resize(int(w), int(h))
+            else:
+                scr = QGuiApplication.primaryScreen().availableGeometry()
+                x = scr.x() + pad if "left" in corner else scr.x() + scr.width() - w - pad
+                y = scr.y() + pad if corner.startswith("top") else scr.y() + scr.height() - h - pad
+                self.setGeometry(int(x), int(y), int(w), int(h))
             if self.visible_states() or time.time() < max(self.transcript_until, self.response_until):
-                self.show()
+                present(self, layershell.corner_edges(corner), (pad, pad, pad, pad))
             else:
                 self.hide()
 
@@ -201,6 +266,7 @@ def main() -> int:
             if time.time() < self.response_until and self.response:
                 self._bubble(p, y, self.response, right, QColor(0, 0, 0, 230))
             p.end()
+            set_input(self, [r for r, _k, _i in self.hits])
 
         def _flash(self, period: float = 0.8) -> float:
             return 0.5 + 0.5 * math.sin(self.phase * 2 * math.pi / period)
@@ -325,12 +391,12 @@ def main() -> int:
                 return
             st = self.states.get(rid, {})
             if st.get("waiting") == "answer":
-                AnswerBox(rid, st.get("detail", ""), st.get("choices")).show()
+                open_popup("answer", request=rid, question=st.get("detail", ""), choices=st.get("choices"))
                 return
 
             def clicked(res: Any) -> None:
                 if res == "thoughts":
-                    Thoughts.open(rid, st)
+                    open_popup("thoughts", request=rid, state=st)
             daemon.call("indicator.click", clicked, lambda _e: None, request=rid)
 
     # ------------------------------------------------------------------ timers
@@ -357,9 +423,12 @@ def main() -> int:
                 self.hide()
                 return
             w, h = 260, 40 * len(self.items) + 8
-            scr = QGuiApplication.primaryScreen().availableGeometry()
-            self.setGeometry(scr.x() + scr.width() - w - 16, scr.y() + scr.height() - h - 16, w, h)
-            self.show()
+            if use_layer:
+                self.resize(w, h)
+            else:
+                scr = QGuiApplication.primaryScreen().availableGeometry()
+                self.setGeometry(scr.x() + scr.width() - w - 16, scr.y() + scr.height() - h - 16, w, h)
+            present(self, ["bottom", "right"], (16, 16, 16, 16))
 
         def paintEvent(self, _e: Any) -> None:
             p = QPainter(self)
@@ -398,11 +467,12 @@ def main() -> int:
             t.start()
 
         def add(self, m: dict[str, Any]) -> None:
-            geo = QGuiApplication.primaryScreen().virtualGeometry()
+            scr = QGuiApplication.primaryScreen()
+            geo = scr.geometry() if use_layer else scr.virtualGeometry()
             self.setGeometry(geo)
             m = dict(m, until=time.time() + float(m.get("seconds", 4)), born=time.time())
             self.marks.append(m)
-            self.show()
+            present(self, ["top", "bottom", "left", "right"])
 
         def _tick(self) -> None:
             now = time.time()
@@ -415,7 +485,7 @@ def main() -> int:
         def paintEvent(self, _e: Any) -> None:
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
-            geo = self.geometry()
+            geo = QGuiApplication.primaryScreen().geometry() if use_layer else self.geometry()
             for m in self.marks:
                 age = time.time() - m["born"]
                 r = float(m.get("radius", 40)) * (1 + 0.08 * math.sin(age * 6))
@@ -656,10 +726,13 @@ def main() -> int:
             super().__init__(None, flags_overlay() | Qt.WindowTransparentForInput)
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.text = text
-            scr = QGuiApplication.primaryScreen().availableGeometry()
-            self.setGeometry(scr.x() + (scr.width() - 520) // 2, scr.y() + 40, 520, 60)
-            QTimer.singleShot(5000, self.close)
-            self.show()
+            if use_layer:
+                self.resize(520, 60)
+            else:
+                scr = QGuiApplication.primaryScreen().availableGeometry()
+                self.setGeometry(scr.x() + (scr.width() - 520) // 2, scr.y() + 40, 520, 60)
+            QTimer.singleShot(6000, self.close)
+            present(self, ["top"], (40, 0, 0, 0))
 
         def paintEvent(self, _e: Any) -> None:
             p = QPainter(self)
@@ -671,9 +744,12 @@ def main() -> int:
             p.drawText(self.rect().adjusted(14, 0, -14, 0), Qt.AlignCenter | Qt.TextWordWrap, self.text)
             p.end()
 
-    indicator = Indicator()
-    timers_w = Timers()
-    marks = Marks()
+    if popups:
+        indicator = timers_w = marks = None
+    else:
+        indicator = Indicator()
+        timers_w = Timers()
+        marks = Marks()
     keep: list[Any] = []
 
     def popup(w: Any) -> None:
@@ -684,14 +760,26 @@ def main() -> int:
         w.activateWindow()
 
     def on_event(topic: str, data: Any) -> None:
-        if topic == "indicator":
-            indicator.update_state(data)
-        elif topic == "response":
-            indicator.show_response(data.get("text", ""))
-        elif topic == "timers":
-            timers_w.set_items(data)
-        elif topic == "mark":
-            marks.add(data)
+        if not popups:
+            if topic == "indicator":
+                indicator.update_state(data)
+            elif topic == "response":
+                indicator.show_response(data.get("text", ""))
+            elif topic == "timers":
+                timers_w.set_items(data)
+            elif topic == "mark":
+                marks.add(data)
+            elif topic == "notice":
+                keep.append(Notice(data.get("text", "")))
+            elif topic == "settings":
+                load_settings()
+            return
+        if topic == "popup":
+            d = data.get("data") or {}
+            if data.get("kind") == "answer":
+                popup(AnswerBox(d.get("request"), d.get("question", ""), d.get("choices")))
+            elif data.get("kind") == "thoughts":
+                Thoughts.open(d.get("request"), d.get("state") or {})
         elif topic == "thoughts" and Thoughts.current is not None and Thoughts.current.isVisible():
             Thoughts.current.on_thought(data)
         elif topic == "show_review":
@@ -707,10 +795,6 @@ def main() -> int:
             popup(ImportApproval(data))
         elif topic == "history" and Review.current is not None and Review.current.isVisible():
             Review.current.reload()
-        elif topic == "notice":
-            keep.append(Notice(data.get("text", "")))
-        elif topic == "settings":
-            load_settings()
 
     gone_since = [0.0]
 
@@ -729,13 +813,16 @@ def main() -> int:
     dog.start()
 
     def on_connected(ok: bool) -> None:
-        if ok:
+        if not ok:
+            return
+        if popups:
+            daemon.call("functions.pending", lambda reqs: [popup(ImportApproval(r)) for r in (reqs or [])],
+                        lambda _e: None)
+        else:
             load_settings()
             daemon.call("indicator.state", lambda states: [indicator.update_state(s) for s in (states or [])],
                         lambda _e: None)
             daemon.call("timers.list", timers_w.set_items, lambda _e: None)
-            daemon.call("functions.pending", lambda reqs: [popup(ImportApproval(r)) for r in (reqs or [])],
-                        lambda _e: None)
 
     daemon.event.connect(on_event)
     daemon.connected.connect(on_connected)
@@ -743,4 +830,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(popups="--popups" in sys.argv))
