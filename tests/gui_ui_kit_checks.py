@@ -7,6 +7,7 @@ from PySide6.QtGui import QEnterEvent, QColor, QPixmap
 app = QApplication([])
 from PySide6.QtGui import QCursor
 QCursor.setPos(4000, 4000)
+import sys, os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "jeeves", "gui"))
 import ui_kit
 from ui_kit import theme_config, ThemeSettings
 fails = []

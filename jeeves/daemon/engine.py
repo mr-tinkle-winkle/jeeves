@@ -872,7 +872,9 @@ class Engine:
         text = composed or (f"{message}\n\nContext:\n{convo}" if convo else message)
         ctx.trace("handoff", to=target, message=text)
         ctx.state("responding", f"Handing off to {receiver['name']}")
-        res = self.handle_text(text, target, source=f"handoff:{ctx.agent_id}", wait=True)
+        # the receiving agent can't hand off again (no ping-pong between agents)
+        res = self.handle_text(text, target, source=f"handoff:{ctx.agent_id}", wait=True,
+                               skip_functions={"handoff"})
         entry = self.history.get(res.get("id", "")) or {}
         return entry.get("response", "")
 
