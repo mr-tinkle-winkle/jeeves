@@ -127,10 +127,49 @@ class Engine:
             proc.terminate()
         self.pool.shutdown(wait=False, cancel_futures=True)
 
+    # ------------------------------------------------------------------ on/off switch
+    def is_on(self) -> bool:
+        return bool(self.settings.get("general.enabled", True))
+
+    def set_enabled(self, on: bool) -> bool:
+        """The master switch (GUI, `jeeves --toggle`, toggle keybind)."""
+        self.settings.set("general.enabled", bool(on))
+        self._apply_power()
+        self.apply_settings()
+        self.publish("settings", {"changed": ["general.enabled"]})
+        return self.is_on()
+
+    def toggle(self) -> bool:
+        return self.set_enabled(not self.is_on())
+
+    def _apply_power(self) -> None:
+        """Off: stop every agent, stop listening, unload every model (frees the memory).
+        On: reload the chosen models in the background."""
+        on = self.is_on()
+        if on == getattr(self, "_was_on", None):
+            return
+        first = not hasattr(self, "_was_on")
+        self._was_on = on
+        if on:
+            if not first:
+                self.models.preload()
+                self.publish("notice", {"text": "Jeeves is on"})
+        else:
+            self.abort()
+            self.models.unload_all()
+            self.publish("notice", {"text": "Jeeves is off -- all AI models unloaded"})
+
+    def _refuse_if_off(self) -> bool:
+        if self.is_on():
+            return False
+        self.publish("notice", {"text": "Jeeves is off (turn it on with jeeves --toggle)"})
+        return True
+
     def apply_settings(self) -> None:
         """Start/stop listeners to match settings (called after any change)."""
         if not self.start_io:
             return
+        self._apply_power()
         wanted = set()
         if self._needs_source("microphone"):
             wanted.add("microphone")
@@ -147,6 +186,8 @@ class Engine:
         self.publish("status", self.status())
 
     def _needs_source(self, source: str) -> bool:
+        if not self.is_on():
+            return False
         if source == "microphone":
             return True     # manual voice requests, answers, wake word
         if self.summary.enabled() and "desktop" in (self.settings.get("summary.sources") or []):
@@ -364,7 +405,7 @@ class Engine:
         return stt.transcribe(pcm, prompt=self.training.initial_prompt(), language=lang)
 
     def on_wake(self, source: str, name: str, conf: float, after: list[bytes]) -> None:
-        if self.sessions.get(source) is not None:
+        if self.sessions.get(source) is not None or not self.is_on():
             return
         aid = self.agent_by_name(name)
         if aid is None:
@@ -425,6 +466,8 @@ class Engine:
 
     def voice_request(self, agent_id: str | None) -> str:
         """Manual Voice Request: start listening now for this agent."""
+        if self._refuse_if_off():
+            raise ValueError("Jeeves is turned off")
         if agent_id is None:
             active = list(self.active_agents())
             if not active:
@@ -441,6 +484,8 @@ class Engine:
 
     def training_record(self, text: str) -> str:
         """Record the user reading a training phrase (ends after they stop talking)."""
+        if self._refuse_if_off():
+            raise ValueError("Jeeves is turned off")
         if "microphone" not in self.listeners:
             self.apply_settings()
         s = self.open_session("microphone", None, "training")
@@ -593,6 +638,8 @@ class Engine:
                     request_id: str | None = None, skip_functions: set[str] | None = None,
                     dry_run: bool = False, wait: bool = False) -> dict[str, Any]:
         text = text.strip()
+        if not dry_run and self._refuse_if_off():
+            return {"error": "Jeeves is turned off"}
         if agent_id is None:
             agent_id, rest, _ = self.split_agent(text)
             if agent_id is None:
@@ -811,7 +858,7 @@ class Engine:
         if snd:
             play_file(snd, self.settings.get("audio.speaker", ""))
         agent_id = t.get("agent") or next(iter(self.agents()), None)
-        if agent_id:
+        if agent_id and self.is_on():        # off: the sound and notification only, no voice
             entry = new_entry(f"[timer] {label}", agent_id, "timer")
             ctx = FunctionContext(self, agent_id, self.agents()[agent_id], entry)
             self.run_async(lambda: (ctx.say(f"{label} is done."), self.set_indicator(entry["id"], agent_id, "idle")))
@@ -835,6 +882,8 @@ class Engine:
             self.handle_text(t["request"], agent_id, source="trigger")
 
     def _model_back(self, kind: str) -> None:
+        if not self.is_on():
+            return
         with self._lock:
             pending, self.queue = self.queue, []
         for kind_, item in pending:
@@ -852,8 +901,12 @@ class Engine:
 
     # ------------------------------------------------------------------ keybinds
     def _keybind(self, action: str, params: dict[str, Any]) -> None:
-        if action == "abort":
+        if action == "toggle":
+            self.toggle()
+        elif action == "abort":
             self.abort()
+        elif not self.is_on():
+            self._refuse_if_off()
         elif action == "text_request":
             self.publish("show_text_request", {})
         elif action == "voice_request":
@@ -983,6 +1036,7 @@ class Engine:
     # ------------------------------------------------------------------ status
     def status(self) -> dict[str, Any]:
         return {
+            "enabled": self.is_on(),
             "agents": {aid: {"name": a.get("name"), "active": self.agent_active(a)} for aid, a in self.agents().items()},
             "listeners": {src: lst.status for src, lst in self.listeners.items()},
             "keyboard": self.keyboard.status if self.keyboard else "off",

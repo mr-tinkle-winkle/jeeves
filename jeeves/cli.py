@@ -7,6 +7,8 @@
     jeeves --manual_request=voice --agent=jeeves
     jeeves --review                          Manual Response Review popup
     jeeves --abort                           stop all agents, release all inputs
+    jeeves --toggle                          turn Jeeves (every AI) off / back on
+    jeeves on | jeeves off
     jeeves dry-run "Jeeves, open OBS"        what WOULD happen
     jeeves status | history | models | functions | dictionary
     jeeves import-functions manifest.json    (shows the approval popup)
@@ -61,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--agent")
     p.add_argument("--abort", action="store_true")
     p.add_argument("--review", action="store_true")
+    p.add_argument("--toggle", action="store_true", help="turn Jeeves (every AI) on or off")
     p.add_argument("command", nargs="?")
     p.add_argument("args", nargs="*")
     p.add_argument("-o", "--output")
@@ -71,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if a.abort:
             _print(ipc.call("abort"))
+            return 0
+        if a.toggle:
+            print("Jeeves is " + ("on" if ipc.call("power.toggle") else "off"))
             return 0
         if a.review:
             ipc.call("ui.review")
@@ -102,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd in ("dry-run", "dry_run"):
             entry = ipc.call("request.dry_run", text=" ".join(a.args), agent=a.agent, timeout=120)
             _print(entry if a.json else _describe(entry))
+        elif cmd in ("on", "off"):
+            print("Jeeves is " + ("on" if ipc.call("power.set", on=cmd == "on") else "off"))
         elif cmd == "status":
             _print(ipc.call("status"))
         elif cmd == "history":

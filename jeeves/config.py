@@ -64,6 +64,7 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
 
 DEFAULTS: dict[str, Any] = {
     "general": {
+        "enabled": True,                  # master switch: off = no listening, no models, no requests
         "end_of_speech_seconds": 1.2,     # silence before listening stops
         "mic_click_extend_seconds": 5.0,  # clicking the onscreen mic adds this
         "mic_hold_release_seconds": 1.0,  # after letting go of a held mic
@@ -128,6 +129,7 @@ DEFAULTS: dict[str, Any] = {
         # agent id -> combo
         "voice_keybinds": {"jeeves": ["KEY_LEFTMETA", "KEY_LEFTSHIFT", "KEY_J"]},
         "review_keybind": ["KEY_LEFTMETA", "KEY_LEFTSHIFT", "KEY_R"],
+        "toggle_keybind": [],             # turn Jeeves on/off (same as `jeeves --toggle`)
     },
     "run_command": {
         "confirm": True,

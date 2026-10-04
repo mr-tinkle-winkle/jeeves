@@ -71,3 +71,17 @@ def test_cli_reports_missing_daemon(capsys):
     from jeeves.cli import main
     assert main(["status"]) == 2
     assert "isn't running" in capsys.readouterr().err
+
+
+def test_cli_toggle(capsys):
+    srv, stop = start_server()
+    try:
+        from jeeves.cli import main
+        assert main(["--toggle"]) == 0
+        assert "off" in capsys.readouterr().out
+        assert ipc.call("power.get") is False
+        assert main(["on"]) == 0
+        assert "on" in capsys.readouterr().out
+    finally:
+        stop.set()
+        srv.engine.timers.stop()

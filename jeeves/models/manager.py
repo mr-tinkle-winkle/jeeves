@@ -82,7 +82,12 @@ class ModelManager:
             return self.settings.get("models.tts_voice")
         return self.settings.get(f"models.{kind}.model")
 
+    def enabled(self) -> bool:
+        return bool(self.settings.get("general.enabled", True))
+
     def _check(self, kind: str, model_id: str | None) -> catalog.ModelEntry:
+        if not self.enabled():
+            raise ModelUnavailable(kind, "Jeeves is turned off")
         if kind in self.suspended:
             raise ModelUnavailable(kind, f"{kind.replace('_', ' ')} model is unloaded while "
                                          f"{self.suspended[kind]} is open", queueable=True)
@@ -137,6 +142,8 @@ class ModelManager:
         return self._loaded(self._instance(entry, lambda: make_tts(entry)), "tts"), voice
 
     def wake_spotter(self) -> VoskWake | None:
+        if not self.enabled():
+            return None
         model = self.settings.get("wake_word.model")
         entry = catalog.get(model)
         if entry is None or entry.engine != "vosk" or not is_installed(entry):
@@ -251,6 +258,9 @@ class ModelManager:
         with self._lock:
             for inst in self.instances.values():
                 inst.unload()
+            if self.wake is not None:
+                self.wake.unload()
+        self.publish("models", self.status())
 
     # ---- status ----------------------------------------------------------
     def status(self) -> dict[str, Any]:
@@ -317,6 +327,8 @@ class ModelManager:
     def _resume(self, kind: str) -> None:
         log.info("%s model available again", kind)
         self.suspended.pop(kind, None)
+        if not self.enabled():
+            return
         # reload the global choice in the background so the next request is fast
         try:
             if kind == "stt":

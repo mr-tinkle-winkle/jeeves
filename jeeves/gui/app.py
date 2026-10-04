@@ -32,7 +32,7 @@ class MainWindow(QMainWindow):
         from .pages_misc import (AccountsPage, AppearancePage, DryRunPage, GeneralPage, HistoryPage,
                                  IndicatorsPage, TrainingPage, WikipediaPage)
         from .pages_models import ModelsPage
-        from .ui_kit import SegmentButton, Theme, compute_scale, crossfade_to_index, show_message
+        from .ui_kit import CustomCheckBox, SegmentButton, Theme, compute_scale, crossfade_to_index, show_message
 
         self._show_message = show_message
         self._compute_scale = compute_scale
@@ -79,6 +79,11 @@ class MainWindow(QMainWindow):
             side.addWidget(btn, 1)
             self.nav.addButton(btn, i)
             self.stack.addWidget(page)
+        # the master switch: off = every AI stops and unloads (same as `jeeves --toggle`)
+        self.power = CustomCheckBox("Jeeves on")
+        self.power.setToolTip("Off stops listening and unloads every AI model. Same as `jeeves --toggle`.")
+        self.power.toggled.connect(self._power_toggled)
+        side.addWidget(self.power)
         self.status = QLabel("Connecting to the daemon…")
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignCenter)
@@ -109,8 +114,18 @@ class MainWindow(QMainWindow):
                 return
             self.settings = res.get("value", {})
             self.locked = set(res.get("locked", []))
+            self.power.blockSignals(True)
+            self.power.setChecked(bool(self.settings.get("general", {}).get("enabled", True)))
+            self.power.setEnabled("general.enabled" not in self.locked)
+            self.power.blockSignals(False)
             self._refresh_page(self.stack.currentIndex())
         self.daemon.call("settings.get", got, lambda _e: None)
+
+    def _power_toggled(self, on: bool) -> None:
+        def failed(err: str) -> None:
+            self._show_message(self, "Jeeves", err)
+            self.reload()
+        self.daemon.call("power.set", None, failed, on=on)
 
     def _refresh_page(self, i: int) -> None:
         if self.settings and 0 <= i < len(self.pages):

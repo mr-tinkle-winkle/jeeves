@@ -67,6 +67,8 @@ class Keyboard:
             for agent, combo in (mr.get("voice_keybinds") or {}).items():
                 if combo:
                     out.append(("voice_request", {"agent": agent}, set(combo)))
+        if mr.get("toggle_keybind"):
+            out.append(("toggle", {}, set(mr["toggle_keybind"])))
         if mr.get("review_keybind"):
             out.append(("review", {}, set(mr["review_keybind"])))
         return out

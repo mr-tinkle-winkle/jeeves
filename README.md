@@ -54,6 +54,7 @@ Without NixOS: `pip install .[gui,input,wake,wikipedia]`, put `whisper-server`, 
 | Voice Request | keybind per agent, or `jeeves --manual_request=voice --agent=jeeves` |
 | Manual Response Review | keybind (Meta+Shift+R), or `jeeves --review` |
 | Abort | Pause key, or `jeeves --abort`: stops every agent, releases every Control Mode key/button |
+| Off switch | **Jeeves on** in the GUI sidebar, `jeeves --toggle` (or `jeeves on` / `jeeves off`), or a keybind under Listening & Keys. Off stops every agent, stops listening and unloads every AI model; timers still ring, without a voice. Dry runs keep working. |
 | Dry run | GUI **Dry Run** page, or `jeeves dry-run "Jeeves, open OBS"` |
 | Settings from a terminal | `jeeves get models`, `jeeves set wake_word.global_threshold 0.7` |
 | Functions | `jeeves functions`, `jeeves dictionary --agent jeeves`, `jeeves export-functions -o mine.json`, `jeeves import-functions theirs.json` |

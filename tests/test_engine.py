@@ -329,3 +329,26 @@ def test_puppetry_fire_and_save(engine, tmp_path):
     assert ok
     ok, _ = engine.puppetry.check({"code": "for i in"})
     assert not ok
+
+
+def test_off_switch_stops_everything(engine):
+    unloaded = []
+    engine.models.unload_all = lambda: unloaded.append(True)
+    assert engine.toggle() is False
+    assert unloaded
+    assert "error" in engine.handle_text("Jeeves, set a timer for 2 minutes")
+    assert engine.timers.list() == []
+    with pytest.raises(ValueError):
+        engine.voice_request("jeeves")
+    from jeeves.models.manager import ModelUnavailable
+    with pytest.raises(ModelUnavailable):
+        engine.models.stt()
+    assert engine.models.wake_spotter() is None
+    engine.on_wake("microphone", "jeeves", 0.99, [])
+    assert "microphone" not in engine.sessions
+    assert not engine._needs_source("microphone")
+    # dry runs still work (keyword matching, no models)
+    assert engine.dry_run("Jeeves, set a timer for 2 minutes")["function"] == "timers"
+    assert engine.toggle() is True
+    engine.handle_text("Jeeves, set a timer for 2 minutes", wait=True)
+    assert len(engine.timers.list()) == 1
