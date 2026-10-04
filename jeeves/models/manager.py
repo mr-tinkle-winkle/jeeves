@@ -54,6 +54,7 @@ class ModelManager:
         self.instances: dict[str, Any] = {}           # model id -> backend
         self.suspended: dict[str, str] = {}           # kind -> app that caused it
         self.downloads: dict[str, dict[str, Any]] = {}
+        self.gpu_offload: dict[str, dict[str, Any]] = {}     # model id -> last Auto GPU layers decision
         self._cancel: dict[str, threading.Event] = {}
         self.wake: VoskWake | None = None
         self._stop = threading.Event()
@@ -117,6 +118,26 @@ class ModelManager:
                 self.publish("models", self.status())
         return inst
 
+    def _gpu_layers_for(self, entry: catalog.ModelEntry) -> Any:
+        """The -ngl value for llama-server: a fixed number, or for "auto" a function
+        that measures free VRAM when the model actually loads."""
+        setting = self.settings.get("models.gpu_layers", "auto")
+        if setting != "auto":
+            try:
+                n = int(setting)
+            except (TypeError, ValueError):
+                n = 0
+            self.gpu_offload[entry.id] = {"layers": n, "why": "set by hand"}
+            return n
+
+        def resolve(model_path: Any, ctx_size: int) -> int:
+            n, info = hardware.auto_gpu_layers(model_path, ctx_size, self.hardware())
+            self.gpu_offload[entry.id] = dict(info, model=entry.name)
+            log.info("Auto GPU layers for %s: %s (%s)", entry.id, n, info.get("why"))
+            self.publish("models", self.status())
+            return n
+        return resolve
+
     def stt(self, agent: dict[str, Any] | None = None) -> STT:
         entry = self._check("stt", self.model_id("stt", agent))
         threads = int(self.settings.get("models.threads", 0))
@@ -125,7 +146,7 @@ class ModelManager:
     def llm(self, kind: str, agent: dict[str, Any] | None = None) -> LLM:
         entry = self._check(kind, self.model_id(kind, agent))
         threads = int(self.settings.get("models.threads", 0))
-        ngl = int(self.settings.get("models.gpu_layers", 0))
+        ngl = self._gpu_layers_for(entry)
         reasoning = self.settings.get("models.reasoning", "off")
         return self._loaded(self._instance(entry, lambda: make_llm(entry, threads, ngl, reasoning)), kind)
 
@@ -293,6 +314,7 @@ class ModelManager:
                              quality_label=catalog.QUALITY_LABELS.get(m.quality, ""))
                         for m in catalog.CATALOG],
             "hardware": hw,
+            "gpu_offload": self.gpu_offload,
             "downloads": self.downloads,
             "loaded": sorted(loaded),
         }

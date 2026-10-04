@@ -91,7 +91,7 @@ DEFAULTS: dict[str, Any] = {
         "tts": {"model": "espeak-ng", "unload_when_open": []},
         "tts_voice": "espeak-en",
         "local_response": {"model": None, "unload_when_open": [], "max_tokens": 512},
-        "gpu_layers": 0,                  # llama.cpp -ngl
+        "gpu_layers": "auto",             # llama.cpp -ngl: "auto" (fit free VRAM), 0 = CPU only, 99 = all
         "favorites": [],                  # starred models (shown first on the Models page)
         "reasoning": "off",               # thinking models: off (fast) | auto (think first, smarter)
         "threads": 0,                     # 0 = auto

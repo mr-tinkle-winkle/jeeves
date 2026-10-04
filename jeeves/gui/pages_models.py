@@ -5,7 +5,7 @@ from typing import Any
 
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from .ui_kit import CustomButton, CustomCheckBox, CustomLineEdit, show_message
+from .ui_kit import CustomButton, CustomCheckBox, CustomLineEdit, CustomSpinBox, show_message
 from .widgets import Binder, Page, combo, get_path as _get, label
 
 KIND_TITLES = {
@@ -73,9 +73,7 @@ class ModelsPage(Page):
                 self.b.number(s, "Longest answer (tokens)", "models.local_response.max_tokens", 64, 8192, 64)
 
         p = self.section("Performance")
-        self.b.number(p, "GPU layers (llama.cpp -ngl)", "models.gpu_layers", 0, 200, 1,
-                      hint="0 = CPU only; 99 = as much as fits. Only does anything if llama.cpp was built with a "
-                           "GPU backend (see Recommended, above).")
+        self._gpu_layers_row(p)
         self.b.number(p, "CPU threads", "models.threads", 0, 128, 1, hint="0 = automatic")
         self.b.choice(p, "Thinking models (Qwen3, gpt-oss)", "models.reasoning",
                       [("Answer straight away (fast)", "off"), ("Think first when the model wants to (smarter, slower)", "auto")],
@@ -116,6 +114,57 @@ class ModelsPage(Page):
         self.rows: dict[str, tuple[QLabel, CustomButton]] = {}
         self.finish()
 
+    def _gpu_layers_row(self, layout: QVBoxLayout) -> None:
+        """Auto / CPU only / All / a number."""
+        mode = combo()
+        for lab, v in (("Auto (recommended)", "auto"), ("CPU only", 0), ("All layers", 99), ("A number…", "n")):
+            mode.addItem(lab, v)
+        num = CustomSpinBox()
+        num.setRange(1, 200)
+        num.wheelEvent = lambda ev: ev.ignore()
+        box = QWidget()
+        h = QHBoxLayout(box)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(mode, 1)
+        h.addWidget(num)
+
+        def emit() -> None:
+            v = mode.currentData()
+            num.setVisible(v == "n")
+            self.b._emit("models.gpu_layers", num.value() if v == "n" else v)
+
+        def setter(v: Any) -> None:
+            if v in ("auto", 0, 99, None):
+                mode.setCurrentIndex(max(0, mode.findData("auto" if v is None else v)))
+                num.setVisible(False)
+            else:
+                mode.setCurrentIndex(mode.findData("n"))
+                num.setValue(int(v))
+                num.setVisible(True)
+        mode.activated.connect(lambda _i: emit())
+        num.editingFinished.connect(emit)
+        self.b.form_row(layout, "GPU layers", box, "models.gpu_layers", setter,
+                        hint="A model is a stack of layers that every word passes through. Layers on the GPU run "
+                             "many times faster than on the CPU, but each one takes VRAM (its share of the model plus "
+                             "its share of the conversation memory). Too many and the model won't load (out of "
+                             "memory); too few and the CPU half slows everything down. Auto measures free VRAM "
+                             "each time a model loads and puts as many layers on the GPU as fit. Only works if "
+                             "llama.cpp has a GPU backend (see Recommended, above).")
+        self.offload_label = label("")
+        self.offload_label.setContentsMargins(4, 0, 0, 4)
+        layout.addWidget(self.offload_label)
+
+    def _show_offload(self, st: dict[str, Any]) -> None:
+        lines = []
+        for mid, o in (st.get("gpu_offload") or {}).items():
+            name = o.get("model", mid)
+            if o.get("of"):
+                where = "all" if o.get("layers", 0) >= o["of"] else f"{o.get('layers', 0)} of {o['of']}"
+                lines.append(f"{name}: {where} layers on the GPU — {o.get('why', '')}")
+            else:
+                lines.append(f"{name}: {o.get('layers', 0)} layers on the GPU ({o.get('why', '')})")
+        self.offload_label.setText("Last load: " + "; ".join(lines) if lines else "")
+
     # ------------------------------------------------------------------ data
     def favorites(self) -> list[str]:
         return list((self._settings.get("models") or {}).get("favorites") or [])
@@ -147,6 +196,7 @@ class ModelsPage(Page):
             return
         self._st = st
         self.catalog = st["catalog"]
+        self._show_offload(st)
         self._fill(self.wake_model, "wake")
         for kind, (_t, cat_kind, _p) in KIND_TITLES.items():
             self._fill(self.kind_boxes[kind], cat_kind)
@@ -167,8 +217,8 @@ class ModelsPage(Page):
                          "<code>services.jeeves.acceleration = \"vulkan\";</code> (or \"cuda\" for NVIDIA, \"rocm\" "
                          "for AMD) and rebuild for much faster answers and bigger models.")
         elif hw["llama_gpu"]:
-            lines.append(f"llama.cpp can use the GPU ({', '.join(hw['llama_gpu'])}). Set GPU layers below "
-                         "(99 = as much as fits).")
+            lines.append(f"llama.cpp can use the GPU ({', '.join(hw['llama_gpu'])}). GPU layers (below) on Auto "
+                         "fits as much of each model on it as your free VRAM allows.")
         self.hw_label.setText("<br>".join(lines))
         for i in reversed(range(self.rec_layout.count())):
             w = self.rec_layout.itemAt(i).widget()

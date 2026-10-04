@@ -320,7 +320,7 @@ def strip_thinking(text: str) -> str:
 
 
 class LlamaCppLLM(LLM):
-    def __init__(self, entry: ModelEntry, threads: int = 0, gpu_layers: int = 0, ctx_size: int = 8192,
+    def __init__(self, entry: ModelEntry, threads: int = 0, gpu_layers: Any = 0, ctx_size: int = 8192,
                  reasoning: str = "off") -> None:
         self.entry = entry
         self.threads, self.gpu_layers, self.ctx_size = threads, gpu_layers, ctx_size
@@ -339,8 +339,9 @@ class LlamaCppLLM(LLM):
         self.server.port = free_port()
         cmd = [exe, "-m", str(model), "--host", "127.0.0.1", "--port", str(self.server.port), "-c",
                str(self.ctx_size), "-t", str(env_threads(self.threads))]
-        if self.gpu_layers:
-            cmd += ["-ngl", str(self.gpu_layers)]
+        # gpu_layers: a number, or a function(model_path, ctx_size) -> number (Auto)
+        ngl = self.gpu_layers(model, self.ctx_size) if callable(self.gpu_layers) else int(self.gpu_layers or 0)
+        cmd += ["-ngl", str(ngl)]
         # thinking models (Qwen3, gpt-oss): off = answer straight away (fast); auto = let them think
         cmd += ["--reasoning", self.reasoning if self.reasoning in ("on", "off", "auto") else "off"]
         self.server.start(cmd, "/health")
@@ -447,7 +448,7 @@ def make_stt(entry: ModelEntry, threads: int) -> STT:
     raise BackendError(f"{entry.id} isn't a speech-to-text model")
 
 
-def make_llm(entry: ModelEntry, threads: int, gpu_layers: int, reasoning: str = "off") -> LLM:
+def make_llm(entry: ModelEntry, threads: int, gpu_layers: Any, reasoning: str = "off") -> LLM:
     if entry.engine == "llama.cpp":
         return LlamaCppLLM(entry, threads, gpu_layers, reasoning=reasoning)
     if entry.engine == "endpoint":

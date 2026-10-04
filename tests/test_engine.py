@@ -443,3 +443,43 @@ def test_hardware_recommendations():
     assert gpicks["stt"]["id"] == "whisper-large-v3-turbo"
     assert hardware.fit(catalog.get("llama3.3-70b"), cpu) == "no"
     assert all(m.speed and m.quality for m in catalog.CATALOG)
+
+
+def _fake_gguf(path, size_mb, layers=36, emb=4096, heads=32, kv_heads=8):
+    import struct
+
+    def s(t):
+        b = t.encode()
+        return struct.pack("<Q", len(b)) + b
+    kv = [
+        s("general.architecture") + struct.pack("<I", 8) + s("qwen3"),
+        s("tokenizer.ggml.tokens") + struct.pack("<I", 9) + struct.pack("<IQ", 8, 3) + s("a") + s("b") + s("c"),
+        s("tokenizer.ggml.scores") + struct.pack("<I", 9) + struct.pack("<IQ", 6, 3) + struct.pack("<3f", 1, 2, 3),
+        s("qwen3.block_count") + struct.pack("<I", 4) + struct.pack("<I", layers),
+        s("qwen3.embedding_length") + struct.pack("<I", 4) + struct.pack("<I", emb),
+        s("qwen3.attention.head_count") + struct.pack("<I", 4) + struct.pack("<I", heads),
+        s("qwen3.attention.head_count_kv") + struct.pack("<I", 4) + struct.pack("<I", kv_heads),
+    ]
+    with open(path, "wb") as f:
+        f.write(b"GGUF" + struct.pack("<IQQ", 3, 0, len(kv)) + b"".join(kv))
+        f.truncate(int(size_mb * 1024 * 1024))
+
+
+def test_gguf_metadata_and_auto_gpu_layers(tmp_path):
+    from jeeves.models import gguf, hardware
+    p = tmp_path / "model.gguf"
+    _fake_gguf(p, 4000)
+    meta = gguf.metadata(p)
+    assert meta == {"arch": "qwen3", "block_count": 36, "embedding_length": 4096,
+                    "attention.head_count": 32, "attention.head_count_kv": 8}
+    hw = {"gpu_usable": True, "gpus": [{"vram_mb": 12000}], "vram_mb": 12000}
+    n, info = hardware.auto_gpu_layers(p, 8192, hw, free_mb=10000)
+    assert n == 99 and info["layers"] == 36                       # whole model fits
+    n, info = hardware.auto_gpu_layers(p, 8192, hw, free_mb=3000)
+    assert 0 < n < 36 and info["of"] == 36                        # part of it
+    # per layer: ~108 MB weights + 32 MB KV cache (8192 ctx x 8 heads x 256 x 2 bytes)
+    assert 130 < info["per_layer_mb"] < 150
+    n, _ = hardware.auto_gpu_layers(p, 8192, hw, free_mb=500)
+    assert n == 0                                                 # nothing fits
+    n, info = hardware.auto_gpu_layers(p, 8192, {"gpu_usable": False, "gpus": [{"vram_mb": 8000}]})
+    assert n == 0 and "backend" in info["why"]
