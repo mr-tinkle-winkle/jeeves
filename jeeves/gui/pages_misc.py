@@ -193,9 +193,8 @@ class AccountsPage(Page):
                       10, 0, suffix=" s")
         self.b.choice(g, "Default online AI", "functions.online_agent",
                       [("GPT (Codex)", "codex"), ("Gemini", "gemini"), ("Claude", "claude"), ("Grok", "grok")])
-        self.b.check(g, "Let Codex use its MCP servers", "functions.online_use_mcp",
-                     hint="Codex reads MCP servers from ~/.codex/config.toml; Gemini's API and the browser sites "
-                          "don't take MCP from Jeeves.")
+        g.addWidget(label("MCP: Codex uses the MCP servers in your Codex config (~/.codex/config.toml). "
+                          "Gemini's API and the browser sites don't take tools from Jeeves."))
         self.finish()
 
     def _status_row(self, layout: QVBoxLayout, name: str, button: str | None) -> None:

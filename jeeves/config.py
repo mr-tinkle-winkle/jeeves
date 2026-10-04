@@ -139,7 +139,6 @@ DEFAULTS: dict[str, Any] = {
         "blocked": {},                    # function -> [blocked statements]
         "global_enabled": {},             # function -> bool (master switch)
         "online_agent": "codex",          # codex | gemini | claude | grok
-        "online_use_mcp": False,
     },
     "memory": {"recent_count": 3, "long_term_limit": 200},
     "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"]},

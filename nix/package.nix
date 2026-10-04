@@ -36,16 +36,11 @@ py.buildPythonApplication {
   build-system = [ py.setuptools ];
   dependencies = [ py.pyside6 py.evdev ] ++ optionalPy [ "vosk" "libzim" ];
 
-  nativeBuildInputs = [ makeWrapper copyDesktopItems qt6.wrapQtAppsHook ];
-  buildInputs = [ qt6.qtbase qt6.qtwayland ];
-
-  # one wrapper with both the Qt plugin paths and the runtime PATH
-  dontWrapQtApps = true;
-  preFixup = ''
-    makeWrapperArgs+=("''${qtWrapperArgs[@]}")
-  '';
+  nativeBuildInputs = [ makeWrapper copyDesktopItems ];
 
   makeWrapperArgs = [
+    # native Wayland for the settings window (the overlay prefers XWayland, see overlay.py)
+    "--prefix" "QT_PLUGIN_PATH" ":" (lib.makeSearchPath qt6.qtbase.qtPluginPrefix [ qt6.qtbase qt6.qtwayland ])
     "--prefix" "PATH" ":" (lib.makeBinPath ([
       whisper-cpp llama-cpp piper-tts espeak-ng tesseract wl-clipboard xclip libnotify
       pipewire pulseaudio grim kdotool

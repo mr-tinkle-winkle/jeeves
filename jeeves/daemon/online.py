@@ -221,8 +221,6 @@ class Online:
         p = self.providers.get(name)
         if p is None:
             raise FunctionError(f"unknown online AI '{name}'")
-        if self.settings.get("functions.online_use_mcp") and name == "codex":
-            ctx.think("MCP: Codex CLI uses the MCP servers configured in ~/.codex/config.toml")
         return p.ask(prompt, ctx)
 
     def status(self) -> list[dict[str, Any]]:
