@@ -20,12 +20,13 @@
 , grim
 , kdotool
 , kdePackages ? null
+, callPackage
 , extraRuntimePackages ? [ ]
 }:
 
 let
   py = python3.pkgs;
-  optionalPy = names: lib.concatMap (n: lib.optional (py ? ${n}) py.${n}) names;
+  extras = callPackage ./python-extras.nix { inherit python3; };
 in
 py.buildPythonApplication {
   pname = "jeeves";
@@ -34,7 +35,7 @@ py.buildPythonApplication {
   src = lib.cleanSource ../.;
 
   build-system = [ py.setuptools ];
-  dependencies = [ py.pyside6 py.evdev ] ++ optionalPy [ "vosk" "libzim" ];
+  dependencies = [ py.pyside6 py.evdev ] ++ lib.filter (p: p != null) [ extras.vosk extras.libzim ];
 
   nativeBuildInputs = [ makeWrapper copyDesktopItems ];
 

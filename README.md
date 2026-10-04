@@ -117,7 +117,7 @@ jeeves daemon (systemd --user)          jeeves (GUI)        jeeves overlay (star
 Verified in the build sandbox (no audio hardware, no compositor, no GPU):
 - 72 tests: settings layering and NixOS locks, Run Command safety, the composition language, the Dictionary, intent (keyword path and a stubbed model with retry), the full request pipeline, clarifying questions, confirmations by click and by keyword, abort, extended prompt mode, handoff permissions, imports and approval, memory, ratings, timers and schedules, triggers, listening sessions (wake → request, answers, queued requests while STT is unloaded), the Puppetry socket and file formats, the socket protocol and the CLI. The GUI is built and every page opened offscreen.
 - The UI kit's own 26 checks (`tests/gui_ui_kit_checks.py`).
-- The flake's package evaluates and builds against nixos-unstable (2026-10-03), and the NixOS module evaluates into a test system.
+- The flake's package builds against nixos-unstable (2026-10-03), including Vosk and libzim (packaged from their PyPI wheels in `nix/python-extras.nix`, since nixpkgs has neither), and the NixOS module evaluates into a test system.
 
 Not yet exercised on a real desktop:
 - Real microphone/desktop capture, whisper-server, llama-server, Piper/Kokoro and Vosk with downloaded models. The model download URLs follow each project's published layout but couldn't be fetched from the sandbox.

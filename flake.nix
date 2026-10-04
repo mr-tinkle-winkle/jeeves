@@ -15,12 +15,12 @@
       });
 
       apps = forAll (pkgs: {
-        default = { type = "app"; program = "${self.packages.${pkgs.system}.jeeves}/bin/jeeves"; };
+        default = { type = "app"; program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.jeeves}/bin/jeeves"; };
       });
 
       nixosModules.default = { pkgs, ... }: {
         imports = [ ./nix/module.nix ];
-        services.jeeves.package = nixpkgs.lib.mkDefault self.packages.${pkgs.system}.jeeves;
+        services.jeeves.package = nixpkgs.lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.jeeves;
       };
 
       devShells = forAll (pkgs: {
