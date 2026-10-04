@@ -47,6 +47,10 @@ class ModelEntry:
     voice: str | None = None      # engine-specific voice name
     builtin: bool = False         # nothing to download (e.g. espeak-ng)
     language: str = "en"
+    speed: int = 3                # 1 (slow) .. 5 (instant), on a typical CPU
+    quality: int = 3              # 1 (basic) .. 5 (best): accuracy for STT, smarts for LLMs, naturalness for voices
+    params_b: float = 0.0         # LLMs: billions of parameters
+    active_b: float = 0.0         # LLMs: parameters used per word (mixture-of-experts are much lower)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -191,7 +195,45 @@ CATALOG: list[ModelEntry] = [
     _kokoro_voice("bm_fable", "Fable (UK, male)", "Storyteller."),
 ]
 
+# (speed, quality, params_b, active_b) -- speed is for a typical desktop CPU
+RATINGS: dict[str, tuple] = {
+    "vosk-small-en": (5, 3), "stt-match": (2, 4),
+    "whisper-tiny-en": (5, 2), "whisper-base-en": (4, 3), "whisper-small-en": (3, 4), "whisper-medium-en": (2, 4),
+    "whisper-large-v3-turbo-q5": (2, 5), "whisper-large-v3-turbo": (1, 5), "vosk-en-large": (4, 3),
+    "gemma3-270m": (5, 1, 0.27, 0.27), "smollm2-360m": (5, 1, 0.36, 0.36), "qwen2.5-0.5b": (5, 1, 0.5, 0.5),
+    "qwen3-0.6b": (5, 2, 0.6, 0.6), "llama3.2-1b": (4, 2, 1.2, 1.2), "gemma3-1b": (4, 2, 1.0, 1.0),
+    "qwen2.5-1.5b": (4, 2, 1.5, 1.5), "qwen3-1.7b": (4, 3, 1.7, 1.7), "qwen2.5-3b": (3, 3, 3.1, 3.1),
+    "llama3.2-3b": (3, 3, 3.2, 3.2), "qwen3-4b": (3, 3, 4.0, 4.0), "qwen2.5-7b": (2, 4, 7.6, 7.6),
+    "qwen3-8b": (2, 4, 8.2, 8.2), "gemma3-12b": (2, 4, 12.0, 12.0), "qwen2.5-14b": (2, 4, 14.8, 14.8),
+    "qwen3-14b": (2, 4, 14.8, 14.8), "gpt-oss-20b": (3, 4, 21.0, 3.6), "qwen3-30b-a3b": (3, 5, 30.5, 3.3),
+    "mistral-small-3.2-24b": (1, 4, 24.0, 24.0), "gemma3-27b": (1, 5, 27.0, 27.0), "qwen3-32b": (1, 5, 32.8, 32.8),
+    "llama3.3-70b": (1, 5, 70.0, 70.0),
+    "espeak-ng": (5, 1), "piper": (4, 4), "kokoro": (3, 5), "espeak-en": (5, 1), "espeak-en-gb": (5, 1),
+}
+for _m in CATALOG:
+    _r = RATINGS.get(_m.id)
+    if _r is None and _m.kind == "voice":
+        _r = {"piper": (4, 4), "kokoro": (3, 5)}.get(_m.engine, (5, 1))
+    if _r:
+        _m.speed, _m.quality = _r[0], _r[1]
+        if len(_r) > 2:
+            _m.params_b, _m.active_b = _r[2], _r[3]
+
 BY_ID = {m.id: m for m in CATALOG}
+
+SPEED_LABELS = {1: "slow", 2: "moderate", 3: "quick", 4: "fast", 5: "instant"}
+QUALITY_LABELS = {1: "basic", 2: "fair", 3: "good", 4: "very good", 5: "excellent"}
+
+
+def hardware_label(m: ModelEntry) -> str:
+    """Rough hardware tier for a model."""
+    gb = m.ram_mb / 1000
+    if gb <= 1.5:
+        return "Any computer"
+    if m.kind == "llm" and m.size_mb > 4000:
+        vram = (m.size_mb + 1000) / 1000
+        return f"{gb:.0f} GB RAM, or a {vram:.0f} GB GPU to be quick"
+    return f"{gb:.0f} GB RAM" if gb >= 2 else f"{gb:.1f} GB RAM"
 
 
 def get(model_id: str | None) -> ModelEntry | None:

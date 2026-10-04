@@ -16,7 +16,7 @@ import threading
 from typing import Any, Callable
 
 from ..daemon import desktop as dk
-from . import catalog
+from . import catalog, hardware
 from .backends import LLM, STT, TTS, BackendError, VoskWake, make_llm, make_stt, make_tts
 from .download import install, is_installed, uninstall
 
@@ -263,7 +263,19 @@ class ModelManager:
         self.publish("models", self.status())
 
     # ---- status ----------------------------------------------------------
+    def hardware(self) -> dict[str, Any]:
+        """Detected hardware, cached for a minute (it doesn't change while running)."""
+        import time
+        cached = getattr(self, "_hw", None)
+        if cached is None or time.time() - cached[0] > 60:
+            self._hw = cached = (time.time(), hardware.detect())
+        return cached[1]
+
+    def recommend(self) -> dict[str, Any]:
+        return hardware.recommend(self.hardware())
+
     def status(self) -> dict[str, Any]:
+        hw = self.hardware()
         with self._lock:
             loaded = {mid for mid, inst in self.instances.items() if inst.loaded()}
         kinds = {}
@@ -275,8 +287,12 @@ class ModelManager:
         return {
             "kinds": kinds,
             "voice": self.model_id("tts_voice"),
-            "catalog": [dict(m.to_dict(), installed=is_installed(m), runtime=runtime_available(m.engine))
+            "catalog": [dict(m.to_dict(), installed=is_installed(m), runtime=runtime_available(m.engine),
+                             fit=hardware.fit(m, hw), hardware=catalog.hardware_label(m),
+                             speed_label=catalog.SPEED_LABELS.get(m.speed, ""),
+                             quality_label=catalog.QUALITY_LABELS.get(m.quality, ""))
                         for m in catalog.CATALOG],
+            "hardware": hw,
             "downloads": self.downloads,
             "loaded": sorted(loaded),
         }

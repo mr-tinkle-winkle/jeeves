@@ -87,16 +87,50 @@ def main(popups: bool = False) -> int:
     logging.getLogger("jeeves.overlay").info("%s on %s (layer-shell: %s)", "popups" if popups else "indicators",
                                              QGuiApplication.platformName(), use_layer)
 
+    def target_screen() -> Any:
+        """Which monitor overlays appear on (Indicators > Screen): the primary one, the one
+        the mouse is on, or a named output. Layer surfaces without an output get one
+        chosen by the compositor -- often not the one you're looking at."""
+        choice = (settings.get("indicators") or {}).get("screen", "mouse") or "mouse"
+        screens = QGuiApplication.screens()
+        if choice not in ("mouse", "primary"):
+            named = next((sc for sc in screens if sc.name() == choice), None)
+            if named is not None:
+                return named
+        if choice == "mouse":
+            try:
+                from PySide6.QtCore import QPoint
+
+                from .daemon import desktop as dk
+                x, y = dk.mouse_position()
+                found = QGuiApplication.screenAt(QPoint(x, y))
+                if found is not None:
+                    return found
+            except Exception:  # noqa: BLE001 -- no kdotool/hyprctl: fall back to primary
+                pass
+        try:
+            from .daemon import desktop as dk
+            name = dk.primary_output()
+        except Exception:  # noqa: BLE001
+            name = None
+        named = next((sc for sc in screens if sc.name() == name), None) if name else None
+        return named or QGuiApplication.primaryScreen()
+
     def present(w: QWidget, edges: list[str], margins: tuple[int, int, int, int] = (0, 0, 0, 0)) -> None:
         """Show an overlay window: a layer surface anchored to edges (Wayland), or
-        placed by geometry beforehand (X11). Re-anchors if the edges changed."""
-        key = (tuple(edges), tuple(margins))
+        placed by geometry beforehand (X11). Re-anchors if the edges or screen changed.
+        The screen is chosen when the window appears, never while it is showing."""
+        screen = target_screen() if not w.isVisible() else getattr(w, "_screen", None)
+        key = (tuple(edges), tuple(margins), screen.name() if screen is not None else "")
         if use_layer and w.isVisible() and getattr(w, "_layer_key", None) != key:
             w.hide()
         if not w.isVisible():
+            w._screen = screen
             if use_layer:
                 w.winId()
                 win = w.windowHandle()
+                if screen is not None and win is not None and win.screen() is not screen:
+                    win.setScreen(screen)
                 if getattr(w, "_layer_key", None) != key:
                     layershell.configure(win, edges, margins)
                     w._layer_key = key
@@ -151,6 +185,7 @@ def main(popups: bool = False) -> int:
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setAttribute(Qt.WA_ShowWithoutActivating)
             self.setWindowTitle("Jeeves indicator")
+            self.setMouseTracking(True)
             self.states: dict[str, dict[str, Any]] = {}
             self.transcript = ""
             self.transcript_until = 0.0
@@ -160,6 +195,8 @@ def main(popups: bool = False) -> int:
             self.press_at = 0.0
             self.holding = False
             self.hits: list[tuple[QRectF, str, str]] = []   # rect, kind, request id
+            self.menu: dict[str, Any] | None = None          # right-click menu: {"rid", "anchor"}
+            self.menu_until = 0.0
             self.anim = QTimer(self)
             self.anim.setInterval(33)
             self.anim.timeout.connect(self._tick)
@@ -189,7 +226,7 @@ def main(popups: bool = False) -> int:
             if use_layer:
                 self.resize(int(w), int(h))
             else:
-                scr = QGuiApplication.primaryScreen().availableGeometry()
+                scr = target_screen().availableGeometry()
                 x = scr.x() + pad if "left" in corner else scr.x() + scr.width() - w - pad
                 y = scr.y() + pad if corner.startswith("top") else scr.y() + scr.height() - h - pad
                 self.setGeometry(int(x), int(y), int(w), int(h))
@@ -255,9 +292,9 @@ def main(popups: bool = False) -> int:
                 else:
                     self._spinner(p, rect, st)
                     self.hits.append((rect, "spinner", st["request"]))
-                label = st.get("agent_name") or ""
+                label = st.get("agent_name") or ("Listening" if stage == "listening" else "")
                 detail = st.get("detail") or ""
-                text = f"{label}: {detail}" if detail else label
+                text = f"{label}: {detail}" if detail and label else (detail or label)
                 self._label(p, rect, text, right)
                 y += size + 8
             if time.time() < self.transcript_until and self.transcript:
@@ -265,8 +302,41 @@ def main(popups: bool = False) -> int:
                 y += 40
             if time.time() < self.response_until and self.response:
                 self._bubble(p, y, self.response, right, QColor(0, 0, 0, 230))
+            self._paint_menu(p, right)
             p.end()
             set_input(self, [r for r, _k, _i in self.hits])
+
+        # -------------------------------------------------------------- right-click menu
+        def _paint_menu(self, p: QPainter, right: bool) -> None:
+            """Drawn inside this surface rather than as a QMenu popup window: popups
+            attached to layer surfaces aren't reliable across compositors."""
+            m = self.menu
+            if m is None:
+                return
+            if m["rid"] not in self.states or time.time() > self.menu_until:
+                self.menu = None
+                return
+            st = self.states[m["rid"]]
+            items = [("suspend", "Resume" if st.get("suspended") else "Suspend"), ("close", "Close")]
+            anchor: QRectF = m["anchor"]
+            w, ih = 150.0, 32.0
+            x = anchor.left() - w - 8 if right else anchor.right() + 8
+            box = QRectF(x, anchor.top(), w, ih * len(items) + 8)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(24, 24, 24, 245))
+            p.drawRoundedRect(box, 10, 10)
+            f = QFont()
+            f.setPointSize(11)
+            p.setFont(f)
+            for i, (action, text) in enumerate(items):
+                r = QRectF(box.left() + 4, box.top() + 4 + i * ih, w - 8, ih)
+                if self.menu.get("hover") == action:
+                    p.setBrush(QColor(255, 255, 255, 40))
+                    p.drawRoundedRect(r, 7, 7)
+                p.setPen(QColor("#ffffff"))
+                p.drawText(r.adjusted(12, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
+                p.setPen(Qt.NoPen)
+                self.hits.insert(0, (r, f"menu:{action}", m["rid"]))
 
         def _flash(self, period: float = 0.8) -> float:
             return 0.5 + 0.5 * math.sin(self.phase * 2 * math.pi / period)
@@ -288,6 +358,14 @@ def main(popups: bool = False) -> int:
             p.setBrush(Qt.NoBrush)
             p.drawArc(QRectF(c.x() - 11 * s, c.y() - 10 * s, 22 * s, 20 * s), 200 * 16, 140 * 16)
             p.drawLine(QPointF(c.x(), c.y() + 10 * s), QPointF(c.x(), c.y() + 15 * s))
+            if st.get("suspended"):
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(0, 0, 0, 150))
+                p.drawEllipse(r.adjusted(4, 4, -4, -4))
+                p.setBrush(QColor("#ffffff"))
+                c2 = r.center()
+                p.drawRect(QRectF(c2.x() - 7, c2.y() - 8, 5, 16))
+                p.drawRect(QRectF(c2.x() + 2, c2.y() - 8, 5, 16))
             if st.get("detail") == "held" or self.holding:
                 p.setPen(QPen(QColor("#ffcc00"), 3 * s))
                 p.drawEllipse(r.adjusted(2, 2, -2, -2))
@@ -315,12 +393,12 @@ def main(popups: bool = False) -> int:
                 p.drawArc(inner, 0, 360 * 16)
             pen = QPen(base, width, Qt.SolidLine, Qt.RoundCap)
             p.setPen(pen)
-            if stage in ("asking", "unavailable", "unclear") or st.get("paused"):
+            if stage in ("asking", "unavailable", "unclear") or st.get("paused") or st.get("suspended"):
                 p.drawArc(inner, 0, 360 * 16)
             else:
                 start = int((-self.phase * 360 * 1.4) % 360 * 16)
                 p.drawArc(inner, start, 270 * 16)
-            if st.get("paused"):
+            if st.get("paused") or st.get("suspended"):
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor("#ffffff"))
                 c = r.center()
@@ -368,17 +446,45 @@ def main(popups: bool = False) -> int:
 
         def mousePressEvent(self, e: Any) -> None:
             hit = self._hit(e.position())
+            if e.button() == Qt.RightButton:
+                if hit and hit[0] in ("mic", "spinner"):
+                    rect = next(r for r, k, i in self.hits if i == hit[1] and k == hit[0])
+                    self.menu = {"rid": hit[1], "anchor": QRectF(rect)}
+                    self.menu_until = time.time() + 10
+                else:
+                    self.menu = None
+                self.update()
+                return
             if hit and hit[0] == "mic":
                 self.press_at = time.time()
                 self.hold_timer.start()
+
+        def mouseMoveEvent(self, e: Any) -> None:
+            if self.menu is not None:
+                hit = self._hit(e.position())
+                hover = hit[0][5:] if hit and hit[0].startswith("menu:") else None
+                if hover != self.menu.get("hover"):
+                    self.menu["hover"] = hover
+                    self.update()
 
         def _start_hold(self) -> None:
             self.holding = True
             daemon.call("mic", None, lambda _e: None, action="hold")
 
         def mouseReleaseEvent(self, e: Any) -> None:
+            if e.button() == Qt.RightButton:
+                return
             hit = self._hit(e.position())
             self.hold_timer.stop()
+            if hit and hit[0].startswith("menu:"):
+                method = "request.suspend" if hit[0] == "menu:suspend" else "request.close"
+                daemon.call(method, None, lambda _e: None, request=hit[1])
+                self.menu = None
+                self.update()
+                return
+            if self.menu is not None:          # any other click dismisses the menu
+                self.menu = None
+                self.update()
             if self.holding:
                 self.holding = False
                 daemon.call("mic", None, lambda _e: None, action="release")
@@ -426,7 +532,7 @@ def main(popups: bool = False) -> int:
             if use_layer:
                 self.resize(w, h)
             else:
-                scr = QGuiApplication.primaryScreen().availableGeometry()
+                scr = target_screen().availableGeometry()
                 self.setGeometry(scr.x() + scr.width() - w - 16, scr.y() + scr.height() - h - 16, w, h)
             present(self, ["bottom", "right"], (16, 16, 16, 16))
 
@@ -467,7 +573,7 @@ def main(popups: bool = False) -> int:
             t.start()
 
         def add(self, m: dict[str, Any]) -> None:
-            scr = QGuiApplication.primaryScreen()
+            scr = target_screen()
             geo = scr.geometry() if use_layer else scr.virtualGeometry()
             self.setGeometry(geo)
             m = dict(m, until=time.time() + float(m.get("seconds", 4)), born=time.time())
@@ -485,7 +591,8 @@ def main(popups: bool = False) -> int:
         def paintEvent(self, _e: Any) -> None:
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
-            geo = QGuiApplication.primaryScreen().geometry() if use_layer else self.geometry()
+            geo = (getattr(self, "_screen", None) or QGuiApplication.primaryScreen()).geometry() if use_layer \
+                else self.geometry()
             for m in self.marks:
                 age = time.time() - m["born"]
                 r = float(m.get("radius", 40)) * (1 + 0.08 * math.sin(age * 6))
@@ -729,7 +836,7 @@ def main(popups: bool = False) -> int:
             if use_layer:
                 self.resize(520, 60)
             else:
-                scr = QGuiApplication.primaryScreen().availableGeometry()
+                scr = target_screen().availableGeometry()
                 self.setGeometry(scr.x() + (scr.width() - 520) // 2, scr.y() + 40, 520, 60)
             QTimer.singleShot(6000, self.close)
             present(self, ["top"], (40, 0, 0, 0))

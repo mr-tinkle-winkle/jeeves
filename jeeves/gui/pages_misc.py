@@ -45,6 +45,9 @@ class GeneralPage(Page):
                           "in your desktop's shortcut settings instead: jeeves --manual_request=text · "
                           "jeeves --manual_request=voice --agent=NAME · jeeves --review · jeeves --abort"))
         self.b.check(k, "Watch the keyboard for keybinds", "general.watch_keyboard_for_keybinds")
+        self.b.check(k, "Always listen for wake words", "wake_word.enabled",
+                     hint="Off: the microphone is only open during a Voice Request or while an agent waits for "
+                          "your answer. Voice Request: Unknown then works like a push-to-talk wake word.")
         self.combo_edit(k, "Abort (stops all agents, releases all inputs)", "general.abort_key", single=True)
         self.b.check(k, "Text Request keybind", "manual_request.text_keybind_enabled")
         self.combo_edit(k, "Text Request", "manual_request.text_keybind")
@@ -110,6 +113,8 @@ class GeneralPage(Page):
             if w:
                 w.setParent(None)
         self.b.items = [it for it in self.b.items if not it[0].startswith("manual_request.voice_keybinds.")]
+        self.combo_edit(self.voice_layout, "Voice Request: Unknown (say the agent's name)",
+                        "manual_request.voice_keybinds._unknown")
         for aid, a in (settings.get("agents") or {}).items():
             self.combo_edit(self.voice_layout, f"Voice Request: {a.get('name', aid)}",
                             f"manual_request.voice_keybinds.{aid}")
@@ -146,6 +151,13 @@ class IndicatorsPage(Page):
         self.b.choice(s, "Corner", "indicators.corner", [("Top right", "top-right"), ("Top left", "top-left"),
                                                          ("Bottom right", "bottom-right"),
                                                          ("Bottom left", "bottom-left")])
+        from PySide6.QtGui import QGuiApplication
+        screens = [(f"{sc.name()} ({sc.geometry().width()}×{sc.geometry().height()})", sc.name())
+                   for sc in QGuiApplication.screens()]
+        self.b.choice(s, "Screen", "indicators.screen",
+                      [("The one the mouse is on", "mouse"), ("Primary screen", "primary")] + screens,
+                      hint="Where indicators appear. 'The one the mouse is on' is picked each time an indicator "
+                           "appears (needs kdotool on KDE, which the NixOS package includes).")
         self.b.number(s, "Size", "indicators.size", 24, 160, 4, 0, suffix=" px")
         c = self.section("Colors")
         for key, title in (("thinking", "Thinking"), ("researching", "Researching"), ("responding", "Responding"),

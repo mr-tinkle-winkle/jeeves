@@ -23,7 +23,7 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ./package.nix { };
+      default = pkgs.callPackage ./package.nix { inherit (cfg) acceleration; };
       defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
       description = "The jeeves package.";
     };
@@ -36,6 +36,19 @@ in
         daemon can watch the keyboard for keybinds (read-only, never grabbed)
         and create the jeeves-keyboard / jeeves-mouse / jeeves-controller
         virtual devices for Control Mode.
+      '';
+    };
+
+    acceleration = lib.mkOption {
+      type = lib.types.nullOr (lib.types.enum [ "vulkan" "cuda" "rocm" ]);
+      default = null;
+      example = "vulkan";
+      description = ''
+        GPU backend for the local models (llama.cpp and whisper.cpp). null = CPU only
+        (prebuilt in the binary cache). "vulkan" works on NVIDIA, AMD and Intel GPUs;
+        "cuda" (NVIDIA, needs nixpkgs.config.allowUnfree) and "rocm" (AMD) can be faster but
+        may have to build from source; the Vulkan builds come from the binary cache.
+        Then set Models > GPU layers (99 = as much as fits).
       '';
     };
 

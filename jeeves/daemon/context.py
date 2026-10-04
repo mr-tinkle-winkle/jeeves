@@ -28,6 +28,7 @@ class FunctionContext:
         self.depth = depth
         self.settings = engine.settings
         self.cancel_event = threading.Event()
+        self.suspend_event = threading.Event()      # set = suspended (right-click > Suspend)
         self.spoke = False
         self.thoughts: list[str] = []
         self.looking_at: str = ""
@@ -35,10 +36,17 @@ class FunctionContext:
         self.stage = "thinking"
 
     # ---- cancellation ------------------------------------------------------
+    def gate(self) -> None:
+        """Block here while the request is suspended (until resumed or closed)."""
+        while self.suspend_event.is_set() and not self.cancel_event.is_set():
+            self.cancel_event.wait(0.1)
+
     def is_cancelled(self) -> bool:
+        self.gate()          # also pauses model output streams while suspended
         return self.cancel_event.is_set()
 
     def check_cancelled(self) -> None:
+        self.gate()
         if self.cancel_event.is_set():
             raise Cancelled()
 
@@ -53,6 +61,7 @@ class FunctionContext:
             return
         if self.cancel_event.wait(max(0.0, float(seconds))):
             raise Cancelled()
+        self.check_cancelled()
 
     # ---- trace / indicator ---------------------------------------------------
     def trace(self, kind: str, **data: Any) -> None:

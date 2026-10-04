@@ -200,3 +200,25 @@ def screen_size() -> tuple[int, int]:
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
     return 1920, 1080
+
+
+def primary_output() -> str | None:
+    """The desktop's own primary monitor name (Qt's idea of 'primary' on Wayland is just
+    the first output it was told about, which is often the wrong one)."""
+    if desktop() == "hyprland":
+        try:
+            mons = _hypr("monitors") or []
+            m = min(mons, key=lambda m: m.get("id", 99))
+            return m.get("name")
+        except (DesktopUnavailable, ValueError):
+            return None
+    if which("kscreen-doctor"):
+        try:
+            out = json.loads(run(["kscreen-doctor", "-j"], timeout=4).stdout or "{}")
+            enabled = [o for o in out.get("outputs", []) if o.get("enabled")]
+            if enabled:
+                best = min(enabled, key=lambda o: (o.get("priority") or 99))
+                return best.get("name")
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+    return None

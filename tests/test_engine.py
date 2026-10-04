@@ -352,3 +352,94 @@ def test_off_switch_stops_everything(engine):
     assert engine.toggle() is True
     engine.handle_text("Jeeves, set a timer for 2 minutes", wait=True)
     assert len(engine.timers.list()) == 1
+
+
+def test_suspend_and_close_a_request(engine):
+    engine.settings.set("agents.jeeves.functions", {"local_response": False})
+    res = engine.handle_text("Jeeves, the noodle thing")          # waits for an answer
+    assert wait_for(lambda: engine.waiters)
+    rid = res["id"]
+    assert engine.suspend(rid) is True
+    assert engine.indicators[rid]["suspended"] is True
+    assert engine.suspend(rid) is False
+    assert engine.close_request(rid)
+    assert wait_for(lambda: (engine.history.get(rid) or {}).get("status") == "aborted")
+    assert rid not in engine.indicators
+
+
+def test_suspended_request_pauses_until_resumed(engine):
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    entry = new_entry("x", "jeeves", "test")
+    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], entry)
+    ctx.suspend_event.set()
+    done = []
+    t = threading.Thread(target=lambda: (ctx.check_cancelled(), done.append(True)))
+    t.start()
+    time.sleep(0.3)
+    assert not done                       # blocked while suspended
+    ctx.suspend_event.clear()
+    t.join(2)
+    assert done
+
+
+def test_listening_session_suspend_and_close(engine):
+    s = engine.open_session("microphone", "jeeves", "request")
+    assert engine.suspend(s.request_id) is True and s.suspended
+    assert engine.close_request(s.request_id)
+    assert "microphone" not in engine.sessions and s.ended
+
+
+def test_replacing_a_session_clears_its_indicator(engine):
+    a = engine.open_session("microphone", "jeeves", "request")
+    b = engine.open_session("microphone", None, "request")
+    assert a.request_id not in engine.indicators and b.request_id in engine.indicators
+
+
+def test_voice_request_unknown_needs_a_name(engine, monkeypatch):
+    class STT:
+        def __init__(self, text):
+            self.text = text
+
+        def transcribe(self, pcm, prompt="", language="en"):
+            return self.text
+    rid = engine.voice_request(None)
+    s = engine.sessions["microphone"]
+    assert s.agent_id is None and s.request_id == rid
+    monkeypatch.setattr(engine.models, "stt", lambda agent=None: STT("Jeeves, set a timer for 6 minutes"))
+    s.feed(b"\0" * 960, True, time.time())
+    engine._finish_session(s)
+    assert wait_for(lambda: engine.timers.list())
+    notices = []
+    engine._publish_fn = lambda topic, data: notices.append((topic, data))
+    s2 = engine.open_session("microphone", None, "request")
+    monkeypatch.setattr(engine.models, "stt", lambda agent=None: STT("set a timer for 6 minutes"))
+    s2.feed(b"\0" * 960, True, time.time())
+    engine._finish_session(s2)
+    assert any(t == "notice" and "agent's name" in d["text"] for t, d in notices)
+
+
+def test_mic_only_listens_when_needed(engine):
+    engine.settings.set("wake_word.enabled", False)
+    assert not engine._needs_source("microphone")
+    engine.open_session("microphone", None, "request")
+    assert engine._needs_source("microphone")
+    engine.settings.set("wake_word.enabled", True)
+
+
+def test_hardware_recommendations():
+    from jeeves.models import catalog, hardware
+    cpu = {"ram_mb": 16000, "cpu_threads": 8, "gpus": [], "vram_mb": 0, "llama_gpu": [], "whisper_gpu": [],
+           "gpu_usable": False}
+    picks = hardware.recommend(cpu)["picks"]
+    assert picks["wake"]["id"] == "vosk-small-en"
+    assert catalog.get(picks["intent"]["id"]).speed >= 4
+    resp = catalog.get(picks["local_response"]["id"])
+    assert hardware.fit(resp, cpu) in ("cpu", "gpu")
+    gpu = dict(cpu, ram_mb=64000, gpus=[{"name": "x", "vram_mb": 24000}], vram_mb=24000, llama_gpu=["vulkan"],
+               whisper_gpu=["vulkan"], gpu_usable=True)
+    gpicks = hardware.recommend(gpu)["picks"]
+    assert catalog.get(gpicks["local_response"]["id"]).quality >= 5
+    assert gpicks["stt"]["id"] == "whisper-large-v3-turbo"
+    assert hardware.fit(catalog.get("llama3.3-70b"), cpu) == "no"
+    assert all(m.speed and m.quality for m in catalog.CATALOG)

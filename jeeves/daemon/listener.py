@@ -48,6 +48,7 @@ class Session:
     max_seconds: float = 60.0
     ended: bool = False
     text: str = ""                # training: the phrase being read
+    suspended: bool = False       # right-click > Suspend: stop taking audio until resumed
 
     def feed(self, frame: bytes, voiced: bool, now: float) -> None:
         self.frames.append(frame)
@@ -175,6 +176,8 @@ class Listener(threading.Thread):
                 eng.run_async(eng.on_utterance, self.source, utterance)
 
         session = eng.sessions.get(self.source)
+        if session is not None and session.suspended:
+            return
         if session is not None:
             session.feed(frame, voiced, now)
             if session.mode == "extended":

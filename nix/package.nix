@@ -24,10 +24,17 @@
 , kdePackages ? null
 , callPackage
 , extraRuntimePackages ? [ ]
+  # GPU backend for llama.cpp and whisper.cpp: null (CPU only, from the binary cache),
+  # "vulkan" (NVIDIA, AMD and Intel), "cuda" (NVIDIA; needs allowUnfree) or "rocm" (AMD)
+, acceleration ? null
 }:
 
 let
   py = python3.pkgs;
+  accel = flag: lib.optionalAttrs (acceleration == flag) { "${flag}Support" = true; };
+  gpuArgs = accel "vulkan" // accel "cuda" // accel "rocm";
+  llama = if acceleration == null then llama-cpp else llama-cpp.override gpuArgs;
+  whisper = if acceleration == null then whisper-cpp else whisper-cpp.override gpuArgs;
   extras = callPackage ./python-extras.nix { inherit python3; };
 
   # The overlay's layer-shell shim (native/, same as afterglow's clip indicator).
@@ -64,7 +71,7 @@ py.buildPythonApplication {
     "--set-default" "JEEVES_LAYERSHELL_LIB" "${layerShell}/lib/libjeeves_layershell.so"
   ] ++ [
     "--prefix" "PATH" ":" (lib.makeBinPath ([
-      whisper-cpp llama-cpp piper-tts espeak-ng tesseract wl-clipboard xclip libnotify
+      whisper llama piper-tts espeak-ng tesseract wl-clipboard xclip libnotify
       pipewire pulseaudio grim kdotool
     ] ++ lib.optional (kdePackages != null && kdePackages ? spectacle) kdePackages.spectacle
       ++ extraRuntimePackages))

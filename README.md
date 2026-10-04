@@ -52,6 +52,7 @@ Without NixOS: `pip install .[gui,input,wake,wikipedia]`, put `whisper-server`, 
 | Say an agent's name | "Jeeves, set a timer for ten minutes." |
 | Text Request | keybind (default Meta+J), or `jeeves --manual_request=text` |
 | Voice Request | keybind per agent, or `jeeves --manual_request=voice --agent=jeeves` |
+| Voice Request: Unknown | its own keybind, or `jeeves --manual_request=voice` with no agent: listens now, and you start with the agent's name ("Claude, …"). With **Always listen for wake words** off, the microphone is only open during voice requests and answers, so this is push-to-talk. |
 | Manual Response Review | keybind (Meta+Shift+R), or `jeeves --review` |
 | Abort | Pause key, or `jeeves --abort`: stops every agent, releases every Control Mode key/button |
 | Off switch | **Jeeves on** in the GUI sidebar, `jeeves --toggle` (or `jeeves on` / `jeeves off`), or a keybind under Listening & Keys. Off stops every agent, stops listening and unloads every AI model; timers still ring, without a voice. Dry runs keep working. |
@@ -61,7 +62,7 @@ Without NixOS: `pip install .[gui,input,wake,wikipedia]`, put `whisper-server`, 
 
 Keybinds read the keyboard read-only (never grabbed), like Puppetry. You can also bind the commands above in KDE/Hyprland shortcut settings instead.
 
-Onscreen: click the microphone to listen 5 s longer, hold it to keep listening until you let go (+1 s). Click a spinner to see the agent's thoughts (and what it's reading when researching), pause a response, or confirm a command.
+Onscreen: click the microphone to listen 5 s longer, hold it to keep listening until you let go (+1 s). Click a spinner to see the agent's thoughts (and what it's reading when researching), pause a response, or confirm a command. Right-click the microphone or a spinner for **Suspend** (pauses that request or listen, toggles to Resume) and **Close** (stops just that one). **Indicators → Screen** picks the monitor: the one the mouse is on (default), the desktop's primary, or a named output.
 
 ## Pipeline (summary of SPEC.md)
 
@@ -110,6 +111,10 @@ jeeves overlay --popups   -- Review, Text Request, answers, thoughts, import app
 - **Abort** stops all agents and releases every held Control Mode input.
 - **Indicator colors** were chosen so states are distinguishable: thinking gray, researching blue, responding black with white outline, asking for input flashing white, unclear purple, unavailable-model flashing red.
 - **TTS models** do exist and voices are generally tied to a specific model, so TTS model and TTS voice are separate settings.
+- **GPU.** nixpkgs' llama.cpp and whisper.cpp are CPU-only builds, so a GPU sits idle unless you set `services.jeeves.acceleration = "vulkan";` (works on NVIDIA, AMD and Intel; the Vulkan builds come from the binary cache), `"cuda"` or `"rocm"`. Then set **Models → GPU layers** to 99.
+- **Choosing models.** Every model is rated for speed and for smarts/accuracy/naturalness, and labelled with the RAM or GPU memory it needs. The Models page detects your RAM, CPU threads, GPUs and whether llama.cpp can use them. It recommends a wake word model, an STT model, a fast intent model, a responses model (plus faster and smarter alternatives) and a voice, each with a one-click **Use this**. The catalog can be filtered by kind and by what runs on your computer, sorted by capability, speed or size, and models can be starred as favorites (kept at the top of every list).
+- **Indicator screen.** On Wayland, Qt's "primary screen" is just the first monitor the compositor announced, which is why indicators kept landing on your second screen. Jeeves now asks KDE (`kscreen-doctor`) or Hyprland for the real primary, and by default uses the monitor the mouse is on.
+- **Right-click menu** is drawn inside the indicator's own surface rather than as a separate popup window, because popup windows attached to layer-shell surfaces aren't reliable across compositors.
 - **Models offered** (`jeeves/models/catalog.py`). Wake word: Vosk small (a grammar of just your call names), or "use the STT model". STT: Whisper tiny/base/small/medium/large-v3-turbo through whisper.cpp, and Vosk large. Text: Qwen2.5 0.5B/1.5B/3B/7B/14B and Llama 3.2 3B (GGUF through llama.cpp), or any OpenAI-compatible endpoint you already run (`endpoint:http://localhost:11434/v1|model`). TTS: Piper (9 English voices), Kokoro (7 voices; its engine isn't in the Nix package yet, and the Models page says so) and eSpeak NG. If the chosen voice fails, Jeeves falls back to eSpeak NG and shows the reason on screen.
 - **More text models.** Fastest: Gemma 3 270M, SmolLM2 360M, Qwen3 0.6B, Llama 3.2 1B, Gemma 3 1B, Qwen3 1.7B. Smartest: Qwen3 4B/8B/14B/32B, Gemma 3 12B/27B, gpt-oss 20B, Qwen3 30B-A3B (30B-class answers at about 3B speed), Mistral Small 3.2 24B, Llama 3.3 70B. These newer entries look up their exact file through the Hugging Face API at download time, so a renamed upload doesn't break them. Thinking models answer straight away by default; **Models → Thinking models** lets them think first (smarter, slower), and that reasoning goes to the thoughts view, never to speech.
 - **Model unloading** stops the model's server process, so the memory is actually freed. While a model is unloaded for an app, using it flashes the indicator red and queues the request (audio included) until the app closes.

@@ -18,9 +18,12 @@
         default = { type = "app"; program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.jeeves}/bin/jeeves"; };
       });
 
-      nixosModules.default = { pkgs, ... }: {
+      nixosModules.default = { config, pkgs, ... }: {
         imports = [ ./nix/module.nix ];
-        services.jeeves.package = nixpkgs.lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.jeeves;
+        services.jeeves.package = nixpkgs.lib.mkDefault
+          (self.packages.${pkgs.stdenv.hostPlatform.system}.jeeves.override {
+            inherit (config.services.jeeves) acceleration;
+          });
       };
 
       devShells = forAll (pkgs: {

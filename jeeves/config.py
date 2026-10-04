@@ -92,6 +92,7 @@ DEFAULTS: dict[str, Any] = {
         "tts_voice": "espeak-en",
         "local_response": {"model": None, "unload_when_open": [], "max_tokens": 512},
         "gpu_layers": 0,                  # llama.cpp -ngl
+        "favorites": [],                  # starred models (shown first on the Models page)
         "reasoning": "off",               # thinking models: off (fast) | auto (think first, smarter)
         "threads": 0,                     # 0 = auto
     },
@@ -114,6 +115,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "indicators": {
         "corner": "top-right",            # top-left | top-right | bottom-left | bottom-right
+        "screen": "mouse",                # mouse (the monitor the mouse is on) | primary | an output name
         "stt_active": True,
         "stt_output": True,
         "processing": True,
@@ -126,8 +128,8 @@ DEFAULTS: dict[str, Any] = {
         "text_keybind_enabled": True,
         "text_keybind": ["KEY_LEFTMETA", "KEY_J"],
         "voice_keybind_enabled": True,
-        # agent id -> combo
-        "voice_keybinds": {"jeeves": ["KEY_LEFTMETA", "KEY_LEFTSHIFT", "KEY_J"]},
+        # agent id -> combo; "_unknown" = Voice Request: Unknown (say the agent's name)
+        "voice_keybinds": {"jeeves": ["KEY_LEFTMETA", "KEY_LEFTSHIFT", "KEY_J"], "_unknown": []},
         "review_keybind": ["KEY_LEFTMETA", "KEY_LEFTSHIFT", "KEY_R"],
         "toggle_keybind": [],             # turn Jeeves on/off (same as `jeeves --toggle`)
     },

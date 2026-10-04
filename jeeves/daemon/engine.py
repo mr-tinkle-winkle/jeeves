@@ -87,6 +87,7 @@ class Engine:
         self.imports = Imports(self.registry, self.publish)
         self.keyboard: Keyboard | None = Keyboard(self.settings, self._keybind) if start_io else None
         self._lock = threading.RLock()
+        self._apply_lock = threading.Lock()
         self.active: dict[str, FunctionContext] = {}       # request id -> ctx
         self.indicators: dict[str, dict[str, Any]] = {}     # request id -> indicator state
         self.sessions: dict[str, Session] = {}              # audio source -> open session
@@ -169,6 +170,10 @@ class Engine:
         """Start/stop listeners to match settings (called after any change)."""
         if not self.start_io:
             return
+        with self._apply_lock:
+            self._apply_settings_locked()
+
+    def _apply_settings_locked(self) -> None:
         self._apply_power()
         wanted = set()
         if self._needs_source("microphone"):
@@ -189,7 +194,16 @@ class Engine:
         if not self.is_on():
             return False
         if source == "microphone":
-            return True     # manual voice requests, answers, wake word
+            # only while something needs it: always-on wake words, the summary log, keyword
+            # triggers, or a voice request / question that is listening right now
+            if self.sessions.get("microphone") is not None or self.waiters:
+                return True
+            if self.summary.enabled() and "microphone" in (self.settings.get("summary.sources") or []):
+                return True
+            if any(t.get("event") == "audio_keyword" and t.get("source", "microphone") in ("microphone", "both")
+                   for t in self.triggers.all()):
+                return True
+            return bool(self.settings.get("wake_word.enabled", True) and self.call_names("microphone"))
         if self.summary.enabled() and "desktop" in (self.settings.get("summary.sources") or []):
             return True
         if any(t.get("event") == "audio_keyword" and t.get("source") in ("desktop", "both")
@@ -228,6 +242,10 @@ class Engine:
         state = {"request": request_id, "agent": agent_id, "agent_name": agent.get("name", ""),
                  "color": agent.get("indicator_color"), "stage": stage, "detail": detail, "time": time.time()}
         state.update(extra)
+        ctx = self.active.get(request_id)
+        session = next((s for s in self.sessions.values() if s.request_id == request_id), None)
+        state["suspended"] = bool((ctx is not None and ctx.suspend_event.is_set()) or
+                                  (session is not None and session.suspended))
         with self._lock:
             if stage == "idle":
                 self.indicators.pop(request_id, None)
@@ -358,6 +376,8 @@ class Engine:
             if old is not None:
                 old.ended = True
             self.sessions[source] = s
+        if old is not None:                      # its indicator goes with it
+            self.set_indicator(old.request_id, old.agent_id, "idle")
         stage = "listening"
         self.set_indicator(s.request_id, agent_id, stage, "extended prompt mode" if mode == "extended" else "",
                            source=source, mode=mode)
@@ -368,6 +388,7 @@ class Engine:
             if self.sessions.get(s.source) is s:
                 del self.sessions[s.source]
         s.ended = True
+        self.run_async(self.apply_settings)      # the mic may not be needed any more
         if not s.got_speech:
             self.set_indicator(s.request_id, s.agent_id, "idle")
             return
@@ -468,28 +489,27 @@ class Engine:
         """Manual Voice Request: start listening now for this agent."""
         if self._refuse_if_off():
             raise ValueError("Jeeves is turned off")
-        if agent_id is None:
-            active = list(self.active_agents())
-            if not active:
-                raise ValueError("no agents are enabled")
-            agent_id = active[0]
-        if agent_id not in self.agents():
+        if agent_id in (None, "", "_unknown", "unknown"):
+            # Voice Request: Unknown -- listen now; the agent is whoever you name ("Jeeves, ...")
+            agent_id = None
+        elif agent_id not in self.agents():
             raise ValueError(f"no agent '{agent_id}'")
         if "stt" in self.models.suspended:
             self.flash_unavailable(agent_id, f"speech recognition is unloaded while {self.models.suspended['stt']} is open")
-        if "microphone" not in self.listeners:
-            self.apply_settings()
         s = self.open_session("microphone", agent_id, "request")
+        if agent_id is None:
+            self.set_indicator(s.request_id, None, "listening", "say an agent's name first",
+                               source="microphone", mode="request")
+        self.apply_settings()                    # starts the mic if it wasn't already listening
         return s.request_id
 
     def training_record(self, text: str) -> str:
         """Record the user reading a training phrase (ends after they stop talking)."""
         if self._refuse_if_off():
             raise ValueError("Jeeves is turned off")
-        if "microphone" not in self.listeners:
-            self.apply_settings()
         s = self.open_session("microphone", None, "training")
         s.text = text
+        self.apply_settings()
         return s.request_id
 
     # ------------------------------------------------------------------ extended prompt mode
@@ -566,6 +586,7 @@ class Engine:
         rid = ctx.entry["id"]
         with self._lock:
             self.waiters[rid] = w
+        self.run_async(self.apply_settings)      # make sure the mic is listening for the answer
         ctx.state(stage, detail, waiting=w.kind, choices=w.choices, **extra)
         try:
             deadline = time.time() + timeout
@@ -578,6 +599,7 @@ class Engine:
         finally:
             with self._lock:
                 self.waiters.pop(rid, None)
+            self.run_async(self.apply_settings)
             ctx.state("thinking")
 
     def _deliver_answer(self, agent_id: str | None, text: str) -> None:
@@ -610,6 +632,53 @@ class Engine:
         elif text is not None:
             self._deliver_answer(w.ctx.agent_id, text)
         return True
+
+    def suspend(self, request_id: str) -> bool:
+        """Right-click > Suspend / Resume. A running request pauses at its next step (speech
+        pauses, model output stops streaming); a listening session stops taking audio.
+        Returns True when it is now suspended."""
+        with self._lock:
+            ctx = self.active.get(request_id)
+            session = next((s for s in self.sessions.values() if s.request_id == request_id), None)
+        if ctx is not None:
+            now_suspended = not ctx.suspend_event.is_set()
+            if now_suspended:
+                ctx.suspend_event.set()
+            else:
+                ctx.suspend_event.clear()
+            if ctx.playback is not None:
+                if now_suspended:
+                    ctx.playback.paused.set()
+                else:
+                    ctx.playback.paused.clear()
+            ctx.trace("suspended" if now_suspended else "resumed")
+            st = self.indicators.get(request_id, {})
+            self.set_indicator(request_id, ctx.agent_id, st.get("stage", ctx.stage), st.get("detail", ""))
+            return now_suspended
+        if session is not None:
+            session.suspended = not session.suspended
+            if not session.suspended:
+                session.started = session.last_voice = time.time()   # fresh silence timer
+            self.set_indicator(session.request_id, session.agent_id, "listening",
+                               "suspended" if session.suspended else "", source=session.source, mode=session.mode)
+            return session.suspended
+        raise KeyError(request_id)
+
+    def close_request(self, request_id: str) -> bool:
+        """Right-click > Close: stop this one request (or listening session) only."""
+        with self._lock:
+            ctx = self.active.get(request_id)
+            session = next((s for s in self.sessions.values() if s.request_id == request_id), None)
+            if session is not None:
+                self.sessions.pop(session.source, None)
+        if ctx is not None:
+            ctx.suspend_event.clear()
+            ctx.cancel()
+        if session is not None:
+            session.ended = True
+            self.run_async(self.apply_settings)
+        self.set_indicator(request_id, ctx.agent_id if ctx else (session.agent_id if session else None), "idle")
+        return ctx is not None or session is not None
 
     def indicator_click(self, request_id: str) -> str:
         """Clicking an indicator: responding -> pause/resume, asking -> confirm
@@ -645,8 +714,9 @@ class Engine:
             if agent_id is None:
                 if dry_run:
                     raise ValueError("start with an agent's name, e.g. 'Jeeves, set a timer for 5 minutes'")
-                self.publish("notice", {"text": "Start a text request with an agent's name, "
-                                                "e.g. “Jeeves, set a timer for 5 minutes”."})
+                heard = f" (heard: “{text}”)" if source.startswith("voice") else ""
+                self.publish("notice", {"text": "Start with an agent's name, e.g. “Jeeves, set a timer for "
+                                                f"5 minutes”{heard}."})
                 return {"error": "no agent named in the request"}
             text = rest or text
         agent = self.agents().get(agent_id)
