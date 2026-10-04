@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QLabel, QListWidget, QPlainTextEdit, QVBoxLayout, 
 from .common import JEEVES_THEME_DEFAULTS
 from .ui_kit import (CustomButton, CustomLineEdit, ThemeEditorGroup, ThemeSettings,
                      get_settings, show_message)
-from .widgets import Binder, Page, combo, label, row
+from .widgets import discard, Binder, Page, combo, label, row
 
 
 def combo_text(keys: list[str] | None) -> str:
@@ -111,7 +111,7 @@ class GeneralPage(Page):
         for i in reversed(range(self.voice_layout.count())):
             w = self.voice_layout.itemAt(i).widget()
             if w:
-                w.setParent(None)
+                discard(w)
         self.b.items = [it for it in self.b.items if not it[0].startswith("manual_request.voice_keybinds.")]
         self.combo_edit(self.voice_layout, "Voice Request: Unknown (say the agent's name)",
                         "manual_request.voice_keybinds._unknown")
@@ -120,14 +120,18 @@ class GeneralPage(Page):
                             f"manual_request.voice_keybinds.{aid}")
 
         def devices(d: Any) -> None:
-            for box, items, first in ((self.mic, d.get("sources", []), ("Default", "")),
-                                      (self.desk, [x for x in d.get("sources", []) if x.endswith(".monitor")],
-                                       ("Default output's monitor", "@DEFAULT_MONITOR@")),
-                                      (self.spk, d.get("sinks", []), ("Default", ""))):
+            devs = d.get("devices") or [{"name": n, "description": n,
+                                         "kind": "output" if n.endswith(".monitor") else "microphone"}
+                                        for n in d.get("sources", [])]
+            mics = [(x["description"], x["name"]) for x in devs if x["kind"] == "microphone"]
+            outs = [(f"{x['description']}", x["name"]) for x in devs if x["kind"] == "output"]
+            for box, items, first in ((self.mic, mics, ("Default", "")),
+                                      (self.desk, outs, ("Default output's monitor", "@DEFAULT_MONITOR@")),
+                                      (self.spk, [(n, n) for n in d.get("sinks", [])], ("Default", ""))):
                 box.clear()
                 box.addItem(*first)
-                for it in items:
-                    box.addItem(it, it)
+                for text, value in items:
+                    box.addItem(text, value)
             self.b.load(settings, locked)
         self.daemon.call("audio.devices", devices, lambda _e: self.b.load(settings, locked))
         self.daemon.call("memory.list", lambda notes: self.memory_view.setPlainText(

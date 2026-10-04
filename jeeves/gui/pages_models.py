@@ -6,7 +6,7 @@ from typing import Any
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from .ui_kit import CustomButton, CustomCheckBox, CustomLineEdit, CustomSpinBox, show_message
-from .widgets import Binder, Page, combo, get_path as _get, label
+from .widgets import Binder, Page, clear_layout, combo, get_path as _get, label
 
 KIND_TITLES = {
     "stt": ("Speech to text", "stt", "models.stt.model"),
@@ -208,6 +208,10 @@ class ModelsPage(Page):
     def _got_recs(self, res: Any) -> None:
         if not res:
             return
+        sig = repr((res, (self._settings.get("models") or {}), (self._settings.get("wake_word") or {}).get("model")))
+        if sig == getattr(self, "_recs_sig", None):
+            return
+        self._recs_sig = sig
         hw, picks = res["hardware"], res["picks"]
         self.recs = picks
         gpus = ", ".join(f"{g['name']} ({g['vram_mb'] / 1000:.0f} GB)" for g in hw["gpus"]) or "none detected"
@@ -220,10 +224,7 @@ class ModelsPage(Page):
             lines.append(f"llama.cpp can use the GPU ({', '.join(hw['llama_gpu'])}). GPU layers (below) on Auto "
                          "fits as much of each model on it as your free VRAM allows.")
         self.hw_label.setText("<br>".join(lines))
-        for i in reversed(range(self.rec_layout.count())):
-            w = self.rec_layout.itemAt(i).widget()
-            if w:
-                w.setParent(None)
+        clear_layout(self.rec_layout)
         roles = [("wake", "Wake word", "wake_word.model"), ("stt", "Speech to text", "models.stt.model"),
                  ("intent", "Intention processing", "models.intent.model"),
                  ("local_response", "Local responses", "models.local_response.model"),
@@ -244,8 +245,12 @@ class ModelsPage(Page):
             h.addWidget(label(f"<b>{title}:</b> {pick['name']} — {pick['why']}"), 1)
             h.addWidget(use, 0)
             self.rec_layout.addWidget(line)
-        if self.catalog:
-            self._got(self._st)
+        if self.catalog:                 # mark the recommended entries in the choosers
+            self._fill(self.wake_model, "wake")
+            for kind, (_t, cat_kind, _p) in KIND_TITLES.items():
+                self._fill(self.kind_boxes[kind], cat_kind)
+            self._fill(self.voice_box, "voice")
+            self.b.load(self._settings, self._locked)
 
     def _use(self, path: str, mid: str) -> None:
         m = next((m for m in self.catalog if m["id"] == mid), None)
@@ -260,14 +265,18 @@ class ModelsPage(Page):
         self.b.send({"models.favorites": favs})
 
     def _render_catalog(self) -> None:
-        for i in reversed(range(self.catalog_layout.count())):
-            w = self.catalog_layout.itemAt(i).widget()
-            if w:
-                w.setParent(None)
-        self.rows = {}
         favs = self.favorites()
         kind, fitf, sort = self.f_kind.currentData(), self.f_fit.currentData(), self.f_sort.currentData()
         q = self.f_search.text().lower().strip()
+        # nothing that's drawn changed: just refresh download states (UI guide pitfall 14)
+        sig = (tuple(favs), kind, fitf, sort, q, self.f_fav.isChecked(),
+               tuple((m["id"], m["installed"], m.get("fit"), m.get("runtime")) for m in self.catalog))
+        if sig == getattr(self, "_catalog_sig", None):
+            self._update_rows()
+            return
+        self._catalog_sig = sig
+        clear_layout(self.catalog_layout)
+        self.rows = {}
         items = []
         for m in self.catalog:
             if m["builtin"] and not m["files"] and m["kind"] != "voice":

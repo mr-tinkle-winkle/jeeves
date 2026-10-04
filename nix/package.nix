@@ -56,7 +56,7 @@ py.buildPythonApplication {
   src = lib.cleanSource ../.;
 
   build-system = [ py.setuptools ];
-  dependencies = [ py.pyside6 py.evdev ] ++ lib.filter (p: p != null) [ extras.vosk extras.libzim ];
+  dependencies = [ py.pyside6 py.evdev ] ++ lib.filter (p: p != null) [ extras.vosk extras.libzim extras.kokoro-onnx ];
 
   nativeBuildInputs = [ makeWrapper copyDesktopItems ];
 

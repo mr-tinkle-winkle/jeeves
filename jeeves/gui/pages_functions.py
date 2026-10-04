@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QPlainTextEdit, QVBoxLay
 
 from .ui_kit import (CollapseToggleButton, CustomButton, CustomCheckBox, CustomGroupBox, CustomLineEdit,
                      show_message)
-from .widgets import Page, combo, label, row
+from .widgets import discard, Page, combo, label, row
 
 EXAMPLE_STEPS = """[
   {"call": "get_open_apps", "as": "apps"},
@@ -184,7 +184,7 @@ class FunctionsPage(Page):
         self._sig = sig
         self.functions = funcs or []
         for r in self.rows:
-            r.setParent(None)
+            discard(r)
         self.rows = []
         for f in sorted(self.functions, key=lambda f: (f["kind"] != "full", f["source"] != "builtin", f["name"])):
             r = FunctionRow(self, f)

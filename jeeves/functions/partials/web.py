@@ -62,3 +62,91 @@ def wikipedia(ctx, query, max_chars=6000):
         raise FunctionError(f"nothing in Wikipedia for '{query}'")
     ctx.think(f"Reading Wikipedia article: {hit['title']}", looking_at=hit["title"])
     return hit
+
+
+# ---------------------------------------------------------------------------
+# Web search
+# ---------------------------------------------------------------------------
+
+def _attr(tag: str, name: str) -> str:
+    m = re.search(rf"""\b{name}\s*=\s*(["'])(.*?)\1""", tag, re.S)
+    return html.unescape(m.group(2)) if m else ""
+
+
+def _real_url(href: str) -> str:
+    import urllib.parse
+    if href.startswith("//"):
+        href = "https:" + href
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+    return q.get("uddg", [href])[0]          # DuckDuckGo wraps results in a redirect
+
+
+def parse_ddg(page: str, count: int) -> list[dict[str, str]]:
+    """Results from DuckDuckGo's HTML page (class result__a / result__snippet) or its
+    Lite page (class result-link / result-snippet). Attribute order doesn't matter."""
+    out: list[dict[str, str]] = []
+    links = list(re.finditer(r"<a\b([^>]*\bclass\s*=\s*[\"'][^\"']*\bresult(?:__a|-link)\b[^\"']*[\"'][^>]*)>(.*?)</a>",
+                             page, re.S))
+    for i, m in enumerate(links):
+        url = _real_url(_attr(m.group(1), "href"))
+        if not url.startswith("http") or "duckduckgo.com/y.js" in url:      # ads / internal links
+            continue
+        tail = page[m.end(): links[i + 1].start() if i + 1 < len(links) else len(page)]
+        snip = re.search(r"class\s*=\s*[\"'][^\"']*\bresult(?:__snippet|-snippet)\b[^\"']*[\"'][^>]*>(.*?)</(?:a|td|div)>",
+                         tail, re.S)
+        out.append({"title": html_to_text(m.group(2)), "url": url,
+                    "snippet": html_to_text(snip.group(1)) if snip else ""})
+        if len(out) >= count:
+            break
+    return out
+
+
+def _ddg(query: str, count: int) -> list[dict[str, str]]:
+    """DuckDuckGo (no account or API key): the HTML page, then the Lite page if the
+    first gave nothing (it sometimes serves a challenge page instead)."""
+    import urllib.parse
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+               "Accept-Language": "en-US,en;q=0.8"}
+    for base in ("https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"):
+        req = urllib.request.Request(base + "?" + urllib.parse.urlencode({"q": query}), headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            page = resp.read().decode("utf-8", "replace")
+        results = parse_ddg(page, count)
+        if results:
+            return results
+    return []
+
+
+def _searxng(base: str, query: str, count: int) -> list[dict[str, str]]:
+    import json
+    import urllib.parse
+    url = base.rstrip("/") + "/search?" + urllib.parse.urlencode({"q": query, "format": "json"})
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=20) as resp:
+        data = json.loads(resp.read().decode())
+    return [{"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+            for r in data.get("results", [])[:count]]
+
+
+def search(settings, query: str, count: int = 5) -> list[dict[str, str]]:
+    base = settings.get("research.searxng_url") or ""
+    if settings.get("research.engine", "duckduckgo") == "searxng" and base:
+        return _searxng(base, query, count)
+    return _ddg(query, count)
+
+
+@partial("web_search", "Searches the web and returns the top results (title, address and a snippet).",
+         args=[Arg("query", "string", "What to search for"),
+               Arg("count", "integer", "How many results", required=False, default=5)],
+         how="DuckDuckGo by default (no account or key), or your own SearXNG instance (Settings > Listening "
+             "& Keys > Research).",
+         returns="list of {title, url, snippet}", category="web")
+def web_search(ctx, query, count=5):
+    ctx.state("researching", f"Searching: {query}")
+    ctx.think(f"Searching the web for: {query}", looking_at=f"search: {query}")
+    try:
+        results = search(ctx.settings, str(query), int(count))
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise FunctionError(f"web search failed: {exc}") from exc
+    for r in results:
+        ctx.think(f"- {r['title']} ({r['url']})")
+    return results

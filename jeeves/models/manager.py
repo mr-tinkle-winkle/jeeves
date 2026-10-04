@@ -275,6 +275,27 @@ class ModelManager:
         uninstall(entry)
         self.publish("models", self.status())
 
+    def prune(self) -> list[str]:
+        """Unload models that no setting points at any more (switching models used to
+        leave every previous one loaded, eating RAM/VRAM until something got killed)."""
+        wanted: set[str] = set()
+        for kind in KINDS:
+            wanted |= self._ids_for_kind(kind)
+        dropped = []
+        with self._lock:
+            for mid in list(self.instances):
+                if mid not in wanted:
+                    inst = self.instances.pop(mid)
+                    try:
+                        inst.unload()
+                    except Exception:
+                        log.exception("unloading %s failed", mid)
+                    dropped.append(mid)
+        if dropped:
+            log.info("unloaded models no longer in use: %s", ", ".join(dropped))
+            self.publish("models", self.status())
+        return dropped
+
     def unload_all(self) -> None:
         with self._lock:
             for inst in self.instances.values():

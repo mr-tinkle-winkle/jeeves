@@ -123,9 +123,13 @@ class Listener(threading.Thread):
 
     def run(self) -> None:
         while not self._stop.is_set():
-            setting = "audio.microphone" if self.source == "microphone" else "audio.desktop"
+            if self.source.startswith("device:"):
+                dev, kind = self.source[7:], "device"
+            else:
+                setting = "audio.microphone" if self.source == "microphone" else "audio.desktop"
+                dev, kind = self.engine.settings.get(setting, ""), self.source
             try:
-                self.capture = Capture(self.engine.settings.get(setting, ""), self.source)
+                self.capture = Capture(dev, kind)
             except RuntimeError as exc:
                 self.status = str(exc)
                 log.warning("%s capture unavailable: %s", self.source, exc)
@@ -150,6 +154,8 @@ class Listener(threading.Thread):
     def process(self, frame: bytes) -> None:
         eng = self.engine
         now = time.time()
+        if self.source != "microphone" and (eng.speaking or now < eng.speaking_until):
+            frame = b"\0" * len(frame)      # Jeeves' own voice is on the desktop audio: don't hear it
         voiced = rms(frame) > float(eng.settings.get("audio.vad_threshold", 0.012))
         self.ring.append(frame)
         self.frame_no += 1

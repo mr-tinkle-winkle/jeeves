@@ -85,9 +85,13 @@ class Engine:
         self.timers = Timers(self._timer_fired, self.publish)
         self.triggers = Triggers(self.settings, self._trigger_fired)
         self.imports = Imports(self.registry, self.publish)
+        from .jumpin import JumpIn
+        self.jump_in = JumpIn(self)
         self.keyboard: Keyboard | None = Keyboard(self.settings, self._keybind) if start_io else None
         self._lock = threading.RLock()
         self._apply_lock = threading.Lock()
+        self.speaking = 0
+        self.speaking_until = 0.0
         self.active: dict[str, FunctionContext] = {}       # request id -> ctx
         self.indicators: dict[str, dict[str, Any]] = {}     # request id -> indicator state
         self.sessions: dict[str, Session] = {}              # audio source -> open session
@@ -175,11 +179,24 @@ class Engine:
 
     def _apply_settings_locked(self) -> None:
         self._apply_power()
+        if self.is_on() and any(a.get("output_to") in ("microphone", "both") for a in self.agents().values()):
+            # make "Jeeves-Microphone" exist before Discord/OBS look for it, not at the first sentence
+            from .audio import ensure_virtual_mic
+            ensure_virtual_mic(self.settings.get("audio.virtual_mic_sink", "jeeves-mic"),
+                               bool(self.settings.get("audio.virtual_mic_include_mic", True)),
+                               self.settings.get("audio.microphone", ""))
+        self.models.prune()
         wanted = set()
         if self._needs_source("microphone"):
             wanted.add("microphone")
         if self._needs_source("desktop"):
             wanted.add("desktop")
+        if self.is_on():
+            for a in self.active_agents().values():          # agents listening to one exact device
+                if a.get("listen_to") == "device" and a.get("listen_device"):
+                    src = f"device:{a['listen_device']}"
+                    if self.call_names(src) or self.jump_in.wants(src):
+                        wanted.add(src)
         for src in list(self.listeners):
             if src not in wanted:
                 self.listeners.pop(src).stop()
@@ -203,11 +220,15 @@ class Engine:
             if any(t.get("event") == "audio_keyword" and t.get("source", "microphone") in ("microphone", "both")
                    for t in self.triggers.all()):
                 return True
+            if self.jump_in.wants("microphone"):
+                return True
             return bool(self.settings.get("wake_word.enabled", True) and self.call_names("microphone"))
         if self.summary.enabled() and "desktop" in (self.settings.get("summary.sources") or []):
             return True
         if any(t.get("event") == "audio_keyword" and t.get("source") in ("desktop", "both")
                for t in self.triggers.all()):
+            return True
+        if self.jump_in.wants("desktop"):
             return True
         return any(a.get("enabled", True) and a.get("listen_to") in ("desktop", "both")
                    for a in self.agents().values())
@@ -296,6 +317,8 @@ class Engine:
 
     def _listens(self, agent: dict[str, Any], source: str) -> bool:
         lt = agent.get("listen_to", "user")
+        if lt == "device":
+            return bool(agent.get("listen_device")) and source == f"device:{agent['listen_device']}"
         return lt == "both" or (lt == "user" and source == "microphone") or (lt == "desktop" and source == "desktop")
 
     def call_names(self, source: str) -> list[str]:
@@ -362,7 +385,7 @@ class Engine:
                 modes.add("vosk")
             else:
                 modes.add("transcribe")
-        if summary or keyword_triggers or (names and self.summary.enabled()):
+        if summary or keyword_triggers or (names and self.summary.enabled()) or self.jump_in.wants(source):
             modes.add("transcribe")
         return modes
 
@@ -454,15 +477,17 @@ class Engine:
             return
         self.summary.add(source, text)
         self.triggers.on_transcript(text, source)
+        self.jump_in.heard(source, text)
         if self.sessions.get(source) is not None or self.answer_pending():
             return
         wake_by_text = (self.summary.enabled() or self.settings.get("wake_word.engine") == "stt-match"
                         or self.models.wake_spotter() is None) and self.settings.get("wake_word.enabled", True) \
             or self.summary.enabled()
-        if not wake_by_text:
-            return
         aid, rest, _ = self.split_agent(text, source)
         if aid is None:
+            self.jump_in.consider(source)      # nobody was addressed: maybe an agent wants to chime in
+            return
+        if not wake_by_text:                   # the wake word model handles addressed requests
             return
         if rest:
             self.handle_text(rest, aid, source=f"voice:{source}")
@@ -861,6 +886,7 @@ class Engine:
     # ------------------------------------------------------------------ speech output
     def speak(self, ctx: FunctionContext, text: str) -> None:
         agent = ctx.agent
+        self.jump_in.spoke(ctx.agent_id, text)       # part of the conversation even if TTS fails
         try:
             pcm, rate = self._synth(agent, text)
         except Exception as exc:   # speech failing must never lose the answer
@@ -868,13 +894,20 @@ class Engine:
             self._tts_problem(f"Text to speech failed: {exc}")
             return
         targets = output_targets(agent.get("output_to", "speakers"), self.settings.get("audio.speaker", ""),
-                                 self.settings.get("audio.virtual_mic_sink", "jeeves-mic"))
+                                 self.settings.get("audio.virtual_mic_sink", "jeeves-mic"),
+                                 bool(self.settings.get("audio.virtual_mic_include_mic", True)),
+                                 self.settings.get("audio.microphone", ""))
         pb = Playback(pcm, rate, targets)
         ctx.playback = pb
+        with self._lock:
+            self.speaking += 1          # desktop listening ignores Jeeves' own voice meanwhile
         try:
             pb.play()
         finally:
             ctx.playback = None
+            with self._lock:
+                self.speaking -= 1
+                self.speaking_until = time.time() + 0.5
         if pb.error:
             ctx.trace("playback_failed", reason=pb.error)
             self._tts_problem(f"Couldn't play speech: {pb.error}")

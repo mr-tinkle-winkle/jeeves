@@ -240,6 +240,66 @@ def timers(ctx, action, duration="", time="", label="", request=""):
 
 
 @full(
+    "research",
+    "Looks things up: searches the web (and the offline Wikipedia, if downloaded), reads the best pages and "
+    "answers from them, saying where the answer came from. Use for current events, facts you're unsure of, "
+    "prices, releases, scores, anything that needs looking up.",
+    args=[Arg("question", "string", "What to find out, as a full question")],
+    how="The indicator turns blue (researching); click it to see the pages being read. The local response "
+        "model writes the answer from what it read.",
+    keywords=["look up", "search for", "research", "google", "find out", "search the web", "what's the latest"],
+    examples=["Jeeves, look up when the next Hollow Knight patch comes out.",
+              "Jeeves, research the best budget mechanical keyboards."],
+    default_enabled=True, category="web", uses=["web_search", "request_website", "wikipedia", "generate_text"],
+)
+def research(ctx, question):
+    from .partials.web import request_website
+    if ctx.dry_run:
+        return f"<researched answer to: {question}>"
+    question = str(question)
+    pages = int(ctx.settings.get("research.pages", 3))
+    per_page = int(ctx.settings.get("research.max_chars_per_page", 4000))
+    sources: list[dict] = []
+    if ctx.engine.wikipedia is not None and ctx.engine.wikipedia.available():
+        try:
+            hit = ctx.call("wikipedia", query=question, max_chars=per_page)
+            sources.append({"title": f"Wikipedia: {hit['title']}", "url": "offline Wikipedia", "text": hit["text"]})
+        except FunctionError:
+            pass
+    results = ctx.call("web_search", query=question, count=max(pages + 2, 5))
+    for r in results:
+        if len([s for s in sources if s["url"] != "offline Wikipedia"]) >= pages:
+            break
+        ctx.check_cancelled()
+        ctx.think(f"Reading {r['url']}", looking_at=r["url"])
+        try:
+            text = request_website(ctx, r["url"], max_chars=per_page)
+        except FunctionError as exc:
+            ctx.think(f"  couldn't read it: {exc}")
+            text = ""
+        if len(text.strip()) < 200:              # JavaScript-only or blocked page: use the snippet
+            text = r.get("snippet", "")
+        if text.strip():
+            sources.append({"title": r["title"], "url": r["url"], "text": text})
+    if not sources:
+        raise FunctionError("I couldn't find anything about that")
+    ctx.trace("sources", sources=[{"title": s["title"], "url": s["url"]} for s in sources])
+    material = "\n\n".join(f"[{i + 1}] {s['title']} ({s['url']})\n{s['text']}" for i, s in enumerate(sources))
+    ctx.state("thinking", "Writing the answer")
+    answer = ctx.engine.models.respond(
+        ctx.agent,
+        f"Question: {question}\n\nSources:\n{material}\n\n"
+        "Answer the question from these sources only. Mention which site the key facts came from (by name, "
+        "not URL). If the sources disagree or don't answer it, say so.",
+        ctx=ctx)
+    if answer is None:                           # no local model: read out the best snippet
+        best = next((r for r in results if r.get("snippet")), None)
+        answer = f"According to {best['title']}: {best['snippet']}" if best else sources[0]["text"][:400]
+    ctx.show(answer + "\n\nSources:\n" + "\n".join(f"- {s['title']}: {s['url']}" for s in sources))
+    return ctx.say(answer)
+
+
+@full(
     "handoff",
     "Passes information to another agent. The sending agent sees the receiving agent's enabled functions and "
     "tells it whatever is relevant. Only used when you clearly ask for it.",

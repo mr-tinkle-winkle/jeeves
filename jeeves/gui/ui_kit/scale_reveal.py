@@ -92,6 +92,19 @@ def crossfade_to_index(stack, new_index: int, duration: int = 200) -> None:
     if new_widget is None:
         return
 
+    # Switching back to a page whose fade is still running: stop the old fade
+    # first. Otherwise setGraphicsEffect() below deletes the effect the old
+    # animation is still driving, and the old animation's cleanup later deletes
+    # the NEW effect mid-fade -- both crash (found by rapid page switching).
+    old = getattr(new_widget, "_fade_anim", None)
+    if old is not None:
+        try:
+            old.finished.disconnect()
+            old.stop()
+        except (RuntimeError, TypeError):
+            pass
+        new_widget._fade_anim = None
+
     effect = QGraphicsOpacityEffect(new_widget)
     new_widget.setGraphicsEffect(effect)
     anim = QPropertyAnimation(effect, b"opacity", new_widget)
@@ -105,7 +118,11 @@ def crossfade_to_index(stack, new_index: int, duration: int = 200) -> None:
         # Qt to keep compositing this widget through an offscreen
         # buffer on every future repaint instead of painting directly,
         # which is needless ongoing cost once the fade itself is over.
-        new_widget.setGraphicsEffect(None)
+        # Only if it's still this fade's effect (a newer fade may own it now).
+        if new_widget.graphicsEffect() is effect:
+            new_widget.setGraphicsEffect(None)
+        if getattr(new_widget, "_fade_anim", None) is anim:
+            new_widget._fade_anim = None
 
     anim.finished.connect(_cleanup)
     new_widget._fade_anim = anim

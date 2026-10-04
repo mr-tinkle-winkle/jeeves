@@ -2,9 +2,11 @@
 # (both ship a prebuilt native library; autoPatchelfHook points it at Nix's libs).
 #   vosk   -- the wake word spotter
 #   libzim -- reading the offline Wikipedia (ZIM)
+#   kokoro-onnx (+ phonemizer-fork, and an espeakng-loader stand-in that points
+#              at nixpkgs' espeak-ng instead of a bundled copy) -- Kokoro voices
 # Returns null for a package when there's no wheel for this platform/Python,
 # and Jeeves runs without that feature.
-{ lib, stdenv, python3, fetchurl, autoPatchelfHook }:
+{ lib, stdenv, python3, fetchurl, autoPatchelfHook, espeak-ng }:
 
 let
   py = python3.pkgs;
@@ -48,6 +50,49 @@ let
     buildInputs = [ stdenv.cc.cc.lib ];
     pythonImportsCheck = [ pname ];
   };
+  pureWheel = { pname, version, url, sha256, dependencies ? [ ], imports ? [ pname ] }: py.buildPythonPackage {
+    inherit pname version dependencies;
+    format = "wheel";
+    src = fetchurl { inherit url sha256; };
+    # kokoro-onnx asks for phonemizer>=3.4; phonemizer-fork 3.3.2 provides that API
+    dontCheckRuntimeDeps = true;
+    pythonImportsCheck = imports;
+  };
+
+  phonemizer-fork = pureWheel {
+    pname = "phonemizer-fork";
+    version = "3.3.2";
+    url = "https://files.pythonhosted.org/packages/64/f1/0dcce21b0ae16a82df4b6583f8f3ad8e55b35f7e98b6bf536a4dd225fa08/phonemizer_fork-3.3.2-py3-none-any.whl";
+    sha256 = "97305c76f4183b3825dae8f4c032265fe78c9946ce58c47d4b62161349264b74";
+    dependencies = [ py.attrs py.dlinfo py.joblib py.segments py.typing-extensions ];
+    imports = [ "phonemizer" ];
+  };
+
+  # espeakng-loader's wheel bundles its own espeak-ng; this stand-in has the same two
+  # functions but returns nixpkgs' espeak-ng library and voice data.
+  espeakng-loader = py.buildPythonPackage {
+    pname = "espeakng-loader";
+    version = "0.2.4";
+    format = "other";
+    dontUnpack = true;
+    installPhase = ''
+      mkdir -p $out/${python3.sitePackages}/espeakng_loader
+      cat > $out/${python3.sitePackages}/espeakng_loader/__init__.py <<EOF
+      def get_library_path():
+          return "${espeak-ng}/lib/libespeak-ng.so"
+
+
+      def get_data_path():
+          return "${espeak-ng}/share/espeak-ng-data"
+
+
+      def make_library_available():
+          pass
+      EOF
+      sed -i 's/^      //' $out/${python3.sitePackages}/espeakng_loader/__init__.py
+    '';
+    pythonImportsCheck = [ "espeakng_loader" ];
+  };
 in
 {
   vosk =
@@ -59,6 +104,15 @@ in
         dependencies = [ py.cffi py.requests py.tqdm py.srt py.websockets ];
       }
     else null;
+
+  kokoro-onnx = pureWheel {
+    pname = "kokoro-onnx";
+    version = "0.6.1";
+    url = "https://files.pythonhosted.org/packages/60/e1/a27e5a70a525a5ee1fd5357596f07b724d02ff317f134e86cb6e3d9db968/kokoro_onnx-0.6.1-py3-none-any.whl";
+    sha256 = "50c8de4950d601df41428ee5462a48c8a78bef441bf671f2492e070ef44d8a32";
+    dependencies = [ py.numpy py.onnxruntime phonemizer-fork espeakng-loader ];
+    imports = [ "kokoro_onnx" ];
+  };
 
   libzim =
     if libzimWheels ? "${pyTag}-${arch}" then

@@ -243,6 +243,10 @@ class IntentProcessor:
                 except ValueError:
                     pass
             return {"action": action, "minutes": minutes, "question": text}
+        if f.name == "research":
+            q = re.sub(r"^\W*(please\s+)?(look\s+up|search\s+(the\s+web\s+)?for|research|google|find\s+out)\s*",
+                       "", text, flags=re.I).strip(" ?.")
+            return {"question": q or text}
         if f.name == "remember":
             kind, cleaned = Memory.detect(text)
             return {"text": cleaned, "duration": kind or "long_term"}

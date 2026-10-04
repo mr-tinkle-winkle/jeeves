@@ -121,6 +121,8 @@ class Server:
                         out[kind] = [ln.split("\t")[1] for ln in text.splitlines() if "\t" in ln]
                     except (OSError, subprocess.TimeoutExpired):
                         pass
+            from .audio import list_devices
+            out["devices"] = list_devices()
             return out
 
         def wiki_search(query: str) -> Any:

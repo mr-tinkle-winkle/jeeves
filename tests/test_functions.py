@@ -112,15 +112,15 @@ def test_builtins_registered_with_spec_defaults():
     r = Registry(Settings())
     fulls = {f.name: f for f in r.all("full")}
     assert set(fulls) == {"summary", "extended_prompt_mode", "online_prompt", "control_mode", "local_response",
-                          "macros", "timers", "handoff"}
+                          "macros", "timers", "handoff", "research"}
     on = {n for n, f in fulls.items() if f.default_enabled}
-    assert on == {"extended_prompt_mode", "local_response", "timers", "handoff"}   # SPEC defaults
+    assert on == {"extended_prompt_mode", "local_response", "timers", "handoff", "research"}   # SPEC defaults + research
     partials = {f.name for f in r.all("partial")}
     for needed in ("run_command", "find_on_screen", "read_screen_text", "get_mouse_position", "get_held_keys",
                    "get_focused_app", "get_open_apps", "get_app_position", "get_app_workspace", "get_app_size",
                    "recent_requests", "remember", "mark_screen_position", "get_clipboard", "set_clipboard",
                    "control_flow", "event_trigger", "play_sound", "speak", "ask_user", "wait", "send_notification",
-                   "request_website", "read_file", "create_file", "run_file"):
+                   "request_website", "read_file", "create_file", "run_file", "web_search"):
         assert needed in partials
     assert r.problems == []
 
@@ -184,3 +184,23 @@ def test_json_function_files_from_apps_are_loaded():
                                               "steps": [{"call": "run_command", "args": {"command": "afterglow clip"}}]}))
     r = Registry(Settings())
     assert r.get("afterglow_clip").source == "app:afterglow"
+
+
+def test_duckduckgo_parsing():
+    from jeeves.functions.partials.web import parse_ddg
+    page = """
+    <div class="result results_links"><h2 class="result__title">
+      <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fnixos.org%2Fblog%2F2605&amp;rut=abc">NixOS <b>26.05</b> released</a>
+      </h2><a class="result__snippet" href="x">The <b>26.05</b> release is out &amp; ready.</a></div>
+    <div><a href="https://duckduckgo.com/y.js?ad=1" class="result__a">An ad</a></div>
+    <div><a href="https://example.com/b" class="badge result__a">Second</a>
+         <div class="result__snippet">Second snippet</div></div>
+    """
+    r = parse_ddg(page, 5)
+    assert [x["url"] for x in r] == ["https://nixos.org/blog/2605", "https://example.com/b"]
+    assert r[0]["title"] == "NixOS 26.05 released" and r[0]["snippet"] == "The 26.05 release is out & ready."
+    assert r[1]["snippet"] == "Second snippet"
+    lite = """<tr><td><a rel="nofollow" href="https://a.example/x" class='result-link'>Lite result</a></td></tr>
+              <tr><td class='result-snippet'>Lite snippet text</td></tr>"""
+    r = parse_ddg(lite, 5)
+    assert r == [{"title": "Lite result", "url": "https://a.example/x", "snippet": "Lite snippet text"}]

@@ -44,7 +44,10 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         "call_names": call_names or [name],
         # None -> use wake_word.global_threshold (when the global option is on)
         "threshold": None,
-        "listen_to": "user",          # user | desktop | both
+        "listen_to": "user",          # user | desktop | both | device
+        "listen_device": "",          # listen_to=device: exact source (a mic, or an output's .monitor)
+        # Jump in whenever the AI wants to: 1 = a full part of the conversation, 0 = never
+        "jump_in": {"enabled": False, "frequency": 0.3},
         "output_to": "speakers",      # speakers | microphone | both
         "show_output": True,          # also show the response text on screen
         "enable_when_open": [],       # agent only active while one of these apps is open
@@ -101,6 +104,7 @@ DEFAULTS: dict[str, Any] = {
         "desktop": "@DEFAULT_MONITOR@",
         "speaker": "",                    # sink; "" = default
         "virtual_mic_sink": "jeeves-mic", # null sink that apps can record from (output_to=microphone)
+        "virtual_mic_include_mic": True,  # Jeeves-Microphone carries your real mic too (pick it in Discord)
         "vad_threshold": 0.012,           # RMS level that counts as speech
     },
     "agents": {
@@ -146,6 +150,7 @@ DEFAULTS: dict[str, Any] = {
         "online_agent": "codex",          # codex | gemini | claude | grok
     },
     "memory": {"recent_count": 3, "long_term_limit": 200},
+    "research": {"engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000},
     "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"]},
     "control_mode": {"virtual_controller": False, "absolute_moves": True},
     "puppetry": {"config_dir": "~/.config/macro-daemon", "service": "macro-daemon.service"},

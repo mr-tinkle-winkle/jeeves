@@ -85,6 +85,30 @@ def _hint_style() -> str:
     return f"QLabel {{ font-size: 11px; color: {Theme().text().darker(125).name()}; }}"
 
 
+def discard(w: QWidget | None) -> None:
+    """Remove a widget safely. setParent(None) hands it to Python's garbage collector,
+    which deletes the C++ object immediately -- even mid-animation or while Qt is still
+    delivering one of its events -- and crashes the GUI. deleteLater() waits until Qt is
+    done with it."""
+    if w is None:
+        return
+    w.hide()
+    w.setParent(None)
+    _graveyard.append(w)          # keep the Python wrapper alive until Qt deletes it
+    w.destroyed.connect(lambda *_a, w=w: _graveyard.remove(w) if w in _graveyard else None)
+    w.deleteLater()
+
+
+_graveyard: list[QWidget] = []
+
+
+def clear_layout(layout: Any) -> None:
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget() is not None:
+            discard(item.widget())
+
+
 def combo() -> QComboBox:
     c = QComboBox()
     c.setStyleSheet(combo_box_stylesheet(get_settings()))

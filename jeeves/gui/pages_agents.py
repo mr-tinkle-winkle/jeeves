@@ -8,9 +8,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QInputDialog, QPlainTextEdit, QVBoxLayout, QWidget
 
 from .ui_kit import CustomButton, CustomCheckBox, CustomGroupBox, CustomLineEdit, CustomDoubleSpinBox, show_message
-from .widgets import Page, combo, is_locked, label, row
+from .widgets import discard, Page, combo, is_locked, label, row
 
-LISTEN = [("Just me (microphone)", "user"), ("Just desktop audio", "desktop"), ("Both", "both")]
+LISTEN = [("Just me (microphone)", "user"), ("Just desktop audio", "desktop"), ("Both", "both"),
+          ("A specific device…", "device")]
 OUTPUT = [("Speakers", "speakers"), ("Microphone (Jeeves-Microphone source)", "microphone"), ("Both", "both")]
 
 
@@ -72,15 +73,41 @@ class AgentsPage(Page):
         for lab, v in LISTEN:
             self.listen.addItem(lab, v)
         g.addWidget(row(label("Listens to", False), self.listen))
+        self.device = combo()
+        self.device_row = row(label("Device", False), self.device, stretch_last=True)
+        g.addWidget(self.device_row)
+        self.device_hint = label("Microphones, or an output's monitor (everything that output plays, e.g. the "
+                                 "headphones your voice chat comes through).")
+        g.addWidget(self.device_hint)
+        self.listen.currentIndexChanged.connect(lambda _i: self._device_visibility())
         self.output = combo()
         for lab, v in OUTPUT:
             self.output.addItem(lab, v)
         g.addWidget(row(label("Speaks through", False), self.output))
         self.show_output = CustomCheckBox("Also show responses on screen")
         g.addWidget(self.show_output)
+        g.addWidget(label("To let friends in a call hear an agent: set Speaks through to Microphone or Both, "
+                          "then pick “Jeeves-Microphone” as your microphone in Discord (it carries your "
+                          "voice and the agent's)."))
         self.color_edit = CustomLineEdit()
         self.color_edit.setPlaceholderText("#808080 (empty = stage colors only)")
         g.addWidget(row(label("Spinner color while thinking", False), self.color_edit, stretch_last=True))
+
+        # --- jump in
+        g = self._group(f, "Conversation")
+        self.jump_in = CustomCheckBox("Jump in whenever the AI wants to")
+        g.addWidget(self.jump_in)
+        self.jump_freq = CustomDoubleSpinBox()
+        self.jump_freq.setRange(0.0, 1.0)
+        self.jump_freq.setSingleStep(0.05)
+        self.jump_freq.setDecimals(2)
+        self.jump_freq.wheelEvent = lambda e: e.ignore()
+        g.addWidget(row(label("Frequency", False), self.jump_freq))
+        g.addWidget(label("The agent listens to the conversation on its sources and chimes in when it has "
+                          "something to say. 1 = a full part of the conversation, 0.5 = when it has something "
+                          "useful or funny, 0.1 = only for something important, 0 = never. Uses the local "
+                          "response model."))
+        self.jump_in.toggled.connect(lambda on: self.jump_freq.setEnabled(on))
 
         # --- when active
         g = self._group(f, "When this agent is active")
@@ -149,11 +176,12 @@ class AgentsPage(Page):
             self.current = next(iter(self.agents), None)
         self.daemon.call("functions.list", self._got_functions, lambda _e: None)
         self.daemon.call("models.status", self._got_models, lambda _e: None)
+        self.daemon.call("audio.devices", self._got_devices, lambda _e: None)
 
     def _got_functions(self, funcs: Any) -> None:
         self.functions = [f for f in (funcs or []) if f["kind"] == "full"]
         for cb in self.func_checks.values():
-            cb.setParent(None)
+            discard(cb)
         self.func_checks = {}
         for f in sorted(self.functions, key=lambda f: f["title"]):
             cb = CustomCheckBox(f"{f['title']} — {f['description'][:90]}")
@@ -187,6 +215,13 @@ class AgentsPage(Page):
         self.threshold.setValue(a.get("threshold") or 0.6)
         self.prompt.setPlainText(a.get("prompt", ""))
         self.listen.setCurrentIndex(max(0, self.listen.findData(a.get("listen_to", "user"))))
+        self._want_device = a.get("listen_device", "")
+        self._fill_devices()
+        self._device_visibility()
+        j = a.get("jump_in") or {}
+        self.jump_in.setChecked(bool(j.get("enabled")))
+        self.jump_freq.setValue(float(j.get("frequency", 0.3)))
+        self.jump_freq.setEnabled(bool(j.get("enabled")))
         self.output.setCurrentIndex(max(0, self.output.findData(a.get("output_to", "speakers"))))
         self.show_output.setChecked(a.get("show_output", True))
         self.color_edit.setText(a.get("indicator_color") or "")
@@ -202,7 +237,7 @@ class AgentsPage(Page):
             if cb:
                 cb.setChecked(bool(per.get(f["name"], f["globally_enabled"])))
         for cb in self.handoff_checks.values():
-            cb.setParent(None)
+            discard(cb)
         self.handoff_checks = {}
         allowed = a.get("handoff_to") or []
         self.any_handoff.setChecked("*" in allowed)
@@ -219,6 +254,25 @@ class AgentsPage(Page):
         if lk:
             self.form.setToolTip("This agent is declared in NixOS")
 
+    def _device_visibility(self) -> None:
+        on = self.listen.currentData() == "device"
+        self.device_row.setVisible(on)
+        self.device_hint.setVisible(on)
+
+    def _fill_devices(self) -> None:
+        want = getattr(self, "_want_device", "")
+        self.device.clear()
+        for d in getattr(self, "devices", []):
+            kind = "output" if d["kind"] == "output" else "mic"
+            self.device.addItem(f"{d['description']}  ({kind})", d["name"])
+        if want and self.device.findData(want) < 0:
+            self.device.addItem(f"{want}  (not connected)", want)
+        self.device.setCurrentIndex(max(0, self.device.findData(want)))
+
+    def _got_devices(self, res: Any) -> None:
+        self.devices = (res or {}).get("devices", [])
+        self._fill_devices()
+
     def _collect(self) -> dict[str, Any]:
         a = copy.deepcopy(self.agents.get(self.current or "", {}))
         split = lambda w: [x.strip() for x in w.text().split(",") if x.strip()]  # noqa: E731
@@ -227,6 +281,9 @@ class AgentsPage(Page):
             "call_names": split(self.call_names) or [self.name.text().strip() or self.current],
             "threshold": None if self.threshold_global.isChecked() else round(self.threshold.value(), 2),
             "prompt": self.prompt.toPlainText(), "listen_to": self.listen.currentData(),
+            "listen_device": self.device.currentData() or "" if self.listen.currentData() == "device" else
+            a.get("listen_device", ""),
+            "jump_in": {"enabled": self.jump_in.isChecked(), "frequency": round(self.jump_freq.value(), 2)},
             "output_to": self.output.currentData(), "show_output": self.show_output.isChecked(),
             "indicator_color": self.color_edit.text().strip() or None,
             "enable_when_open": split(self.enable_open), "enable_when_focused": split(self.enable_focus),

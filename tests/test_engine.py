@@ -483,3 +483,118 @@ def test_gguf_metadata_and_auto_gpu_layers(tmp_path):
     assert n == 0                                                 # nothing fits
     n, info = hardware.auto_gpu_layers(p, 8192, {"gpu_usable": False, "gpus": [{"vram_mb": 8000}]})
     assert n == 0 and "backend" in info["why"]
+
+
+def test_research_reads_pages_and_answers(engine, monkeypatch):
+    from jeeves.functions.partials import web
+    monkeypatch.setattr(web, "search", lambda settings, q, n: [
+        {"title": "Site A", "url": "https://a.example", "snippet": "A says 42."},
+        {"title": "Site B", "url": "https://b.example", "snippet": "B says 42 too."}])
+    read = []
+
+    def fake_site(ctx, url, raw=False, max_chars=20000):
+        read.append(url)
+        return f"The answer at {url} is 42. " * 20
+    monkeypatch.setattr(web, "request_website", fake_site)
+    prompts = []
+    engine.models.respond = lambda agent, prompt, **kw: prompts.append(prompt) or "It's 42, according to Site A."
+    res = engine.handle_text("Jeeves, look up the answer to everything", wait=True)
+    entry = engine.history.get(res["id"])
+    assert entry["function"] == "research" and entry["args"]["question"] == "the answer to everything"
+    assert entry["response"] == "It's 42, according to Site A."
+    assert read == ["https://a.example", "https://b.example"]
+    assert "[1] Site A" in prompts[0] and "[2] Site B" in prompts[0]
+    assert any(t["kind"] == "stage" and t["stage"] == "researching" for t in entry["trace"])
+
+
+def test_agent_listening_to_a_specific_device(engine):
+    engine.settings.set("agents.jeeves.listen_to", "device")
+    engine.settings.set("agents.jeeves.listen_device", "alsa_output.usb-headset.monitor")
+    agent = engine.agents()["jeeves"]
+    assert engine._listens(agent, "device:alsa_output.usb-headset.monitor")
+    assert not engine._listens(agent, "microphone") and not engine._listens(agent, "desktop")
+    assert engine.call_names("device:alsa_output.usb-headset.monitor") == ["jeeves"]
+    from jeeves.daemon import audio
+    audio_which = audio.which
+    try:
+        audio.which = lambda *n: "/bin/" + n[0] if n[0] == "parec" else None
+        assert "--device=alsa_output.usb-headset.monitor" in audio.capture_command(
+            "alsa_output.usb-headset.monitor", "device")
+    finally:
+        audio.which = audio_which
+
+
+def test_jump_in(engine, monkeypatch):
+    from jeeves.daemon import jumpin
+    assert jumpin.cooldown(1.0) < jumpin.cooldown(0.5) < jumpin.cooldown(0.1)
+    assert jumpin.consider_chance(1.0) == 1.0 and jumpin.consider_chance(0.0) == 0.0
+    engine.settings.set("agents.jeeves.listen_to", "both")
+    assert not engine.jump_in.wants("desktop")
+    engine.settings.set("agents.jeeves.jump_in", {"enabled": True, "frequency": 1.0})
+    assert engine.jump_in.wants("desktop") and "transcribe" in engine.detection_modes("desktop")
+    replies = iter(["PASS", "Ha, that's exactly what I said yesterday."])
+    seen = []
+    engine.models.respond = lambda agent, prompt, system="", **kw: seen.append((prompt, system)) or next(replies)
+    engine.jump_in.heard("desktop", "did anyone see the match last night")
+    engine.jump_in.consider("desktop")
+    assert wait_for(lambda: not engine.jump_in.busy)
+    assert engine.history.list() == []                       # PASS: stayed quiet
+    assert "full participant" in seen[0][1] and "Others" in seen[0][0]
+    engine.jump_in.heard("desktop", "it was the best game all season")
+    engine.jump_in.consider("desktop")
+    assert wait_for(lambda: engine.history.list())
+    entry = engine.history.list()[0]
+    assert entry["source"] == "jump_in" and entry["response"] == "Ha, that's exactly what I said yesterday."
+    engine.jump_in.heard("desktop", "something else")
+    engine.jump_in.consider("desktop")                       # cooldown: won't speak again straight away
+    time.sleep(0.2)
+    assert len(seen) == 2
+    engine.settings.set("agents.jeeves.jump_in", {"enabled": True, "frequency": 0.0})
+    assert not engine.jump_in.wants("desktop")
+
+
+def test_prune_unloads_models_no_longer_chosen(engine):
+    class Inst:
+        def __init__(self):
+            self.unloaded = False
+
+        def unload(self):
+            self.unloaded = True
+
+        def loaded(self):
+            return not self.unloaded
+    old, cur = Inst(), Inst()
+    engine.settings.set("models.intent.model", "qwen3-1.7b")
+    engine.models.instances = {"qwen2.5-1.5b": old, "qwen3-1.7b": cur}
+    assert engine.models.prune() == ["qwen2.5-1.5b"]
+    assert old.unloaded and not cur.unloaded
+
+
+def test_virtual_mic_carries_your_mic(monkeypatch):
+    from jeeves.daemon import audio
+    calls = []
+    modules = {"text": ""}
+
+    def fake_pactl(*args):
+        calls.append(args)
+        if args[:3] == ("list", "short", "modules"):
+            return modules["text"]
+        if args == ("get-default-source",):
+            return "alsa_input.usb-mic\n"
+        return ""
+    monkeypatch.setattr(audio, "_pactl", fake_pactl)
+    monkeypatch.setattr(audio, "which", lambda *n: "/bin/pactl")
+    assert audio.ensure_virtual_mic("jeeves-mic")
+    loads = [c for c in calls if c[0] == "load-module"]
+    assert [c[1] for c in loads] == ["module-null-sink", "module-remap-source", "module-loopback"]
+    assert "source=alsa_input.usb-mic" in loads[2] and "sink=jeeves-mic" in loads[2]
+    # already there: nothing loaded twice
+    modules["text"] = ("1\tmodule-null-sink\tsink_name=jeeves-mic x\n2\tmodule-remap-source\tsource_name=jeeves-mic-source\n"
+                       "3\tmodule-loopback\tsource=alsa_input.usb-mic sink=jeeves-mic latency_msec=20\n")
+    calls.clear()
+    audio.ensure_virtual_mic("jeeves-mic")
+    assert not [c for c in calls if c[0] == "load-module"]
+    # the default source being Jeeves' own mic must not make it listen to itself
+    monkeypatch.setattr(audio, "_pactl", lambda *a: "jeeves-mic-source\n" if a == ("get-default-source",) else
+                        "1\tjeeves-mic-source\tx\n2\talsa_input.real\tx\n" if a[:2] == ("list", "short") else "")
+    assert audio.real_mic_source() == "alsa_input.real"

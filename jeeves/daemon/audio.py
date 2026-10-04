@@ -53,25 +53,50 @@ def to_wav(pcm: bytes, rate: int = RATE) -> bytes:
 
 
 def capture_command(source: str, kind: str) -> list[str]:
-    """kind: 'microphone' | 'desktop'."""
+    """kind: 'microphone' | 'desktop' | 'device' (an exact source: a mic or an output's .monitor).
+
+    Desktop audio is the default output's *monitor* (everything you hear: games,
+    Discord voices, videos). parec addresses it reliably as @DEFAULT_MONITOR@ through
+    PipeWire's Pulse layer; pw-record needs stream.capture.sink, used as a fallback."""
+    if kind == "device":
+        if not source:
+            raise RuntimeError("no device chosen")
+        if which("parec"):
+            return ["parec", "--format=s16le", f"--rate={RATE}", "--channels=1", "--latency-msec=30",
+                    f"--device={source}"]
+        if which("pw-record"):
+            cmd = ["pw-record", "--raw", "--format", "s16", "--rate", str(RATE), "--channels", "1"]
+            if source.endswith(".monitor"):
+                cmd += ["-P", "{ stream.capture.sink = true }", "--target", source.removesuffix(".monitor")]
+            else:
+                cmd += ["--target", source]
+            return cmd + ["-"]
+        raise RuntimeError("no audio capture tool (parec or pw-record)")
+    if kind == "desktop":
+        dev = source or "@DEFAULT_MONITOR@"
+        if which("parec"):
+            return ["parec", "--format=s16le", f"--rate={RATE}", "--channels=1", "--latency-msec=30",
+                    f"--device={dev}"]
+        if which("pw-record"):
+            cmd = ["pw-record", "--raw", "--format", "s16", "--rate", str(RATE), "--channels", "1",
+                   "-P", "{ stream.capture.sink = true }"]
+            if dev != "@DEFAULT_MONITOR@":
+                cmd += ["--target", dev.removesuffix(".monitor")]
+            return cmd + ["-"]
+        raise RuntimeError("no tool to record desktop audio (parec or pw-record)")
+    mic = source or real_mic_source() or ""
     if which("pw-record"):
         # --raw: plain PCM on stdout (otherwise pw-record writes a WAV container)
         cmd = ["pw-record", "--raw", "--format", "s16", "--rate", str(RATE), "--channels", "1"]
-        if kind == "desktop":
-            # capture the default output's monitor
-            cmd += ["-P", "stream.capture.sink=true"]
-            if source and source != "@DEFAULT_MONITOR@":
-                cmd += ["--target", source]
-        elif source:
-            cmd += ["--target", source]
+        if mic:
+            cmd += ["--target", mic]
         return cmd + ["-"]
     if which("parec"):
         cmd = ["parec", "--format=s16le", f"--rate={RATE}", "--channels=1", "--latency-msec=30"]
-        dev = source or ("@DEFAULT_MONITOR@" if kind == "desktop" else "")
-        if dev:
-            cmd.append(f"--device={dev}")
+        if mic:
+            cmd.append(f"--device={mic}")
         return cmd
-    if which("arecord") and kind == "microphone":
+    if which("arecord"):
         return ["arecord", "-q", "-f", "S16_LE", "-r", str(RATE), "-c", "1", "-t", "raw"]
     raise RuntimeError("no audio capture tool (pw-record, parec or arecord)")
 
@@ -221,29 +246,70 @@ def wav_to_pcm(data: bytes) -> tuple[bytes, int]:
     return pcm, rate
 
 
-def ensure_virtual_mic(sink: str) -> bool:
-    """Create the null sink (and a source remapped from its monitor so apps list
-    it as a microphone). Idempotent."""
+VIRTUAL_MIC_SOURCE = "{sink}-source"
+
+
+def _pactl(*args: str) -> str:
+    try:
+        return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def real_mic_source(virtual_sink: str = "jeeves-mic") -> str | None:
+    """The default microphone -- unless the default is Jeeves' own virtual mic (then
+    the first real one), so Jeeves never listens to itself."""
+    if not which("pactl"):
+        return None
+    default = _pactl("get-default-source").strip()
+    if default and not default.startswith(virtual_sink) and not default.endswith(".monitor"):
+        return default
+    for line in _pactl("list", "short", "sources").splitlines():
+        parts = line.split("\t")
+        if len(parts) > 1 and not parts[1].endswith(".monitor") and not parts[1].startswith(virtual_sink):
+            return parts[1]
+    return None
+
+
+def ensure_virtual_mic(sink: str, include_mic: bool = True, mic: str = "") -> bool:
+    """A microphone other apps (Discord, OBS) can pick that carries Jeeves' voice *and*
+    yours:
+
+        your mic --loopback--> [jeeves-mic null sink] <-- Jeeves speaks here
+                                      |
+                       monitor, remapped as the source "Jeeves Microphone"
+
+    Idempotent: modules already loaded (matched by their arguments) are left alone."""
     if not which("pactl"):
         return False
-    try:
-        sinks = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True, timeout=3).stdout
-        if sink not in sinks:
-            subprocess.run(["pactl", "load-module", "module-null-sink", f"sink_name={sink}",
-                            "sink_properties=device.description=Jeeves-Output"], capture_output=True, timeout=3)
-            subprocess.run(["pactl", "load-module", "module-remap-source", f"master={sink}.monitor",
-                            f"source_name={sink}-source", "source_properties=device.description=Jeeves-Microphone"],
-                           capture_output=True, timeout=3)
-        return True
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    source_name = VIRTUAL_MIC_SOURCE.format(sink=sink)
+    modules = _pactl("list", "short", "modules")
+    if f"sink_name={sink}" not in modules:
+        _pactl("load-module", "module-null-sink", f"sink_name={sink}",
+               "sink_properties=device.description=Jeeves-Voice")
+    if f"source_name={source_name}" not in modules:
+        _pactl("load-module", "module-remap-source", f"master={sink}.monitor", f"source_name={source_name}",
+               "source_properties=device.description=Jeeves-Microphone")
+    loop_tag = f"sink={sink} "
+    has_loop = any("module-loopback" in ln and loop_tag in ln + " " for ln in modules.splitlines())
+    if include_mic and not has_loop:
+        real = mic or real_mic_source(sink)
+        if real:
+            _pactl("load-module", "module-loopback", f"source={real}", f"sink={sink}", "latency_msec=20",
+                   "source_dont_move=true", "sink_dont_move=true")
+    elif not include_mic and has_loop:
+        for ln in modules.splitlines():
+            if "module-loopback" in ln and loop_tag in ln + " ":
+                _pactl("unload-module", ln.split("\t")[0])
+    return True
 
 
-def output_targets(output_to: str, speaker: str, virtual_sink: str) -> list[str]:
+def output_targets(output_to: str, speaker: str, virtual_sink: str, include_mic: bool = True,
+                   mic: str = "") -> list[str]:
     targets = []
     if output_to in ("speakers", "both"):
         targets.append(speaker or "")
-    if output_to in ("microphone", "both") and ensure_virtual_mic(virtual_sink):
+    if output_to in ("microphone", "both") and ensure_virtual_mic(virtual_sink, include_mic, mic):
         targets.append(virtual_sink)
     return targets or [speaker or ""]
 
@@ -253,3 +319,31 @@ def have_player() -> bool:
 
 
 StopFn = Callable[[], bool]
+
+
+def list_devices() -> list[dict[str, str]]:
+    """Every source you could listen to: microphones and each output's monitor
+    (what that output plays), with readable names."""
+    import json as _json
+    out: list[dict[str, str]] = []
+    if not which("pactl"):
+        return out
+    raw = _pactl("-f", "json", "list", "sources")
+    try:
+        items = _json.loads(raw) if raw.strip() else []
+    except ValueError:
+        items = []
+    if items:
+        for it in items:
+            name = it.get("name", "")
+            if not name or name.startswith("jeeves-mic"):
+                continue
+            out.append({"name": name, "description": it.get("description") or name,
+                        "kind": "output" if name.endswith(".monitor") else "microphone"})
+        return out
+    for line in _pactl("list", "short", "sources").splitlines():
+        parts = line.split("\t")
+        if len(parts) > 1 and not parts[1].startswith("jeeves-mic"):
+            out.append({"name": parts[1], "description": parts[1],
+                        "kind": "output" if parts[1].endswith(".monitor") else "microphone"})
+    return out
