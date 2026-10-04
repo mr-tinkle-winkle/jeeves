@@ -193,40 +193,20 @@ class VoskSTT(STT):
         return json.loads(rec.FinalResult()).get("text", "").strip()
 
 
-class VoskWake:
-    """Streaming keyword spotter over a grammar of call names."""
+class WakeRecognizer:
+    """One streaming recognizer over a grammar of call names. Each listener (mic,
+    desktop, a device) owns its own: Vosk recognizers aren't thread-safe, and sharing
+    one between listener threads crashed the daemon."""
 
-    def __init__(self, entry: ModelEntry) -> None:
-        self.entry = entry
-        self.model = None
-        self.rec = None
-        self.names: list[str] = []
-        self.last_result: list[dict[str, Any]] = []
-
-    def load(self) -> None:
-        self.model = _vosk().Model(str(model_dir(self.entry)))
-
-    def unload(self) -> None:
-        self.model = self.rec = None
-
-    def loaded(self) -> bool:
-        return self.model is not None
-
-    def set_names(self, names: list[str]) -> None:
-        names = sorted({n.lower() for n in names if n.strip()})
-        if names == self.names and self.rec is not None:
-            return
+    def __init__(self, model: Any, names: list[str]) -> None:
+        self.model = model                  # keeps the shared model alive while in use
         self.names = names
-        if self.model is None:
-            self.load()
-        grammar = json.dumps(names + ["[unk]"])
-        self.rec = _vosk().KaldiRecognizer(self.model, RATE, grammar)
+        self.rec = _vosk().KaldiRecognizer(model, RATE, json.dumps(names + ["[unk]"]))
         self.rec.SetWords(True)
+        self.last_result: list[dict[str, Any]] = []
 
     def feed(self, frame: bytes) -> list[tuple[str, float]]:
         """Returns [(name, confidence)] detected in this frame (end of a phrase)."""
-        if self.rec is None:
-            return []
         if not self.rec.AcceptWaveform(frame):
             return []
         res = json.loads(self.rec.Result())
@@ -242,6 +222,31 @@ class VoskWake:
                     conf = sum(c for _, c in text_words[i:i + len(parts)]) / len(parts)
                     found.append((name, conf))
         return found
+
+
+class VoskWake:
+    """The wake word model, loaded once and shared; listeners get their own recognizers."""
+
+    def __init__(self, entry: ModelEntry) -> None:
+        self.entry = entry
+        self.model = None
+        self._lock = threading.Lock()
+
+    def load(self) -> None:
+        with self._lock:
+            if self.model is None:
+                self.model = _vosk().Model(str(model_dir(self.entry)))
+
+    def unload(self) -> None:
+        self.model = None             # recognizers still running keep their own reference
+
+    def loaded(self) -> bool:
+        return self.model is not None
+
+    def recognizer(self, names: list[str]) -> WakeRecognizer:
+        if self.model is None:
+            self.load()
+        return WakeRecognizer(self.model, sorted({n.lower() for n in names if n.strip()}))
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +420,7 @@ class KokoroTTS(TTS):
     def __init__(self, entry: ModelEntry) -> None:
         self.entry = entry
         self.k = None
+        self._lock = threading.Lock()     # one synthesis at a time (espeak-ng has global state)
 
     def load(self) -> None:
         try:
@@ -431,6 +437,10 @@ class KokoroTTS(TTS):
         return self.k is not None
 
     def synth(self, text: str, voice: ModelEntry | None) -> tuple[bytes, int]:
+        with self._lock:
+            return self._synth(text, voice)
+
+    def _synth(self, text: str, voice: ModelEntry | None) -> tuple[bytes, int]:
         if self.k is None:
             self.load()
         v = voice.voice if voice and voice.engine == "kokoro" else "af_heart"

@@ -279,6 +279,9 @@ def _strip_entry(res: dict[str, Any]) -> dict[str, Any]:
 
 
 def main(start_io: bool = True) -> None:
+    import faulthandler
+    import sys
+    faulthandler.enable(sys.stderr, all_threads=True)    # native crashes leave a traceback in the journal
     logging.basicConfig(level=os.environ.get("JEEVES_LOG", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     asyncio.run(Server(start_io=start_io).serve())

@@ -110,6 +110,8 @@ class Listener(threading.Thread):
         self.frame_no = 0
         self.spot_base = 0           # frame_no when the wake spotter's stream started
         self.spotter_names: list[str] = []
+        self.wake_rec: Any = None          # this listener's own recognizer (never shared)
+        self.wake_owner: Any = None
         self.segmenter = Segmenter()
         self.answer_streak = 0
         self.capture: Capture | None = None
@@ -166,15 +168,22 @@ class Listener(threading.Thread):
         spotter = eng.models.wake_spotter() if "vosk" in modes else None
         if spotter is not None:
             names = eng.call_names(self.source)
-            if names != self.spotter_names or spotter.rec is None:
-                spotter.set_names(names)
+            if self.wake_rec is None or names != self.spotter_names or self.wake_owner is not spotter:
+                try:
+                    self.wake_rec = spotter.recognizer(names)
+                except Exception:
+                    log.exception("wake word model failed to start")
+                    self.wake_rec = None
+                self.wake_owner = spotter
                 self.spotter_names = names
                 self.spot_base = self.frame_no - 1
             try:
-                hits = spotter.feed(frame)
+                hits = self.wake_rec.feed(frame) if self.wake_rec is not None else []
             except Exception:
                 log.exception("wake word model failed")
                 hits = []
+        else:
+            self.wake_rec = None
 
         if "transcribe" in modes:
             utterance = self.segmenter.feed(frame, voiced, now, eos)
@@ -206,7 +215,7 @@ class Listener(threading.Thread):
 
         if hits:
             best = max(hits, key=lambda h: h[1])
-            eng.on_wake(self.source, best[0], best[1], self._audio_after_name(spotter, best[0]))
+            eng.on_wake(self.source, best[0], best[1], self._audio_after_name(self.wake_rec, best[0]))
 
     def _audio_after_name(self, spotter: Any, name: str) -> list[bytes]:
         """Frames recorded after the call name in the phrase just recognised."""
