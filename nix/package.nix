@@ -74,6 +74,7 @@ py.buildPythonApplication {
       whisper llama piper-tts espeak-ng tesseract wl-clipboard xclip libnotify
       pipewire pulseaudio grim kdotool
     ] ++ lib.optional (kdePackages != null && kdePackages ? spectacle) kdePackages.spectacle
+      ++ lib.optional (kdePackages != null && kdePackages ? libkscreen) kdePackages.libkscreen
       ++ extraRuntimePackages))
   ];
 

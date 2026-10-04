@@ -8,8 +8,11 @@ can let go of everything.
 
 Absolute moves: on Hyprland the compositor warps the cursor
 (``hyprctl dispatch movecursor``). Elsewhere a separate absolute pointer
-device (like a VM's USB tablet: ABS_X/ABS_Y spanning the desktop) moves the
-cursor to an exact spot without pointer acceleration getting in the way.
+device (like a VM's USB tablet: ABS_X/ABS_Y 0..65535 spanning every monitor)
+moves the cursor to an exact spot without pointer acceleration getting in
+the way. Relative moves become absolute ones from the current cursor position
+when it can be read, because pointer acceleration turns "100 px right" from a
+relative device into anything between 60 and 250 px.
 """
 from __future__ import annotations
 
@@ -81,6 +84,16 @@ def key_name(name: str) -> str:
     return f"KEY_{up}"
 
 
+ABS_MAX = 65535
+
+
+def abs_value(v: float, origin: int, size: int) -> int:
+    """Desktop coordinate -> 0..ABS_MAX along one axis of the desktop box."""
+    if size <= 1:
+        return 0
+    return max(0, min(ABS_MAX, round((v - origin) * ABS_MAX / (size - 1))))
+
+
 class Control:
     def __init__(self, settings: Any) -> None:
         self.settings = settings
@@ -89,7 +102,8 @@ class Control:
         self._held: set[str] = set()
         self._axes: dict[str, float] = {}
         self.error: str | None = None
-        self._abs_size = (1920, 1080)
+        self._box: tuple[int, int, int, int] = (0, 0, 1920, 1080)
+        self._box_at = 0.0
 
     # ---- devices ---------------------------------------------------------
     def available(self) -> bool:
@@ -105,11 +119,10 @@ class Control:
             self._kbd = UInput({e.EV_KEY: sorted(set(keys))}, name="jeeves-keyboard")
             self._mouse = UInput({e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE, e.BTN_SIDE, e.BTN_EXTRA],
                                   e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL]}, name="jeeves-mouse")
-            w, h = dk.screen_size()
-            self._abs_size = (w, h)
+            # the compositor stretches an absolute pointer over the whole desktop (all monitors)
             self._abs = UInput({e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE],
-                                e.EV_ABS: [(e.ABS_X, AbsInfo(0, 0, w - 1, 0, 0, 0)),
-                                           (e.ABS_Y, AbsInfo(0, 0, h - 1, 0, 0, 0))]},
+                                e.EV_ABS: [(e.ABS_X, AbsInfo(0, 0, ABS_MAX, 0, 0, 0)),
+                                           (e.ABS_Y, AbsInfo(0, 0, ABS_MAX, 0, 0, 0))]},
                                name="jeeves-mouse-absolute")
             if self.settings.get("control_mode.virtual_controller", False):
                 stick = AbsInfo(0, -32768, 32767, 16, 128, 0)
@@ -170,16 +183,44 @@ class Control:
                 dev.syn()
                 self._held.discard(name)
 
+    def desktop_box(self) -> tuple[int, int, int, int]:
+        if time.monotonic() - self._box_at > 10:
+            try:
+                self._box = dk.desktop_box()
+            except Exception:
+                pass
+            self._box_at = time.monotonic()
+        return self._box
+
+    def _abs_to(self, x: float, y: float) -> None:
+        if dk.move_cursor_absolute(int(round(x)), int(round(y))):
+            return
+        bx, by, bw, bh = self.desktop_box()
+        self._abs.write(e.EV_ABS, e.ABS_X, abs_value(x, bx, bw))
+        self._abs.write(e.EV_ABS, e.ABS_Y, abs_value(y, by, bh))
+        self._abs.syn()
+
     def move(self, x: float, y: float, absolute: bool = False, duration: float = 0.0, ctx: Any = None) -> None:
         with self._lock:
             self._ensure()
-            if absolute:
-                if dk.move_cursor_absolute(int(x), int(y)):
-                    return
-                w, h = self._abs_size
-                self._abs.write(e.EV_ABS, e.ABS_X, max(0, min(w - 1, int(x))))
-                self._abs.write(e.EV_ABS, e.ABS_Y, max(0, min(h - 1, int(y))))
-                self._abs.syn()
+            start = None
+            try:
+                start = dk.mouse_position()
+            except Exception:
+                pass
+            if absolute and start is None:
+                self._abs_to(x, y)
+                return
+            if start is not None:
+                # glide (or jump) along a straight line with absolute moves
+                tx, ty = (x, y) if absolute else (start[0] + x, start[1] + y)
+                steps = max(1, int(duration / 0.01)) if duration > 0 else 1
+                for i in range(1, steps + 1):
+                    if ctx is not None:
+                        ctx.check_cancelled()
+                    self._abs_to(start[0] + (tx - start[0]) * i / steps, start[1] + (ty - start[1]) * i / steps)
+                    if steps > 1:
+                        time.sleep(duration / steps)
                 return
             steps = max(1, int(duration / 0.01)) if duration > 0 else 1
             done_x = done_y = 0

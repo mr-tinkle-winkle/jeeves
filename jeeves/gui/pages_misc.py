@@ -94,7 +94,26 @@ class GeneralPage(Page):
         self.b.check(c, "Create a virtual controller (jeeves-controller)", "control_mode.virtual_controller")
         self.b.text(c, "Puppetry config folder", "puppetry.config_dir")
         self.b.text(c, "Puppetry service", "puppetry.service")
+        self.doctor_btn = CustomButton("Check screen reading && control")
+        self.doctor_btn.clicked.connect(self.run_doctor)
+        c.addWidget(row(self.doctor_btn))
+        self.doctor_view = QPlainTextEdit()
+        self.doctor_view.setReadOnly(True)
+        self.doctor_view.setMaximumHeight(200)
+        self.doctor_view.setPlaceholderText("Takes a screenshot, reads it, and briefly moves the mouse to test "
+                                            "exact positioning (same as 'jeeves doctor').")
+        c.addWidget(self.doctor_view)
         self.finish()
+
+    def run_doctor(self) -> None:
+        from ..daemon.doctor import format_report
+        self.doctor_btn.setEnabled(False)
+        self.doctor_view.setPlainText("Checking…")
+
+        def done(res: Any) -> None:
+            self.doctor_btn.setEnabled(True)
+            self.doctor_view.setPlainText(format_report(res) if isinstance(res, list) else str(res))
+        self.daemon.call("doctor", done, done)
 
     def combo_edit(self, layout: QVBoxLayout, text: str, path: str, single: bool = False) -> None:
         e = CustomLineEdit()

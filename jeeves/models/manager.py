@@ -198,10 +198,13 @@ class ModelManager:
         if system:
             sys_parts.append(system)
         if with_memory and ctx is not None:
-            mem = ctx.engine.memory.context_for(ctx.agent_id)
+            from ..config import agent_memory
+            am = agent_memory(agent, self.settings)
+            mem = ctx.engine.memory.context_for(ctx.agent_id, am["notes"], am["own_only"])
             if mem:
                 sys_parts.append(mem)
-            recent = ctx.engine.history.recent(int(self.settings.get("memory.recent_count", 3)), exclude=ctx.request.get("id"))
+            recent = ctx.engine.history.recent(am["recent"], agent=ctx.agent_id if am["own_only"] else None,
+                                               exclude=ctx.request.get("id")) if am["recent"] else []
             for r in recent:
                 messages.append({"role": "user", "content": r["text"]})
                 if r.get("result"):

@@ -13,6 +13,7 @@
     jeeves status | history | models | functions | dictionary
     jeeves import-functions manifest.json    (shows the approval popup)
     jeeves export-functions [NAME ...] -o out.json
+    jeeves doctor [--no-move]                check screen reading and Control Mode
     jeeves set models.stt.model whisper-base-en
     jeeves get models
 """
@@ -69,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-o", "--output")
     p.add_argument("--json", action="store_true", help="raw JSON output")
     p.add_argument("--popups", action="store_true", help="overlay: run the popups process")
+    p.add_argument("--no-move", action="store_true", help="doctor: don't test moving the mouse")
     a = p.parse_args(argv)
 
     try:
@@ -103,6 +105,16 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "overlay":
             from .overlay import main as overlay_main
             return overlay_main(popups=a.popups)
+        if cmd == "screenshot-portal":
+            if not a.args:
+                p.error("screenshot-portal needs an output path")
+            from .screenshot_portal import main as portal_main
+            return portal_main(a.args[0])
+        if cmd == "doctor":
+            from .daemon.doctor import format_report
+            checks = ipc.call("doctor", move_test=not a.no_move, timeout=120)
+            _print(checks if a.json else format_report(checks))
+            return 0 if all(c["ok"] for c in checks) else 1
         if cmd in ("say", "request"):
             _print(ipc.call("request.text", text=" ".join(a.args), agent=a.agent))
         elif cmd in ("dry-run", "dry_run"):

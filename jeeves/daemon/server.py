@@ -17,6 +17,7 @@ from .. import config, paths
 from ..ipc import encode
 from ..util import which
 from . import desktop as dk
+from . import doctor
 from .engine import Engine
 
 log = logging.getLogger("jeeves.server")
@@ -204,6 +205,7 @@ class Server:
             "audio.devices": audio_devices,
             "summary.text": lambda minutes=None: e.summary.text(minutes),
             "summary.clear": e.summary.clear,
+            "doctor": lambda move_test=True: doctor.run(e.control, bool(move_test)),
         }
 
     # ---- connection handling --------------------------------------------

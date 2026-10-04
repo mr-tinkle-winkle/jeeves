@@ -62,7 +62,22 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         # agent ids this agent may hand off to (Handoff function); "*" = any agent
         "handoff_to": ["*"],
         "indicator_color": None,      # tint of the processing spinner; None -> state colors only
+        # memory: recent = past requests shown to the model (None -> memory.recent_count),
+        # notes = remembered notes shown to it, own_only = only this agent's requests/notes
+        "memory": {"enabled": True, "recent": None, "notes": 30, "own_only": False},
     }
+
+
+def agent_memory(agent: dict[str, Any] | None, settings: Any = None) -> dict[str, Any]:
+    """The agent's effective memory settings (older agents have none saved)."""
+    m = dict((agent or {}).get("memory") or {})
+    default_recent = int(settings.get("memory.recent_count", 3)) if settings is not None else 3
+    enabled = bool(m.get("enabled", True))
+    recent = m.get("recent")
+    return {"enabled": enabled,
+            "recent": max(0, int(default_recent if recent is None else recent)) if enabled else 0,
+            "notes": max(0, int(m.get("notes", 30) if m.get("notes") is not None else 30)) if enabled else 0,
+            "own_only": bool(m.get("own_only", False))}
 
 
 DEFAULTS: dict[str, Any] = {

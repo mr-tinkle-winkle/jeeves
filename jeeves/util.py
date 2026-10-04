@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from typing import Any
 
 _DUR = re.compile(r"(\d+(?:\.\d+)?)\s*(h|hr|hrs|hours?|m|min|mins|minutes?|s|sec|secs|seconds?|ms)?", re.I)
@@ -120,6 +121,7 @@ def run(cmd: list[str], timeout: float = 10, input_text: str | None = None,
 
 def desktop() -> str:
     """'kde' | 'hyprland' | 'other'."""
+    sync_graphical_env()
     if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return "hyprland"
     cur = (os.environ.get("XDG_CURRENT_DESKTOP", "") + os.environ.get("DESKTOP_SESSION", "")).lower()
@@ -147,6 +149,34 @@ def graphical_env() -> dict[str, str]:
                 and k not in env:
             env[k] = v
     return env
+
+
+_synced = 0.0
+
+
+def sync_graphical_env() -> None:
+    """Copy the desktop's display variables into this process's environment once the
+    desktop is up. The daemon is a user service that often starts before Plasma or
+    Hyprland: without this it believed it was on an unknown desktop, and spectacle,
+    kdotool and grim ran without WAYLAND_DISPLAY -- so it couldn't read the screen or
+    find the mouse."""
+    global _synced
+    now = time.monotonic()
+    if not os.environ.get("INVOCATION_ID"):       # only systemd services miss the desktop's env
+        return
+    if os.environ.get("WAYLAND_DISPLAY") and os.environ.get("XDG_CURRENT_DESKTOP") or now - _synced < 5:
+        return
+    _synced = now
+    try:
+        out = run(["systemctl", "--user", "show-environment"], timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    for ln in out.splitlines():
+        k, _, v = ln.partition("=")
+        if k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP",
+                 "XDG_SESSION_DESKTOP", "DESKTOP_SESSION", "HYPRLAND_INSTANCE_SIGNATURE",
+                 "DBUS_SESSION_BUS_ADDRESS") and v and not os.environ.get(k):
+            os.environ[k] = v
 
 
 def truncate(text: str, n: int = 400) -> str:

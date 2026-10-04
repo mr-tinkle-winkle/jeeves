@@ -69,11 +69,17 @@ class Memory:
             self._save()
             return before - len(self.permanent) - len(self.long_term)
 
-    def context_for(self, agent: str | None = None) -> str:
+    def notes_for(self, agent: str | None = None, limit: int = 30, own_only: bool = False) -> list[dict[str, Any]]:
         notes = self.all()
+        if own_only:
+            notes = [n for n in notes if n.get("agent") == agent]
+        return notes[-limit:] if limit > 0 else []
+
+    def context_for(self, agent: str | None = None, limit: int = 30, own_only: bool = False) -> str:
+        notes = self.notes_for(agent, limit, own_only)
         if not notes:
             return ""
-        return "Things the user asked you to remember:\n" + "\n".join(f"- {n['text']}" for n in notes[-30:])
+        return "Things the user asked you to remember:\n" + "\n".join(f"- {n['text']}" for n in notes)
 
     @staticmethod
     def detect(text: str) -> tuple[str | None, str]:

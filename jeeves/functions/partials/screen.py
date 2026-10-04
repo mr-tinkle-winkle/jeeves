@@ -9,37 +9,95 @@ model; otherwise Jeeves looks for the object's name as text.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 from ...daemon import desktop as dk
-from ...util import desktop, normalize, run, similarity, which
+from ...util import desktop, graphical_env, normalize, run, similarity, which
 from ..base import Arg, FunctionError, partial
 
 REGIONS = ["anywhere", "top", "bottom", "left", "right", "middle", "top-left", "top-right", "bottom-left",
            "bottom-right"]
 
 
+last_tool = ""          # which tool took the last screenshot (for jeeves doctor)
+
+
+def _portal_cmd(path: Path) -> list[str]:
+    exe = os.environ.get("JEEVES_BIN") or which("jeeves")
+    if exe:
+        return [exe, "screenshot-portal", str(path)]
+    return [sys.executable, "-m", "jeeves.screenshot_portal", str(path)]
+
+
+def screenshot_commands(path: Path) -> list[tuple[str, list[str]]]:
+    """Screenshot tools to try, best first for this desktop. KWin only lets Spectacle
+    (and the desktop portal) capture silently; wlroots compositors and Hyprland use grim."""
+    p = str(path)
+    tools = {
+        "spectacle": ["spectacle", "-b", "-n", "-f", "-o", p] if which("spectacle") else None,
+        "portal": _portal_cmd(path),
+        "grim": ["grim", p] if which("grim") else None,
+        "gnome-screenshot": ["gnome-screenshot", "-f", p] if which("gnome-screenshot") else None,
+        "import": ["import", "-window", "root", p] if which("import") else None,
+    }
+    order = (["spectacle", "portal", "grim"] if desktop() == "kde" else
+             ["grim", "portal", "spectacle", "gnome-screenshot", "import"])
+    return [(name, tools[name]) for name in order if tools.get(name)]
+
+
 def screenshot() -> Path:
     fd, name = tempfile.mkstemp(prefix="jeeves-shot-", suffix=".png")
     os.close(fd)
     path = Path(name)
-    if desktop() != "kde" and which("grim"):
-        cmd = ["grim", str(path)]
-    elif which("spectacle"):
-        cmd = ["spectacle", "-b", "-n", "-f", "-o", str(path)]
-    elif which("grim"):
-        cmd = ["grim", str(path)]
-    elif which("gnome-screenshot"):
-        cmd = ["gnome-screenshot", "-f", str(path)]
-    elif which("import"):
-        cmd = ["import", "-window", "root", str(path)]
-    else:
-        raise FunctionError("no screenshot tool installed (grim or spectacle)")
-    out = run(cmd, timeout=15)
-    if out.returncode != 0 or not path.exists() or path.stat().st_size == 0:
-        raise FunctionError(f"screenshot failed: {out.stderr.strip() or out.returncode}")
-    return path
+    errors = []
+    env = graphical_env()
+    for tool, cmd in screenshot_commands(path):
+        path.write_bytes(b"")
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"{tool}: {exc}")
+            continue
+        if out.returncode == 0 and path.exists() and path.stat().st_size > 0:
+            global last_tool
+            last_tool = tool
+            return path
+        last = (out.stderr or out.stdout or "").strip().splitlines()
+        errors.append(f"{tool}: {last[-1] if last else f'exit {out.returncode}'}")
+    path.unlink(missing_ok=True)
+    if not errors:
+        raise FunctionError("no screenshot tool installed (spectacle, grim or the desktop portal)")
+    raise FunctionError("couldn't take a screenshot -- " + "; ".join(errors))
+
+
+class Mapper:
+    """Screenshot pixels <-> desktop (logical) coordinates, which mouse moves use.
+    A HiDPI or multi-monitor screenshot is in physical pixels and starts at 0,0;
+    the desktop may be scaled and may start elsewhere."""
+
+    def __init__(self, image_size: tuple[int, int], box: tuple[int, int, int, int] | None = None) -> None:
+        self.iw, self.ih = max(1, image_size[0]), max(1, image_size[1])
+        if box is None:
+            try:
+                outs = dk.outputs()
+                known = not (len(outs) == 1 and outs[0].name == "default")
+                box = dk.desktop_box() if known else None
+            except Exception:
+                box = None
+        self.box = box or (0, 0, self.iw, self.ih)     # layout unknown: assume 1 px = 1 unit
+        bx, by, bw, bh = self.box
+        self.sx, self.sy = bw / self.iw, bh / self.ih
+
+    def point(self, x: float, y: float) -> tuple[int, int]:
+        return int(round(self.box[0] + x * self.sx)), int(round(self.box[1] + y * self.sy))
+
+    def rect_to_image(self, rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        x, y, w, h = rect
+        return (int((x - self.box[0]) / self.sx), int((y - self.box[1]) / self.sy),
+                int(w / self.sx), int(h / self.sy))
 
 
 def ocr_words(image: Path) -> list[dict]:
@@ -78,6 +136,14 @@ def region_rect(region, width: int, height: int) -> tuple[int, int, int, int]:
         "bottom-right": (2 * w3, 2 * h3, w3, h3),
     }
     return table.get(r, table["anywhere"])
+
+
+def _rect_for(region, width: int, height: int, mp: Mapper) -> tuple[int, int, int, int]:
+    """A named region is relative to the screenshot; an {x,y,w,h} region is in desktop
+    coordinates (the same ones find_on_screen returns)."""
+    if isinstance(region, dict):
+        return mp.rect_to_image(region_rect(region, width, height))
+    return region_rect(region, width, height)
 
 
 def _inside(word: dict, rect: tuple[int, int, int, int]) -> bool:
@@ -132,8 +198,9 @@ def find_on_screen(ctx, target, region="anywhere", bounds="none"):
     shot = screenshot()
     try:
         width, height = _image_size(shot)
+        mp = Mapper((width, height))
         words = ocr_words(shot)
-        rect = region_rect(region, width, height)
+        rect = _rect_for(region, width, height, mp)
         candidates = [w for w in words if _inside(w, rect)] + _group_lines([w for w in words if _inside(w, rect)])
         best, score = None, 0.0
         t = normalize(str(target))
@@ -148,8 +215,8 @@ def find_on_screen(ctx, target, region="anywhere", bounds="none"):
             if vision:
                 return vision
             raise FunctionError(f"couldn't find '{target}' on screen")
-        result = {"x": best["x"] + best["w"] // 2, "y": best["y"] + best["h"] // 2, "text": best["text"],
-                  "score": round(score, 2)}
+        cx, cy = mp.point(best["x"] + best["w"] / 2, best["y"] + best["h"] / 2)
+        result = {"x": cx, "y": cy, "text": best["text"], "score": round(score, 2)}
         if bounds in ("rectangle", "polygon"):
             x, y, w, h = best["x"], best["y"], best["w"], best["h"]
             pts = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
@@ -161,7 +228,7 @@ def find_on_screen(ctx, target, region="anywhere", bounds="none"):
                     bottom = [(m["x"] + m["w"], m["y"] + m["h"]) for m in reversed(members)] + \
                              [(members[0]["x"], members[0]["y"] + members[0]["h"])]
                     pts = top + bottom
-            result["bounds"] = [{"x": px, "y": py} for px, py in pts]
+            result["bounds"] = [dict(zip("xy", mp.point(px, py))) for px, py in pts]
         return result
     finally:
         shot.unlink(missing_ok=True)
@@ -182,7 +249,7 @@ def read_screen_text(ctx, region="anywhere"):
     try:
         width, height = _image_size(shot)
         words = ocr_words(shot)
-        rect = region_rect(region, width, height)
+        rect = _rect_for(region, width, height, Mapper((width, height)))
         for _ in range(8):
             inside = [w for w in words if _inside(w, rect)]
             if inside or rect == (0, 0, width, height):

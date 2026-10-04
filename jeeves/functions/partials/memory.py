@@ -1,7 +1,8 @@
 """Memory: recent requests, long-term (RAM) and permanent (disk) memory."""
 from __future__ import annotations
 
-from ..base import Arg, partial
+from ...config import agent_memory
+from ..base import Arg, FunctionError, partial
 
 
 @partial("recent_requests", "Gets the most recent requests and what was done for them (default: the last 3, "
@@ -10,7 +11,12 @@ from ..base import Arg, partial
                Arg("agent", "agent", "Only this agent's requests", required=False, default=None)],
          returns="list of {text, agent, function, args, result}", category="memory", dry_run_safe=True)
 def recent_requests(ctx, count=None, agent=None):
-    n = int(count or ctx.settings.get("memory.recent_count", 3))
+    am = agent_memory(ctx.agent, ctx.settings)
+    if not am["enabled"]:
+        raise FunctionError(f"{ctx.agent.get('name', 'This agent')} has memory turned off")
+    n = int(count or am["recent"] or ctx.settings.get("memory.recent_count", 3))
+    if am["own_only"]:
+        agent = ctx.agent_id
     return ctx.engine.history.recent(n, agent=agent, exclude=ctx.request.get("id"))
 
 
@@ -23,6 +29,8 @@ def recent_requests(ctx, count=None, agent=None):
                    "commit to permanent memory"],
          category="memory")
 def remember(ctx, text, duration="long_term"):
+    if not agent_memory(ctx.agent, ctx.settings)["enabled"]:
+        raise FunctionError(f"{ctx.agent.get('name', 'This agent')} has memory turned off")
     ctx.engine.memory.add(str(text), permanent=(duration == "permanent"), agent=ctx.agent_id)
     return f"remembered ({duration.replace('_', ' ')})"
 
@@ -31,7 +39,11 @@ def remember(ctx, text, duration="long_term"):
          args=[Arg("query", "string", "What to look for (empty = everything)", required=False, default="")],
          returns="list of remembered notes", category="memory", dry_run_safe=True)
 def recall(ctx, query=""):
-    return [m["text"] for m in ctx.engine.memory.search(str(query))]
+    am = agent_memory(ctx.agent, ctx.settings)
+    if not am["enabled"]:
+        raise FunctionError(f"{ctx.agent.get('name', 'This agent')} has memory turned off")
+    return [m["text"] for m in ctx.engine.memory.search(str(query))
+            if not am["own_only"] or m.get("agent") == ctx.agent_id]
 
 
 @partial("forget", "Removes remembered notes that match.",

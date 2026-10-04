@@ -13,7 +13,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from ..util import desktop, run, which
+from ..util import desktop, run, sync_graphical_env, which
 
 
 class DesktopUnavailable(RuntimeError):
@@ -40,6 +40,7 @@ class Window:
 def _hypr(*args: str) -> Any:
     if not which("hyprctl"):
         raise DesktopUnavailable("hyprctl isn't installed")
+    sync_graphical_env()
     out = run(["hyprctl", "-j", *args], timeout=3)
     if out.returncode != 0:
         raise DesktopUnavailable(out.stderr.strip() or "hyprctl failed")
@@ -49,6 +50,7 @@ def _hypr(*args: str) -> Any:
 def _kdo(*args: str) -> str:
     if not which("kdotool"):
         raise DesktopUnavailable("kdotool isn't installed (needed on KDE Plasma)")
+    sync_graphical_env()
     out = run(["kdotool", *args], timeout=4)
     if out.returncode != 0:
         raise DesktopUnavailable(out.stderr.strip() or "kdotool failed")
@@ -222,3 +224,59 @@ def primary_output() -> str | None:
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return None
     return None
+
+
+@dataclass
+class Output:
+    name: str
+    x: int            # logical (scaled) desktop coordinates -- what mouse positions use
+    y: int
+    w: int
+    h: int
+    scale: float = 1.0
+    primary: bool = False
+
+
+def outputs() -> list[Output]:
+    """Every enabled monitor with its logical geometry, from KDE (kscreen-doctor) or
+    Hyprland. Falls back to one 1920x1080 screen."""
+    found: list[Output] = []
+    if desktop() == "hyprland" and which("hyprctl"):
+        try:
+            for m in _hypr("monitors") or []:
+                sc = float(m.get("scale") or 1)
+                found.append(Output(m.get("name", ""), int(m.get("x", 0)), int(m.get("y", 0)),
+                                    int(m.get("width", 1920) / sc), int(m.get("height", 1080) / sc), sc,
+                                    m.get("id") == 0))
+        except (DesktopUnavailable, ValueError, TypeError):
+            found = []
+    elif which("kscreen-doctor"):
+        try:
+            data = json.loads(run(["kscreen-doctor", "-j"], timeout=4).stdout or "{}")
+            outs = [o for o in data.get("outputs", []) if o.get("enabled")]
+            best = min((o.get("priority") or 99 for o in outs), default=99)
+            for o in outs:
+                mode = next((md for md in o.get("modes", []) if md.get("id") == o.get("currentModeId")), None)
+                if not mode:
+                    continue
+                sc = float(o.get("scale") or 1)
+                w, h = mode["size"]["width"], mode["size"]["height"]
+                if o.get("rotation") in (2, 8):            # left/right: portrait
+                    w, h = h, w
+                pos = o.get("pos") or {"x": 0, "y": 0}
+                found.append(Output(o.get("name", ""), int(pos.get("x", 0)), int(pos.get("y", 0)),
+                                    int(round(w / sc)), int(round(h / sc)), sc, (o.get("priority") or 99) == best))
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            found = []
+    if not found:
+        w, h = screen_size()
+        found = [Output("default", 0, 0, w, h, 1.0, True)]
+    return found
+
+
+def desktop_box() -> tuple[int, int, int, int]:
+    """Bounding box (x, y, w, h) of all monitors, in logical coordinates."""
+    outs = outputs()
+    x0, y0 = min(o.x for o in outs), min(o.y for o in outs)
+    x1, y1 = max(o.x + o.w for o in outs), max(o.y + o.h for o in outs)
+    return x0, y0, x1 - x0, y1 - y0

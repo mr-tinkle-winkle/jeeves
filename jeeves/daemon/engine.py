@@ -36,6 +36,7 @@ from .imports import Imports
 from .intent import Decision, IntentProcessor
 from .keyboard import Keyboard
 from .listener import Listener, Session
+from ..config import agent_memory
 from .memory import Memory
 from .online import Online
 from .puppetry import Puppetry
@@ -822,7 +823,7 @@ class Engine:
                 return
             result = ctx.call(decision.function, **decision.args)
             mem_kind, cleaned = Memory.detect(entry["text"])
-            if mem_kind and decision.function != "remember":
+            if mem_kind and decision.function != "remember" and agent_memory(ctx.agent, self.settings)["enabled"]:
                 self.memory.add(cleaned, permanent=mem_kind == "permanent", agent=ctx.agent_id)
                 ctx.trace("remembered", kind=mem_kind, text=cleaned)
             if not ctx.spoke and result not in (None, "") and not isinstance(result, bool):
@@ -1033,7 +1034,9 @@ class Engine:
         receiver = self.agents()[target]
         funcs = self.registry.enabled_for(receiver)
         listing = "\n".join(f"- {f.name}: {f.description}" for f in funcs)
-        recent = self.history.recent(int(self.settings.get("memory.recent_count", 3)), exclude=ctx.entry["id"])
+        am = agent_memory(ctx.agent, self.settings)
+        recent = self.history.recent(am["recent"], agent=ctx.agent_id if am["own_only"] else None,
+                                     exclude=ctx.entry["id"]) if am["recent"] else []
         convo = "\n".join(f"User: {r['text']}\n{self.agents().get(r['agent'] or '', {}).get('name', 'Agent')}: "
                           f"{r['result']}" for r in recent)
         composed = None
@@ -1071,14 +1074,19 @@ class Engine:
             pass
         if shutil.which("tesseract") and re.search(r"\b(click|press|button|select|open)\b", instruction, re.I):
             try:
-                from ..functions.partials.screen import _group_lines, ocr_words, screenshot
+                from ..functions.partials.screen import Mapper, _group_lines, _image_size, ocr_words, screenshot
                 shot = screenshot()
                 try:
+                    mp = Mapper(_image_size(shot))
                     lines = _group_lines(ocr_words(shot))[:120]
                 finally:
                     shot.unlink(missing_ok=True)
+                bx, by, bw, bh = mp.box
+                info.append(f"The desktop spans x={bx}..{bx + bw - 1}, y={by}..{by + bh - 1} "
+                            "(use absolute moves with these coordinates).")
                 info.append("Text on screen (centre x,y): " + "; ".join(
-                    f"'{l['text']}'@{l['x'] + l['w'] // 2},{l['y'] + l['h'] // 2}" for l in lines))
+                    "'{}'@{},{}".format(l["text"], *mp.point(l["x"] + l["w"] / 2, l["y"] + l["h"] / 2))
+                    for l in lines))
             except Exception as exc:
                 ctx.think(f"Couldn't read the screen: {exc}")
         prompt = (f"Plan keyboard/mouse actions for: {instruction}\n\n" + "\n".join(info) +

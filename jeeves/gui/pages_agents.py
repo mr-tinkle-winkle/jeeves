@@ -7,7 +7,8 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QInputDialog, QPlainTextEdit, QVBoxLayout, QWidget
 
-from .ui_kit import CustomButton, CustomCheckBox, CustomGroupBox, CustomLineEdit, CustomDoubleSpinBox, show_message
+from .ui_kit import (CustomButton, CustomCheckBox, CustomDoubleSpinBox, CustomGroupBox, CustomLineEdit,
+                     CustomSpinBox, show_message)
 from .widgets import discard, Page, combo, is_locked, label, row
 
 LISTEN = [("Just me (microphone)", "user"), ("Just desktop audio", "desktop"), ("Both", "both"),
@@ -108,6 +109,27 @@ class AgentsPage(Page):
                           "useful or funny, 0.1 = only for something important, 0 = never. Uses the local "
                           "response model."))
         self.jump_in.toggled.connect(lambda on: self.jump_freq.setEnabled(on))
+
+        # --- memory
+        g = self._group(f, "Memory")
+        self.mem_enabled = CustomCheckBox("Remember things (past requests and notes)")
+        g.addWidget(self.mem_enabled)
+        self.mem_recent = CustomSpinBox()
+        self.mem_recent.setRange(-1, 50)
+        self.mem_recent.setSpecialValueText("Default")
+        self.mem_recent.wheelEvent = lambda e: e.ignore()
+        g.addWidget(row(label("Recent requests it sees", False), self.mem_recent))
+        self.mem_notes = CustomSpinBox()
+        self.mem_notes.setRange(0, 500)
+        self.mem_notes.wheelEvent = lambda e: e.ignore()
+        g.addWidget(row(label("Remembered notes it sees", False), self.mem_notes))
+        self.mem_own = CustomCheckBox("Only its own requests and notes")
+        g.addWidget(self.mem_own)
+        g.addWidget(label("Recent requests let it follow up (\"make it louder\", \"the macro I just made\"); notes "
+                          "are what you asked Jeeves to remember. More memory means longer prompts, so slower "
+                          "replies on small models. Off: the agent starts fresh every time and can't remember "
+                          "anything. Default uses the global count (Listening & Keys)."))
+        self.mem_enabled.toggled.connect(self._memory_enabled)
 
         # --- when active
         g = self._group(f, "When this agent is active")
@@ -222,6 +244,12 @@ class AgentsPage(Page):
         self.jump_in.setChecked(bool(j.get("enabled")))
         self.jump_freq.setValue(float(j.get("frequency", 0.3)))
         self.jump_freq.setEnabled(bool(j.get("enabled")))
+        m = a.get("memory") or {}
+        self.mem_enabled.setChecked(bool(m.get("enabled", True)))
+        self.mem_recent.setValue(-1 if m.get("recent") is None else int(m["recent"]))
+        self.mem_notes.setValue(int(m.get("notes", 30) if m.get("notes") is not None else 30))
+        self.mem_own.setChecked(bool(m.get("own_only", False)))
+        self._memory_enabled(self.mem_enabled.isChecked())
         self.output.setCurrentIndex(max(0, self.output.findData(a.get("output_to", "speakers"))))
         self.show_output.setChecked(a.get("show_output", True))
         self.color_edit.setText(a.get("indicator_color") or "")
@@ -254,6 +282,10 @@ class AgentsPage(Page):
         if lk:
             self.form.setToolTip("This agent is declared in NixOS")
 
+    def _memory_enabled(self, on: bool) -> None:
+        for w in (self.mem_recent, self.mem_notes, self.mem_own):
+            w.setEnabled(on)
+
     def _device_visibility(self) -> None:
         on = self.listen.currentData() == "device"
         self.device_row.setVisible(on)
@@ -284,6 +316,9 @@ class AgentsPage(Page):
             "listen_device": self.device.currentData() or "" if self.listen.currentData() == "device" else
             a.get("listen_device", ""),
             "jump_in": {"enabled": self.jump_in.isChecked(), "frequency": round(self.jump_freq.value(), 2)},
+            "memory": {"enabled": self.mem_enabled.isChecked(),
+                       "recent": None if self.mem_recent.value() < 0 else self.mem_recent.value(),
+                       "notes": self.mem_notes.value(), "own_only": self.mem_own.isChecked()},
             "output_to": self.output.currentData(), "show_output": self.show_output.isChecked(),
             "indicator_color": self.color_edit.text().strip() or None,
             "enable_when_open": split(self.enable_open), "enable_when_focused": split(self.enable_focus),

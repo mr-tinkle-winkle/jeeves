@@ -20,6 +20,7 @@ from typing import Any
 from ..functions.base import FunctionDef
 from ..functions.registry import Registry
 from ..util import normalize, parse_duration, similarity
+from ..config import agent_memory
 from .memory import Memory
 
 SYSTEM = """You are the intention processor for a voice assistant named {agent}.
@@ -35,6 +36,10 @@ Answer with JSON only:
 # Functions
 {dictionary}
 """
+
+
+def agent_id_of(ctx: Any) -> str | None:
+    return getattr(ctx, "agent_id", None) if ctx is not None else None
 
 
 @dataclass
@@ -125,8 +130,9 @@ class IntentProcessor:
                                dictionary=self.registry.dictionary_text(functions, examples))
         memory_kind, _ = Memory.detect(text)
         messages = [{"role": "system", "content": system}]
-        recent = self.history.recent(int(self.settings.get("memory.recent_count", 3)),
-                                     exclude=ctx.request.get("id") if ctx else None)
+        am = agent_memory(agent, self.settings)
+        recent = self.history.recent(am["recent"], agent=agent_id_of(ctx) if am["own_only"] else None,
+                                     exclude=ctx.request.get("id") if ctx else None) if am["recent"] else []
         if recent:
             messages.append({"role": "system", "content": "Recent requests (for 'that', 'it', 'the one I just "
                              "made'):\n" + "\n".join(f"- \"{r['text']}\" -> {r['function']} {json.dumps(r['args'])}"
