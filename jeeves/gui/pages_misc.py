@@ -57,7 +57,10 @@ class GeneralPage(Page):
         self.voice_layout.setContentsMargins(0, 0, 0, 0)
         k.addWidget(self.voice_rows)
         self.combo_edit(k, "Manual Response Review", "manual_request.review_keybind")
-        self.combo_edit(k, "Turn Jeeves on/off (all AIs)", "manual_request.toggle_keybind")
+        self.combo_edit(k, "Turn Jeeves off", "manual_request.toggle_keybind")
+        k.addWidget(label("Off stops the Jeeves daemon, keybinds included, so this key can only turn it off. For a "
+                          "key that turns it back on too, add a shortcut for the command “jeeves --toggle” in "
+                          "System Settings > Keyboard > Shortcuts."))
 
         a = self.section("Audio devices")
         self.mic = self.b.choice(a, "Microphone", "audio.microphone", [("Default", "")])

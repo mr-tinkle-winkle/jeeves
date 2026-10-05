@@ -7,7 +7,7 @@
     jeeves --manual_request=voice --agent=jeeves
     jeeves --review                          Manual Response Review popup
     jeeves --abort                           stop all agents, release all inputs
-    jeeves --toggle                          turn Jeeves (every AI) off / back on
+    jeeves --toggle                          turn Jeeves off (stops the daemon) / back on (starts it)
     jeeves on | jeeves off
     jeeves dry-run "Jeeves, open OBS"        what WOULD happen
     jeeves status | history | models | functions | dictionary
@@ -78,7 +78,8 @@ def main(argv: list[str] | None = None) -> int:
             _print(ipc.call("abort"))
             return 0
         if a.toggle:
-            print("Jeeves is " + ("on" if ipc.call("power.toggle") else "off"))
+            from . import service
+            print("Jeeves is " + ("on" if service.toggle() else "off"))
             return 0
         if a.review:
             ipc.call("ui.review")
@@ -121,7 +122,9 @@ def main(argv: list[str] | None = None) -> int:
             entry = ipc.call("request.dry_run", text=" ".join(a.args), agent=a.agent, timeout=120)
             _print(entry if a.json else _describe(entry))
         elif cmd in ("on", "off"):
-            print("Jeeves is " + ("on" if ipc.call("power.set", on=cmd == "on") else "off"))
+            from . import service
+            service.power_on() if cmd == "on" else service.power_off()
+            print(f"Jeeves is {cmd}")
         elif cmd == "status":
             _print(ipc.call("status"))
         elif cmd == "history":
@@ -171,9 +174,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             p.error(f"unknown command '{cmd}'")
     except ipc.DaemonUnavailable as exc:
-        print(f"jeeves: {exc}", file=sys.stderr)
+        from . import config
+        if not config.Settings().get("general.enabled", True):
+            print("jeeves: Jeeves is off -- turn it on with `jeeves on` (or the GUI)", file=sys.stderr)
+        else:
+            print(f"jeeves: {exc}", file=sys.stderr)
         return 2
     except ipc.DaemonError as exc:
+        print(f"jeeves: {exc}", file=sys.stderr)
+        return 1
+    except (RuntimeError, PermissionError) as exc:      # starting/stopping the daemon
         print(f"jeeves: {exc}", file=sys.stderr)
         return 1
     return 0

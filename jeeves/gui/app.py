@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QHBoxLayout, QLabel, QMainWindow, QSizePolicy,
                                QStackedWidget, QVBoxLayout, QWidget)
 
@@ -25,6 +25,8 @@ def main() -> int:
 
 
 class MainWindow(QMainWindow):
+    _power_done = Signal(str)          # from the thread that starts/stops the daemon
+
     def __init__(self) -> None:
         super().__init__()
         from .pages_agents import AgentsPage
@@ -81,8 +83,10 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(page)
         # the master switch: off = every AI stops and unloads (same as `jeeves --toggle`)
         self.power = CustomCheckBox("Jeeves on")
-        self.power.setToolTip("Off stops listening and unloads every AI model. Same as `jeeves --toggle`.")
+        self.power.setToolTip("Off stops the Jeeves daemon (every AI model, listening, keybinds); on starts a "
+                              "fresh one. Same as `jeeves --toggle`.")
         self.power.toggled.connect(self._power_toggled)
+        self._power_done.connect(self._after_power)
         side.addWidget(self.power)
         self.status = QLabel("Connecting to the daemon…")
         self.status.setWordWrap(True)
@@ -122,17 +126,43 @@ class MainWindow(QMainWindow):
         self.daemon.call("settings.get", got, lambda _e: None)
 
     def _power_toggled(self, on: bool) -> None:
-        def failed(err: str) -> None:
+        import threading
+
+        from .. import service
+        self.power.setEnabled(False)
+        self.status.setText("Starting Jeeves…" if on else "Stopping Jeeves…")
+
+        def go() -> None:
+            err = ""
+            try:
+                service.power_on() if on else service.power_off()
+            except Exception as exc:  # noqa: BLE001 -- shown to the user
+                err = str(exc)
+            self._power_done.emit(err)
+        threading.Thread(target=go, daemon=True).start()
+
+    def _after_power(self, err: str) -> None:
+        self.power.setEnabled(True)
+        if err:
             self._show_message(self, "Jeeves", err)
-            self.reload()
-        self.daemon.call("power.set", None, failed, on=on)
+        self.daemon._check()           # the poll reports the new state (and reloads settings when on)
+        self._connected(self.daemon.online)
 
     def _refresh_page(self, i: int) -> None:
         if self.settings and 0 <= i < len(self.pages):
             self.pages[i][1].refresh(self.settings, self.locked)
 
     def _connected(self, ok: bool) -> None:
-        self.status.setText("Daemon running" if ok else "Daemon not running —\nsystemctl --user start jeeves")
+        if ok:
+            self.status.setText("Daemon running")
+        else:
+            from .. import config
+            off = not config.Settings().get("general.enabled", True)
+            self.status.setText("Jeeves is off —\nturn it on to change settings" if off else
+                                "Daemon not running —\nsystemctl --user start jeeves")
+            self.power.blockSignals(True)
+            self.power.setChecked(False)
+            self.power.blockSignals(False)
         self.stack.setEnabled(ok)
         if ok:
             self.reload()

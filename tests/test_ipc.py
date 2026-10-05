@@ -73,15 +73,35 @@ def test_cli_reports_missing_daemon(capsys):
     assert "isn't running" in capsys.readouterr().err
 
 
-def test_cli_toggle(capsys):
+def test_cli_toggle_stops_and_starts_the_daemon(capsys, monkeypatch):
+    from jeeves import config, service
+    from jeeves.cli import main
     srv, stop = start_server()
+    srv.engine.on_exit = stop.set                  # what the real server wires up
+    servers = [(srv, stop)]
+    monkeypatch.setattr(service, "start", lambda timeout=20: servers.append(start_server()))
     try:
-        from jeeves.cli import main
         assert main(["--toggle"]) == 0
         assert "off" in capsys.readouterr().out
-        assert ipc.call("power.get") is False
+        assert not service.running()                                   # the daemon stopped
+        assert config.Settings().get("general.enabled") is False      # and stays off next login
         assert main(["on"]) == 0
         assert "on" in capsys.readouterr().out
+        assert len(servers) == 2 and service.running() and ipc.call("power.get") is True
+        servers[1][0].engine.on_exit = servers[1][1].set
+        assert main(["off"]) == 0 and not service.running()
     finally:
-        stop.set()
-        srv.engine.timers.stop()
+        for s, st in servers:
+            st.set()
+            s.engine.timers.stop()
+
+
+def test_daemon_does_not_start_while_switched_off():
+    import asyncio as _asyncio
+    from jeeves import config
+    from jeeves.daemon.server import Server
+    config.Settings().set("general.enabled", False)
+    srv = Server(start_io=False)
+    _asyncio.run(_asyncio.wait_for(srv.serve(), 10))                # returns instead of serving
+    from jeeves import service
+    assert not service.running()

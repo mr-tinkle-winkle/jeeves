@@ -264,11 +264,18 @@ class Server:
                 raise SystemExit("jeeves daemon is already running")
             except (ConnectionError, OSError):
                 sock.unlink(missing_ok=True)
+        if not self.engine.is_on():
+            # switched off: don't run at all (logging in with Jeeves off keeps it off)
+            log.info("Jeeves is switched off; not starting (turn it on with `jeeves on` or the GUI)")
+            self.engine.stop()
+            return
         server = await asyncio.start_unix_server(self.handle, path=str(sock), limit=16 * 1024 * 1024)
         os.chmod(sock, 0o600)
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             self.loop.add_signal_handler(sig, stop.set)
+        loop = self.loop
+        self.engine.on_exit = lambda: loop.call_soon_threadsafe(stop.set)
         self.engine.start()
         log.info("jeeves daemon listening on %s", sock)
         async with server:

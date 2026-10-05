@@ -80,6 +80,7 @@ class Engine:
         self.training = Training(self.settings, self.registry)
         self.intent.extra_examples = self.training.intent_examples
         self.control = Control(self.settings)
+        self.on_exit: Callable[[], None] | None = None     # set by the server: stop the daemon
         self.puppetry = Puppetry(self.settings)
         self.online = Online(self.settings)
         self.wikipedia = Wikipedia(self.settings, self.publish)
@@ -163,7 +164,11 @@ class Engine:
         else:
             self.abort()
             self.models.unload_all()
-            self.publish("notice", {"text": "Jeeves is off -- all AI models unloaded"})
+            self.publish("notice", {"text": "Jeeves is off"})
+            if self.on_exit is not None:
+                # off = the daemon stops; turning on starts a fresh one (GUI, `jeeves on`, `jeeves --toggle`).
+                # A moment's delay lets the reply to the request that switched it off go out first.
+                threading.Timer(0.5, self.on_exit).start()
 
     def _refuse_if_off(self) -> bool:
         if self.is_on():
