@@ -203,9 +203,10 @@ class Server:
             "puppetry.macros": e.puppetry.macro_names,
             "desktop.apps": lambda: {"open": dk.open_apps(), "processes": dk.processes()[:400]},
             "audio.devices": audio_devices,
+            "audio.test_virtual_mic": e.test_virtual_mic,
             "summary.text": lambda minutes=None: e.summary.text(minutes),
             "summary.clear": e.summary.clear,
-            "doctor": lambda move_test=True: doctor.run(e.control, bool(move_test)),
+            "doctor": lambda move_test=True: doctor.run(e.control, bool(move_test), s, e.registry),
         }
 
     # ---- connection handling --------------------------------------------

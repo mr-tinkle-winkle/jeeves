@@ -124,11 +124,89 @@ def control_mode(ctx, actions=None, instruction=""):
     if not actions:
         if not instruction:
             raise FunctionError("nothing to do (no actions or instruction)")
-        actions = ctx.engine.plan_control(ctx, str(instruction))
+        from .control_phrases import simple_actions
+        actions = simple_actions(ctx, str(instruction))       # "click Save", "type hi", "press ctrl+s"
+        if actions is None:
+            actions = ctx.engine.plan_control(ctx, str(instruction))
+        ctx.trace("actions", actions=actions)
     if ctx.dry_run:
         return {"would_run": actions}
     done = ctx.engine.control.run_actions(actions, ctx)
     return {"ran": done, "held": ctx.engine.control.held()}
+
+
+@full(
+    "screen_reading",
+    "Looks at the screen: reads the text on it (all of it or one area), answers questions about what's shown "
+    "(an error message, a page, a dialog), or says where something is.",
+    args=[Arg("question", "string", "What the user wants to know or have read, as said", required=False,
+              default=""),
+          Arg("region", "region", "Where to look: anywhere, top, bottom, left, right, middle, top-left, ...",
+              required=False, default="anywhere"),
+          Arg("find", "string", "Something to locate on screen (instead of reading)", required=False, default="")],
+    how="Takes a screenshot, reads it with OCR (Tesseract) and has the local response model answer from the text "
+        "it found. Without a local model it reads the text out. Read-only: it never clicks anything.",
+    keywords=["on my screen", "on the screen", "read the screen", "read my screen", "what does it say",
+              "what does this say", "look at my screen", "can you see my screen", "what am i looking at"],
+    examples=["Jeeves, what does this error say?", "Jeeves, read the top of the screen.",
+              "Jeeves, where is the save button?"],
+    default_enabled=True, category="screen", uses=["read_screen_text", "find_on_screen", "generate_text"],
+)
+def screen_reading(ctx, question="", region="anywhere", find=""):
+    import re as _re
+    if ctx.dry_run:
+        return f"<read the screen ({region}) for: {question or find}>"
+    q = str(question or "")
+    m = _re.search(r"\bwhere\s+is\s+(?:the\s+)?(.+?)(?:\s+(?:button|icon|link|tab))?\s*\??$", q, _re.I)
+    if not find and m:
+        find = m.group(1)
+    ctx.state("thinking", "Looking at the screen")
+    if find:
+        hit = ctx.call("find_on_screen", target=str(find), region=region)
+        where = _describe_position(ctx, hit["x"], hit["y"])
+        try:
+            ctx.call("mark_screen_position", x=hit["x"], y=hit["y"])     # circle it on screen
+        except FunctionError:
+            pass
+        return ctx.say(f"{hit.get('text') or find} is {where}.")
+    text = ctx.call("read_screen_text", region=region)
+    ctx.think("Text on screen:\n" + text)
+    if not text.strip():
+        return ctx.say("I can't read any text there." if region != "anywhere" else
+                       "I can't read any text on the screen right now.")
+    from ..daemon import desktop as dk
+    try:
+        f = dk.focused()
+        app = f"\nFocused window: {f.app} -- {f.title}" if f else ""
+    except Exception:
+        app = ""
+    answer = ctx.engine.models.respond(
+        ctx.agent,
+        f"Text read from the user's screen{'' if region == 'anywhere' else f' ({region} of it)'} with OCR, top "
+        f"to bottom (it may contain recognition mistakes and menu clutter):\n{text[:6000]}{app}\n\n"
+        f"The user said: {q or 'read the screen'}\n\nAnswer from what's on the screen. If they asked you to read "
+        "something, read the relevant part out (skip menus and buttons). If it isn't on screen, say so.",
+        ctx=ctx)
+    if answer is None:
+        answer = text if len(text) < 600 else text[:600].rsplit(" ", 1)[0] + "…"
+    return ctx.say(answer)
+
+
+def _describe_position(ctx, x: int, y: int) -> str:
+    from ..daemon import desktop as dk
+    try:
+        outs = dk.outputs()
+    except Exception:
+        outs = []
+    out = next((o for o in outs if o.x <= x < o.x + o.w and o.y <= y < o.y + o.h), None)
+    if out is None:
+        return f"at {x}, {y}"
+    rx, ry = (x - out.x) / max(1, out.w), (y - out.y) / max(1, out.h)
+    v = "top" if ry < 0.33 else "bottom" if ry > 0.66 else "middle"
+    h = "left" if rx < 0.33 else "right" if rx > 0.66 else ("" if v == "middle" else "middle")
+    spot = "the middle" if v == "middle" and not h else f"the {v} {h}".strip() if v != "middle" else f"the {h} middle"
+    screen = f" of {out.name}" if len(outs) > 1 else ""
+    return f"near {spot}{screen}"
 
 
 @full(
@@ -208,7 +286,7 @@ def macros(ctx, action, name="", description="", arguments=None):
               required=False, default="")],
     how="Timers show in the bottom-right of the screen (toggle in Settings > Indicators). When one ends Jeeves "
         "plays a sound, speaks and sends a notification.",
-    keywords=["timer", "remind me", "schedule", "alarm", "at"],
+    keywords=["timer", "remind me", "schedule", "alarm"],
     examples=["Jeeves, set a timer for ten minutes for the pasta.", "Jeeves, at 7pm, open OBS."],
     default_enabled=True, category="time",
 )
@@ -223,7 +301,10 @@ def timers(ctx, action, duration="", time="", label="", request=""):
         n = t.cancel(label or None)
         return ctx.say(f"Cancelled {n} timer{'s' if n != 1 else ''}.")
     if action == "timer":
-        seconds = parse_duration(duration)
+        try:
+            seconds = parse_duration(duration)
+        except ValueError as exc:
+            raise FunctionError("how long should the timer be?") from exc
         if ctx.dry_run:
             return f"<timer {seconds:g}s>"
         t.add(seconds, label=label, agent=ctx.agent_id)

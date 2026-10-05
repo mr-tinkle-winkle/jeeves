@@ -66,6 +66,14 @@ class GeneralPage(Page):
         self.b.text(a, "Virtual microphone name", "audio.virtual_mic_sink",
                     hint="Agents set to speak 'through the microphone' play into this; pick 'Jeeves-Microphone' "
                          "as the mic in Discord/OBS.")
+        self.vmic_btn = CustomButton("Test Jeeves-Microphone")
+        self.vmic_btn.clicked.connect(self.test_vmic)
+        self.vmic_result = label("Says a sentence into Jeeves-Microphone (only) and checks it comes out. With "
+                                 "Discord on Jeeves-Microphone, friends hear it too. If they hear you but not the "
+                                 "agent: set its Speaks through to Microphone or Both, and with Both turn off "
+                                 "Discord's Echo Cancellation.")
+        a.addWidget(row(self.vmic_btn))
+        a.addWidget(self.vmic_result)
 
         r = self.section("Run Command safety")
         self.b.check(r, "Show commands and wait for confirmation before running them", "run_command.confirm")
@@ -104,6 +112,20 @@ class GeneralPage(Page):
                                             "exact positioning (same as 'jeeves doctor').")
         c.addWidget(self.doctor_view)
         self.finish()
+
+    def test_vmic(self) -> None:
+        self.vmic_btn.setEnabled(False)
+        self.vmic_result.setText("Speaking into Jeeves-Microphone…")
+
+        def done(res: Any) -> None:
+            self.vmic_btn.setEnabled(True)
+            if isinstance(res, dict):
+                self.vmic_result.setText(("Works: " if res.get("ok") else "Problem: ") + res.get("detail", "") +
+                                         (f" ({res['error']})" if res.get("error") else "") +
+                                         f" Level {res.get('level')}.")
+            else:
+                self.vmic_result.setText(f"Problem: {res}")
+        self.daemon.call("audio.test_virtual_mic", done, done)
 
     def run_doctor(self) -> None:
         from ..daemon.doctor import format_report

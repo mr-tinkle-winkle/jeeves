@@ -180,8 +180,9 @@ class Engine:
 
     def _apply_settings_locked(self) -> None:
         self._apply_power()
-        if self.is_on() and any(a.get("output_to") in ("microphone", "both") for a in self.agents().values()):
-            # make "Jeeves-Microphone" exist before Discord/OBS look for it, not at the first sentence
+        if self.is_on():
+            # "Jeeves-Microphone" always exists while Jeeves is on, so Discord/OBS can list it before an
+            # agent first speaks into it (it carries your own mic in the meantime)
             from .audio import ensure_virtual_mic
             ensure_virtual_mic(self.settings.get("audio.virtual_mic_sink", "jeeves-mic"),
                                bool(self.settings.get("audio.virtual_mic_include_mic", True)),
@@ -792,6 +793,12 @@ class Engine:
                     return
                 raise FunctionError(exc.reason) from exc
             ctx.trace("intent", **decision.to_dict())
+            if decision.refusal:
+                entry["function"], entry["status"] = None, "refused"
+                entry["response"] = decision.refusal
+                if not ctx.dry_run:
+                    ctx.say(decision.refusal)
+                return
             threshold = float(self.settings.get("general.unclear_confidence", 0.45))
             rounds = 0
             while (decision.function is None or decision.confidence < threshold) and rounds < 2:
@@ -913,6 +920,45 @@ class Engine:
             ctx.trace("playback_failed", reason=pb.error)
             self._tts_problem(f"Couldn't play speech: {pb.error}")
         ctx.check_cancelled()
+
+    def test_virtual_mic(self) -> dict[str, Any]:
+        """Says a sentence into Jeeves-Microphone only and listens to it at the same time:
+        proves the path apps record from, and lets friends in a call hear the test."""
+        from .audio import RATE, VIRTUAL_MIC_SOURCE, ensure_virtual_mic, rms
+        sink = self.settings.get("audio.virtual_mic_sink", "jeeves-mic")
+        if not ensure_virtual_mic(sink, bool(self.settings.get("audio.virtual_mic_include_mic", True)),
+                                  self.settings.get("audio.microphone", "")):
+            raise RuntimeError("pactl isn't available, so the virtual microphone can't be created")
+        source = VIRTUAL_MIC_SOURCE.format(sink=sink)
+        agent = next(iter(self.agents().values()), {})
+        pcm, rate = self._synth(agent, "This is Jeeves. If you can hear me, the Jeeves microphone works.")
+        rec = subprocess.Popen(["parec", "--format=s16le", f"--rate={RATE}", "--channels=1",
+                                f"--device={source}"] if shutil.which("parec") else
+                               ["pw-record", "--raw", "--format", "s16", "--rate", str(RATE), "--channels", "1",
+                                "--target", source, "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        chunks: list[bytes] = []
+        reader = threading.Thread(target=lambda: chunks.extend(iter(lambda: rec.stdout.read(3200), b"")),
+                                  daemon=True)
+        reader.start()
+        time.sleep(0.3)
+        pb = Playback(pcm, rate, [sink])
+        with self._lock:
+            self.speaking += 1
+        try:
+            pb.play()
+        finally:
+            with self._lock:
+                self.speaking -= 1
+        time.sleep(0.3)
+        rec.terminate()
+        reader.join(2)
+        data = b"".join(chunks)
+        frames = [data[i:i + 960] for i in range(0, len(data) - 960, 960)]
+        peak = max((rms(f) for f in frames), default=0.0)
+        ok = pb.error is None and peak > 0.01
+        return {"ok": ok, "source": source, "level": round(peak, 3), "error": pb.error,
+                "detail": "Your friends should have heard the test sentence if Discord uses Jeeves-Microphone."
+                if ok else "Jeeves played the sentence but nothing came out of Jeeves-Microphone."}
 
     def _synth(self, agent: dict[str, Any], text: str) -> tuple[bytes, int]:
         """The agent's TTS; if that fails, eSpeak NG so there's always a voice."""

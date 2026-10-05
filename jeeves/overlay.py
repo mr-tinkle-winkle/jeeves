@@ -116,11 +116,12 @@ def main(popups: bool = False) -> int:
         named = next((sc for sc in screens if sc.name() == name), None) if name else None
         return named or QGuiApplication.primaryScreen()
 
-    def present(w: QWidget, edges: list[str], margins: tuple[int, int, int, int] = (0, 0, 0, 0)) -> None:
+    def present(w: QWidget, edges: list[str], margins: tuple[int, int, int, int] = (0, 0, 0, 0),
+                on: Any = None) -> None:
         """Show an overlay window: a layer surface anchored to edges (Wayland), or
         placed by geometry beforehand (X11). Re-anchors if the edges or screen changed.
         The screen is chosen when the window appears, never while it is showing."""
-        screen = target_screen() if not w.isVisible() else getattr(w, "_screen", None)
+        screen = on or (target_screen() if not w.isVisible() else getattr(w, "_screen", None))
         key = (tuple(edges), tuple(margins), screen.name() if screen is not None else "")
         if use_layer and w.isVisible() and getattr(w, "_layer_key", None) != key:
             w.hide()
@@ -573,12 +574,15 @@ def main(popups: bool = False) -> int:
             t.start()
 
         def add(self, m: dict[str, Any]) -> None:
-            scr = target_screen()
+            # the monitor the point is on (desktop coordinates), not the one the indicator uses
+            from PySide6.QtCore import QPoint
+            pt = QPoint(int(m.get("x", 0)), int(m.get("y", 0)))
+            scr = next((s for s in QGuiApplication.screens() if s.geometry().contains(pt)), None) or target_screen()
             geo = scr.geometry() if use_layer else scr.virtualGeometry()
             self.setGeometry(geo)
             m = dict(m, until=time.time() + float(m.get("seconds", 4)), born=time.time())
             self.marks.append(m)
-            present(self, ["top", "bottom", "left", "right"])
+            present(self, ["top", "bottom", "left", "right"], on=scr)
 
         def _tick(self) -> None:
             now = time.time()

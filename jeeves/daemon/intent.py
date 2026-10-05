@@ -48,8 +48,9 @@ class Decision:
     args: dict[str, Any] = field(default_factory=dict)
     confidence: float = 0.0
     question: str = ""
-    method: str = "keywords"          # model | keywords
+    method: str = "keywords"          # model | keywords | rules
     notes: list[str] = field(default_factory=list)
+    refusal: str = ""                 # say this instead of running anything (e.g. the function is off)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -67,6 +68,9 @@ class IntentProcessor:
     # ---- public ----------------------------------------------------------
     def decide(self, agent: dict[str, Any], text: str, ctx: Any = None) -> Decision:
         functions = [f for f in self.registry.enabled_for(agent) if not self._blocked(f, text)]
+        ruled = self.rule_decide(agent, text, functions)
+        if ruled is not None:
+            return ruled
         llm = None
         if self.models is not None:
             from ..models.manager import ModelUnavailable
@@ -182,6 +186,47 @@ class IntentProcessor:
                 return True
         return False
 
+    # ---- unmistakable requests -------------------------------------------
+    def strip_address(self, agent: dict[str, Any], text: str, polite: bool = True) -> str:
+        """'Jeeves, could you please click Save' -> 'click Save'."""
+        t = text.strip()
+        names = [n for n in (agent.get("call_names") or []) + [agent.get("name", "")] if n]
+        for n in sorted(names, key=len, reverse=True):
+            t = re.sub(rf"^\W*(hey\s+|ok\s+|okay\s+)?{re.escape(n)}\b[\s,.:!-]*", "", t, flags=re.I)
+        if not polite:
+            return t.strip(" .!")
+        t = re.sub(r"^(please\s+|can you\s+|could you\s+|would you\s+|will you\s+)+", "", t, flags=re.I)
+        return re.sub(r"\s+please[.!?]*$", "", t, flags=re.I).strip(" .!?")
+
+    def rule_decide(self, agent: dict[str, Any], text: str, functions: list[FunctionDef]) -> Decision | None:
+        """Requests whose meaning is unmistakable skip the model: small intent models
+        often answered "click Save" or "what's on my screen" with a chat reply."""
+        by_name = {f.name: f for f in functions}
+        core = self.strip_address(agent, text)
+        low = core.lower()
+        name = agent.get("name", "Jeeves")
+        if re.match(CONTROL_PATTERN, low):
+            if "control_mode" in by_name:
+                return Decision("control_mode", {"instruction": core}, 0.9, "", "rules")
+            if self.registry.get("control_mode") is not None:
+                return Decision(None, {}, 0.9, "", "rules", refusal=(
+                    f"Control Mode is turned off for {name}, so I can't use the keyboard or mouse. Turn it on "
+                    f"in Settings > Agents > {name} > Functions."))
+        if re.search(SCREEN_PATTERN, low) or re.search(SCREEN_PATTERN, text.lower()):
+            if "screen_reading" in by_name:
+                return Decision("screen_reading", {"question": self.strip_address(agent, text, polite=False),
+                                                   "region": guess_region(low)}, 0.9, "",
+                                "rules")
+            if self.registry.get("screen_reading") is not None:
+                return Decision(None, {}, 0.9, "", "rules", refusal=(
+                    f"Screen Reading is turned off for {name}. Turn it on in Settings > Agents > {name} > "
+                    "Functions."))
+        if re.match(r"^at\s+\d{1,2}(:\d{2})?\s*(am|pm|a\.m\.|p\.m\.)?\b", low) and "timers" in by_name:
+            args, problems = self.validate(by_name["timers"], self._guess_args(by_name["timers"], core, agent))
+            if not problems:
+                return Decision("timers", args, 0.9, "", "rules")
+        return None
+
     def keyword_decide(self, agent: dict[str, Any], text: str, functions: list[FunctionDef]) -> Decision:
         t = " " + normalize(text) + " "
         by_name = {f.name: f for f in functions}
@@ -253,6 +298,10 @@ class IntentProcessor:
             q = re.sub(r"^\W*(please\s+)?(look\s+up|search\s+(the\s+web\s+)?for|research|google|find\s+out)\s*",
                        "", text, flags=re.I).strip(" ?.")
             return {"question": q or text}
+        if f.name == "screen_reading":
+            return {"question": self.strip_address(agent, text), "region": guess_region(low)}
+        if f.name == "control_mode":
+            return {"instruction": self.strip_address(agent, text)}
         if f.name == "remember":
             kind, cleaned = Memory.detect(text)
             return {"text": cleaned, "duration": kind or "long_term"}
@@ -270,6 +319,28 @@ class IntentProcessor:
                 args[a.name] = text
                 break
         return args
+
+
+CONTROL_PATTERN = (r"^(left[- ]|right[- ]|middle[- ]|double[- ])?click\b|^(press|hit|tap)\s+(the\s+)?\S|"
+                   r"^(hold|hold down|release|let go)\b|^type\s+\S|^scroll\s+(up|down|left|right)\b|"
+                   r"^(move|put)\s+(the\s+)?(mouse|cursor|pointer)\b|^(take control|use the (mouse|keyboard))\b")
+SCREEN_PATTERN = (r"\b(on|of|at)\s+(my|the|this)\s+(screen|monitor|display)\b|"
+                  r"\bread\s+(out\s+)?(the|my|this|that|what)\b.*\b(screen|page|window|error|message|says?|text|popup|dialog)\b|"
+                  r"\bread\s+(the|my)\s+screen\b|\bwhat\s+(does|do)\s+(it|(this|that|the)(\s+\w+){0,2})\s+say\b|"
+                  r"\bwhat\s+(is|'s)\s+(this|that)\s+(error|message|popup|dialog|window)\b|"
+                  r"\b(can|do)\s+you\s+see\s+(my|the)\s+screen\b|\blook\s+at\s+(my|the|this)\s+screen\b|"
+                  r"\bwhat\s+am\s+i\s+looking\s+at\b|\bwhere\s+is\s+the\s+.+\s+(button|icon|link|tab)\b")
+
+
+def guess_region(low: str) -> str:
+    for r in ("top-left", "top-right", "bottom-left", "bottom-right"):
+        if r.replace("-", " ") in low or r in low:
+            return r
+    for word, r in (("top", "top"), ("bottom", "bottom"), ("left", "left"), ("right", "right"),
+                    ("middle", "middle"), ("center", "middle"), ("centre", "middle")):
+        if re.search(rf"\b(at|on|in)\s+the\s+{word}\b", low):
+            return r
+    return "anywhere"
 
 
 def _parse_json(raw: str) -> dict[str, Any] | None:

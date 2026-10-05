@@ -250,6 +250,15 @@ def outputs() -> list[Output]:
                                     m.get("id") == 0))
         except (DesktopUnavailable, ValueError, TypeError):
             found = []
+    elif os.environ.get("SWAYSOCK") and which("swaymsg"):
+        try:
+            for o in json.loads(run(["swaymsg", "-t", "get_outputs", "-r"], timeout=3).stdout or "[]"):
+                if o.get("active", True) and o.get("rect"):
+                    r = o["rect"]
+                    found.append(Output(o.get("name", ""), int(r["x"]), int(r["y"]), int(r["width"]),
+                                        int(r["height"]), float(o.get("scale") or 1), bool(o.get("focused"))))
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            found = []
     elif which("kscreen-doctor"):
         try:
             data = json.loads(run(["kscreen-doctor", "-j"], timeout=4).stdout or "{}")

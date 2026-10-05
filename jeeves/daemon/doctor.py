@@ -15,8 +15,64 @@ def _check(name: str, ok: bool, detail: str, fix: str = "") -> dict[str, Any]:
     return {"name": name, "ok": ok, "detail": detail, "fix": fix}
 
 
-def run(control: Any = None, move_test: bool = True) -> list[dict[str, Any]]:
+def audio_checks(settings: Any) -> list[dict[str, Any]]:
+    from .audio import VIRTUAL_MIC_SOURCE, _pactl, real_mic_source
     out: list[dict[str, Any]] = []
+    if not which("pactl"):
+        return [_check("Audio", False, "pactl isn't installed", "install pulseaudio's tools (pactl)")]
+    sink = settings.get("audio.virtual_mic_sink", "jeeves-mic") if settings is not None else "jeeves-mic"
+    source = VIRTUAL_MIC_SOURCE.format(sink=sink)
+    sources = [ln.split("\t")[1] for ln in _pactl("list", "short", "sources").splitlines() if "\t" in ln]
+    default = _pactl("get-default-source").strip()
+    real = real_mic_source(sink)
+    out.append(_check("Microphone", bool(real), f"Jeeves listens to: {real or 'nothing'} (system default: "
+                      f"{default or 'none'})", "" if real else "no microphone found"))
+    has = source in sources
+    loops = [ln for ln in _pactl("list", "short", "modules").splitlines()
+             if "module-loopback" in ln and f"sink={sink} " in ln + " "]
+    detail = f"'Jeeves-Microphone' ({source}) " + ("exists" if has else "is missing")
+    if loops:
+        detail += "; carries " + loops[0].split("source=")[1].split()[0]
+    out.append(_check("Jeeves-Microphone", has, detail,
+                      "" if has else "it's created when Jeeves is on; check that Jeeves is on"))
+    agents = (settings.get("agents", {}) or {}) if settings is not None else {}
+    into = [a.get("name", k) for k, a in agents.items() if a.get("output_to") in ("microphone", "both")]
+    both = [a.get("name", k) for k, a in agents.items() if a.get("output_to") == "both"]
+    out.append(_check("Agents speaking into it", bool(into), ", ".join(into) if into else "none",
+                      "" if into else "set an agent's Speaks through to Microphone or Both (Agents page), or "
+                      "friends only hear you"))
+    if both:
+        out.append(_check("Echo cancellation", True, f"{', '.join(both)} speak(s) through speakers and the mic",
+                          "if friends can't hear the agent, turn off Echo Cancellation in Discord's Voice "
+                          "settings (it removes sound that also comes out of your speakers), or use Microphone "
+                          "instead of Both"))
+    return out
+
+
+def function_checks(settings: Any, registry: Any) -> list[dict[str, Any]]:
+    out = []
+    agents = (settings.get("agents", {}) or {}) if settings is not None else {}
+    for aid, a in agents.items():
+        if a.get("deleted"):
+            continue
+        on = {f.name for f in registry.enabled_for(a)}
+        for fname, title in (("screen_reading", "Screen Reading"), ("control_mode", "Control Mode")):
+            ok = fname in on
+            out.append(_check(f"{title} for {a.get('name', aid)}", ok, "on" if ok else "off",
+                              "" if ok else f"turn it on in Agents > {a.get('name', aid)} > Functions"))
+    return out
+
+
+def run(control: Any = None, move_test: bool = True, settings: Any = None,
+        registry: Any = None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if settings is not None and registry is not None:
+        out += function_checks(settings, registry)
+    if settings is not None:
+        try:
+            out += audio_checks(settings)
+        except Exception as exc:
+            out.append(_check("Audio", False, str(exc)))
     d = desktop()
     disp = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY") or ""
     out.append(_check("Desktop", bool(disp),

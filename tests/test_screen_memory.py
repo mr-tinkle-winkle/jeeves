@@ -90,3 +90,66 @@ def test_remember_refused_when_memory_off(engine):
     on = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "test"))
     on.call("remember", text="my locker is 42")
     assert engine.memory.all()[0]["text"] == "my locker is 42"
+
+
+@pytest.mark.parametrize("text,function", [
+    ("Jeeves, what's on my screen?", "screen_reading"),
+    ("Jeeves, what does this error say", "screen_reading"),
+    ("Jeeves, read what it says at the top", "screen_reading"),
+    ("Jeeves, can you see my screen", "screen_reading"),
+    ("Jeeves, click the play button", "control_mode"),
+    ("Jeeves, could you type hello world please", "control_mode"),
+    ("Jeeves, press ctrl+s", "control_mode"),
+    ("Jeeves, at 7pm open OBS", "timers"),
+    ("Jeeves, what is the capital of France", "local_response"),
+])
+def test_unmistakable_requests_route_without_a_model(engine, text, function):
+    engine.settings.set("agents.jeeves.functions.control_mode", True)
+    agent = dict(engine.agents()["jeeves"], id="jeeves")
+    assert engine.intent.decide(agent, text).function == function
+
+
+def test_disabled_control_mode_says_so(engine):
+    entry = engine.dry_run("Jeeves, click Save", "jeeves")
+    assert entry["status"] == "refused" and "Control Mode is turned off" in entry["response"]
+
+
+def test_read_at_the_top_is_not_a_timer(engine):
+    agent = dict(engine.agents()["jeeves"], id="jeeves")
+    d = engine.intent.decide(agent, "Jeeves, read what it says at the top")
+    assert d.function == "screen_reading" and d.args["region"] == "top"
+
+
+class _Ctx:
+    def __init__(self, hits):
+        self.hits, self.calls = hits, []
+        self.engine = type("E", (), {"control": type("C", (), {"desktop_box": lambda s: (0, 0, 1920, 1080)})()})()
+
+    def call(self, name, **kw):
+        from jeeves.functions.base import FunctionError
+        self.calls.append(kw["target"])
+        if kw["target"] in self.hits:
+            return self.hits[kw["target"]]
+        raise FunctionError("not found")
+
+
+def test_control_phrases():
+    from jeeves.functions.control_phrases import simple_actions
+    ctx = _Ctx({"play": {"x": 500, "y": 300, "text": "Play"}})
+    acts = simple_actions(ctx, "double-click the play button")
+    assert ctx.calls == ["the play button", "play"]
+    assert acts[0] == {"do": "move", "x": 500, "y": 300, "absolute": True, "duration": 0.15}
+    assert [a["button"] for a in acts if a["do"] == "button"] == ["BTN_LEFT", "BTN_LEFT"]
+    assert simple_actions(ctx, "type 'Hello, there'") == [{"do": "type", "text": "Hello, there"}]
+    assert simple_actions(ctx, "press ctrl+shift+t") == [
+        {"do": "key", "key": "ctrl", "state": "down"}, {"do": "key", "key": "shift", "state": "down"},
+        {"do": "key", "key": "t", "state": "tap"}, {"do": "key", "key": "shift", "state": "up"},
+        {"do": "key", "key": "ctrl", "state": "up"}]
+    assert simple_actions(ctx, "press the button that opens settings") is None     # the model plans that
+    assert simple_actions(ctx, "scroll down a lot") == [{"do": "scroll", "amount": -10}]
+    assert simple_actions(ctx, "right-click here") == [{"do": "button", "button": "BTN_RIGHT", "state": "tap"}]
+    assert simple_actions(ctx, "move the mouse to the top left corner")[0]["x"] < 100
+    assert simple_actions(ctx, "let go of everything") == [{"do": "release_all"}]
+    from jeeves.functions.base import FunctionError
+    with pytest.raises(FunctionError, match="can't see"):
+        simple_actions(ctx, "click Export")
