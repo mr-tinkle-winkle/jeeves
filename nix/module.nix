@@ -99,6 +99,9 @@ in
       wantedBy = [ "graphical-session.target" ];
       partOf = [ "graphical-session.target" ];
       after = [ "graphical-session.target" "pipewire.service" ];
+      # NixOS gives user services a bare PATH: add the system and user profiles so the daemon
+      # finds nvidia-smi, kscreen-doctor and the apps Run Command / Open App start
+      path = [ "/run/wrappers" "/etc/profiles/per-user/${cfg.user}" "/run/current-system/sw" ];
       environment = {
         JEEVES_SYSTEM_SETTINGS = "/etc/jeeves/settings.json";
       } // lib.optionalAttrs (cfg.geminiApiKeyFile != null) {

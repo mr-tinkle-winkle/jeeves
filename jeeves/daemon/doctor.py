@@ -68,6 +68,21 @@ def run(control: Any = None, move_test: bool = True, settings: Any = None,
     out: list[dict[str, Any]] = []
     if settings is not None and registry is not None:
         out += function_checks(settings, registry)
+    try:
+        from ..models import hardware
+        hw = hardware.detect()
+        def gpu_desc(g: dict[str, Any]) -> str:
+            mem = "VRAM unknown" if g.get("vram_unknown") else "%.0f GB" % (g["vram_mb"] / 1024)
+            return f"{g['name']} ({mem})"
+        gpus = ", ".join(gpu_desc(g) for g in hw["gpus"]) or "none found"
+        backend = ", ".join(hw["llama_gpu"]) or "CPU-only build"
+        ok = bool(hw["gpus"]) and bool(hw["llama_gpu"]) and not any(g.get("vram_unknown") for g in hw["gpus"])
+        out.append(_check("GPU", ok, f"{gpus}; llama.cpp: {backend}",
+                          "" if ok else "no GPU found: for NVIDIA the driver must be loaded" if not hw["gpus"] else
+                          "set services.jeeves.acceleration (\"cuda\" or \"vulkan\") and rebuild"
+                          if not hw["llama_gpu"] else "the NVIDIA driver's NVML library / nvidia-smi wasn't found"))
+    except Exception as exc:
+        out.append(_check("GPU", False, str(exc)))
     if settings is not None:
         try:
             out += audio_checks(settings)

@@ -649,3 +649,25 @@ def test_minimum_untouched_threads_and_ram(engine, monkeypatch):
     with pytest.raises(BackendError, match="must stay untouched"):
         engine.models._check_ram(catalog.get("qwen3-4b") or catalog.of_kind("llm")[0], 3000)
     engine.models._check_ram(catalog.of_kind("llm")[0], 1000)
+
+
+def test_nvidia_detected_without_nvidia_smi_on_path(monkeypatch, tmp_path):
+    from jeeves.models import hardware
+    card = {"name": "NVIDIA GeForce RTX 3090", "vendor": "nvidia", "vram_mb": 24576, "free_mb": 23000}
+    monkeypatch.setattr(hardware, "_nvml", lambda: [card])
+    monkeypatch.setattr(hardware, "_backends", lambda b: ["cuda"])
+    hw = hardware.detect()
+    assert hw["gpus"][0]["name"] == "NVIDIA GeForce RTX 3090" and hw["vram_mb"] == 24576 and hw["gpu_usable"]
+    assert hardware.free_vram_mb() == 23000
+    # no NVML either: nvidia-smi where NixOS puts it, even though PATH doesn't have it
+    smi = tmp_path / "nvidia-smi"
+    smi.write_text("#!/bin/sh\necho 'NVIDIA GeForce RTX 3090, 24576, 22000'\n")
+    smi.chmod(0o755)
+    monkeypatch.setattr(hardware, "_nvml", lambda: None)
+    monkeypatch.setattr(hardware.shutil, "which", lambda name: None)
+    monkeypatch.setattr(hardware, "NVIDIA_SMI", [str(smi)])
+    assert hardware._nvidia() == [{"name": "NVIDIA GeForce RTX 3090", "vendor": "nvidia", "vram_mb": 24576,
+                                   "free_mb": 22000}]
+    picks = hardware.recommend(hardware.budget(dict(hardware.detect(), llama_gpu=["cuda"], whisper_gpu=["cuda"],
+                                                    gpu_usable=True), None))["picks"]
+    assert picks["stt"]["id"] == "whisper-large-v3-turbo"

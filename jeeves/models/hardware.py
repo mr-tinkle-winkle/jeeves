@@ -29,18 +29,93 @@ def _ram_mb() -> int:
     return 8192
 
 
-def _gpus() -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    if shutil.which("nvidia-smi"):
+# NixOS user services get a minimal PATH and no driver library path, so look in the
+# places the NVIDIA driver actually lives too
+NVIDIA_SMI = ["/run/current-system/sw/bin/nvidia-smi", "/run/opengl-driver/bin/nvidia-smi", "/usr/bin/nvidia-smi"]
+NVML_LIBS = ["libnvidia-ml.so.1", "/run/opengl-driver/lib/libnvidia-ml.so.1",
+             "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1", "/usr/lib64/libnvidia-ml.so.1",
+             "/usr/lib/libnvidia-ml.so.1"]
+
+
+def _nvml() -> list[dict[str, Any]] | None:
+    """NVIDIA GPUs with total/free VRAM straight from the driver library (NVML), or
+    None if it can't be loaded. Doesn't need nvidia-smi on PATH."""
+    import ctypes
+    lib = None
+    for name in NVML_LIBS:
         try:
-            text = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            lib = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+    if lib is None:
+        return None
+
+    class Mem(ctypes.Structure):
+        _fields_ = [("total", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong), ("used", ctypes.c_ulonglong)]
+    try:
+        if lib.nvmlInit_v2() != 0:
+            return None
+        try:
+            count = ctypes.c_uint()
+            if lib.nvmlDeviceGetCount_v2(ctypes.byref(count)) != 0:
+                return None
+            out = []
+            for i in range(count.value):
+                handle = ctypes.c_void_p()
+                if lib.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(handle)) != 0:
+                    continue
+                buf = ctypes.create_string_buffer(96)
+                lib.nvmlDeviceGetName(handle, buf, 96)
+                mem = Mem()
+                if lib.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(mem)) != 0:
+                    continue
+                out.append({"name": buf.value.decode(errors="replace") or "NVIDIA GPU", "vendor": "nvidia",
+                            "vram_mb": int(mem.total // (1024 * 1024)), "free_mb": int(mem.free // (1024 * 1024))})
+            return out
+        finally:
+            lib.nvmlShutdown()
+    except (AttributeError, OSError):
+        return None
+
+
+def _nvidia_smi_path() -> str | None:
+    return shutil.which("nvidia-smi") or next((p for p in NVIDIA_SMI if os.access(p, os.X_OK)), None)
+
+
+def _nvidia() -> list[dict[str, Any]]:
+    found = _nvml()
+    if found:
+        return found
+    smi = _nvidia_smi_path()
+    if smi:
+        try:
+            text = subprocess.run([smi, "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
                                   capture_output=True, text=True, timeout=5).stdout
+            out = []
             for line in text.splitlines():
-                name, _, mem = line.rpartition(",")
-                if mem.strip().isdigit():
-                    out.append({"name": name.strip(), "vendor": "nvidia", "vram_mb": int(mem.strip())})
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3 and parts[-2].isdigit():
+                    out.append({"name": ",".join(parts[:-2]), "vendor": "nvidia", "vram_mb": int(parts[-2]),
+                                "free_mb": int(parts[-1]) if parts[-1].isdigit() else None})
+            if out:
+                return out
         except (OSError, subprocess.TimeoutExpired):
             pass
+    # driver loaded but no tools: at least say there is one (VRAM unknown)
+    out = []
+    for info in sorted(Path("/proc/driver/nvidia/gpus").glob("*/information")):
+        try:
+            model = next((ln.split(":", 1)[1].strip() for ln in info.read_text().splitlines()
+                          if ln.startswith("Model:")), "NVIDIA GPU")
+        except OSError:
+            continue
+        out.append({"name": model, "vendor": "nvidia", "vram_mb": 0, "vram_unknown": True})
+    return out
+
+
+def _gpus() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = list(_nvidia())
     for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
         dev = card / "device"
         total = dev / "mem_info_vram_total"            # amdgpu
@@ -191,15 +266,9 @@ def free_vram_mb() -> int | None:
     """Free memory on the biggest GPU right now (what other apps, the desktop and
     already-loaded models leave), or None if it can't be read."""
     best: int | None = None
-    if shutil.which("nvidia-smi"):
-        try:
-            text = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-                                  capture_output=True, text=True, timeout=5).stdout
-            vals = [int(v) for v in text.split() if v.strip().isdigit()]
-            if vals:
-                best = max(vals)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+    vals = [g["free_mb"] for g in _nvidia() if g.get("free_mb") is not None]
+    if vals:
+        best = max(vals)
     for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
         dev = card / "device"
         try:

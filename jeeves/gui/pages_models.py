@@ -244,11 +244,20 @@ class ModelsPage(Page):
                     gpu_part += f" ({100 - keep['gpu_percent']:.0f}% of each model on the GPU)"
             lines.append(f"<b>Left for the AIs</b> (Minimum untouched below): {hw['ram_mb'] / 1000:.0f} GB RAM · "
                          f"{hw['cpu_threads']} CPU threads{gpu_part}")
-        if hw["gpus"] and not hw["llama_gpu"]:
+        unknown = [g for g in hw["gpus"] if g.get("vram_unknown")]
+        if not hw["gpus"] and hw["llama_gpu"]:
+            lines.append("No GPU was found, so models run on the CPU. For NVIDIA the driver has to be loaded "
+                         "(<code>hardware.nvidia</code> / <code>services.xserver.videoDrivers = [\"nvidia\"]</code>); "
+                         "Jeeves reads it through the driver's NVML library.")
+        elif unknown:
+            lines.append("An NVIDIA GPU is there but its memory couldn't be read (NVML / nvidia-smi not found), so "
+                         "Auto GPU layers can't size models for it. Rebuild with the latest Jeeves module, or set GPU "
+                         "layers by hand.")
+        elif hw["gpus"] and not hw["llama_gpu"]:
             lines.append("Your GPU isn't being used: the installed llama.cpp is CPU-only. On NixOS set "
                          "<code>services.jeeves.acceleration = \"vulkan\";</code> (or \"cuda\" for NVIDIA, \"rocm\" "
                          "for AMD) and rebuild for much faster answers and bigger models.")
-        elif hw["llama_gpu"] and not hw.get("gpu_usable"):
+        elif hw["llama_gpu"] and not hw.get("gpu_usable") and (hw.get("total") or hw).get("vram_mb"):
             lines.append("The GPU isn't used: Minimum untouched leaves nothing of it for the AIs.")
         elif hw["llama_gpu"]:
             lines.append(f"llama.cpp can use the GPU ({', '.join(hw['llama_gpu'])}). GPU layers (below) on Auto "
