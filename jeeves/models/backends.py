@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -41,6 +42,18 @@ def _find(*names: str) -> str | None:
     return None
 
 
+# Minimum untouched CPU: model servers only run on these cores (None = all)
+CPU_SET: set[int] | None = None
+
+
+def _pin_cpus() -> None:
+    if CPU_SET:
+        try:
+            os.sched_setaffinity(0, CPU_SET)
+        except OSError:
+            pass
+
+
 class ManagedServer:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -54,7 +67,8 @@ class ManagedServer:
     def start(self, cmd: list[str], health: str, timeout: float = 180.0) -> None:
         self.stop()
         log.info("starting %s: %s", self.name, " ".join(cmd))
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                     preexec_fn=_pin_cpus if CPU_SET else None)
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.proc.poll() is not None:
@@ -127,6 +141,7 @@ class WhisperCppSTT(STT):
     def __init__(self, entry: ModelEntry, threads: int = 0, gpu: bool = False) -> None:
         self.entry = entry
         self.threads = threads
+        self.gpu = gpu
         self.server = ManagedServer(f"whisper-server ({entry.id})")
 
     def load(self) -> None:
@@ -136,7 +151,7 @@ class WhisperCppSTT(STT):
         model = model_dir(self.entry) / self.entry.files[0].path
         self.server.port = free_port()
         self.server.start([exe, "-m", str(model), "--host", "127.0.0.1", "--port", str(self.server.port),
-                           "-t", str(env_threads(self.threads))], "/")
+                           "-t", str(env_threads(self.threads))] + ([] if self.gpu else ["-ng"]), "/")
 
     def unload(self) -> None:
         self.server.stop()
@@ -450,9 +465,9 @@ class KokoroTTS(TTS):
         return pcm, int(rate)
 
 
-def make_stt(entry: ModelEntry, threads: int) -> STT:
+def make_stt(entry: ModelEntry, threads: int, gpu: bool = True) -> STT:
     if entry.engine == "whisper.cpp":
-        return WhisperCppSTT(entry, threads)
+        return WhisperCppSTT(entry, threads, gpu)
     if entry.engine == "vosk":
         return VoskSTT(entry)
     raise BackendError(f"{entry.id} isn't a speech-to-text model")

@@ -44,6 +44,23 @@ class ModelsPage(Page):
         self.rec_layout.setContentsMargins(0, 0, 0, 0)
         r.addWidget(self.rec_box)
 
+        k = self.section("Minimum untouched")
+        k.addWidget(label("What the AIs must always leave for your games, browser and desktop. Models that "
+                          "would eat into it aren't loaded (or run partly on the CPU instead of the GPU), and the "
+                          "recommendations above only pick models that fit in what's left. Takes effect when a "
+                          "model next loads (Unload all models now, under Performance)."))
+        self.b.number(k, "RAM", "models.keep_free.ram_gb", 0, 1024, 0.5, 1, suffix=" GB",
+                      hint="A model only loads if this much RAM is still free afterwards.")
+        self.b.number(k, "VRAM", "models.keep_free.vram_gb", 0, 256, 0.5, 1, suffix=" GB",
+                      hint="Left free on the GPU on top of what Auto GPU layers already leaves for the desktop.")
+        self.b.number(k, "CPU threads", "models.keep_free.cpu_threads", 0, 256, 1,
+                      hint="Model servers never run on these cores (and use fewer threads), so they stay idle "
+                           "for everything else.")
+        self.b.number(k, "GPU", "models.keep_free.gpu_percent", 0, 100, 5, suffix=" %",
+                      hint="Share of each model's work kept off the GPU: at 50% only half the layers go on it and "
+                           "the rest run on the CPU (slower answers, more GPU left for games). 100% = CPU only, "
+                           "speech to text included.")
+
         w = self.section("Wake word")
         self.b.check(w, "Always listen for agent names", "wake_word.enabled",
                      hint="Off: the microphone only listens during a Voice Request (keybind or jeeves "
@@ -215,11 +232,24 @@ class ModelsPage(Page):
         hw, picks = res["hardware"], res["picks"]
         self.recs = picks
         gpus = ", ".join(f"{g['name']} ({g['vram_mb'] / 1000:.0f} GB)" for g in hw["gpus"]) or "none detected"
-        lines = [f"<b>Your computer:</b> {hw['ram_mb'] / 1000:.0f} GB RAM · {hw['cpu_threads']} CPU threads · GPU: {gpus}"]
+        total = hw.get("total") or hw
+        lines = [f"<b>Your computer:</b> {total['ram_mb'] / 1000:.0f} GB RAM · {total['cpu_threads']} CPU threads · "
+                 f"GPU: {gpus}"]
+        keep = hw.get("keep_free")
+        if keep and any(keep.values()):
+            gpu_part = ""
+            if hw["gpus"]:
+                gpu_part = f" · {hw['vram_mb'] / 1000:.0f} GB VRAM"
+                if keep.get("gpu_percent"):
+                    gpu_part += f" ({100 - keep['gpu_percent']:.0f}% of each model on the GPU)"
+            lines.append(f"<b>Left for the AIs</b> (Minimum untouched below): {hw['ram_mb'] / 1000:.0f} GB RAM · "
+                         f"{hw['cpu_threads']} CPU threads{gpu_part}")
         if hw["gpus"] and not hw["llama_gpu"]:
             lines.append("Your GPU isn't being used: the installed llama.cpp is CPU-only. On NixOS set "
                          "<code>services.jeeves.acceleration = \"vulkan\";</code> (or \"cuda\" for NVIDIA, \"rocm\" "
                          "for AMD) and rebuild for much faster answers and bigger models.")
+        elif hw["llama_gpu"] and not hw.get("gpu_usable"):
+            lines.append("The GPU isn't used: Minimum untouched leaves nothing of it for the AIs.")
         elif hw["llama_gpu"]:
             lines.append(f"llama.cpp can use the GPU ({', '.join(hw['llama_gpu'])}). GPU layers (below) on Auto "
                          "fits as much of each model on it as your free VRAM allows.")

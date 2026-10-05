@@ -12,11 +12,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Callable
 
 from ..daemon import desktop as dk
-from . import catalog, hardware
+from . import backends, catalog, hardware
 from .backends import LLM, STT, TTS, BackendError, VoskWake, make_llm, make_stt, make_tts
 from .download import install, is_installed, uninstall
 
@@ -118,37 +119,92 @@ class ModelManager:
                 self.publish("models", self.status())
         return inst
 
+    def keep_free(self) -> dict[str, float]:
+        return hardware.keep_free(self.settings)
+
+    def budget(self) -> dict[str, Any]:
+        """The hardware minus Minimum untouched: what the AIs may use."""
+        return hardware.budget(self.hardware(), self.keep_free())
+
+    def _threads(self) -> int:
+        """CPU threads per model server, never more than Minimum untouched CPU leaves.
+        Also pins the servers to the cores that are left, so the kept ones stay idle."""
+        keep = int(self.keep_free()["cpu_threads"])
+        try:
+            cores = sorted(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            cores = list(range(os.cpu_count() or 4))
+        allowed = cores[:max(1, len(cores) - keep)]
+        backends.CPU_SET = set(allowed) if keep > 0 else None
+        setting = int(self.settings.get("models.threads", 0) or 0)
+        return min(setting, len(allowed)) if setting > 0 else len(allowed)
+
+    def _check_ram(self, entry: catalog.ModelEntry, need_mb: float | None = None) -> None:
+        """Refuse to load a model that would eat into Minimum untouched RAM."""
+        avail = hardware.available_ram_mb()
+        if avail is None:
+            return
+        keep = int(self.keep_free()["ram_gb"] * 1024)
+        need = int(entry.ram_mb if need_mb is None else need_mb)
+        if avail - need < keep:
+            raise BackendError(f"not enough free RAM for {entry.name}: it needs about {need / 1024:.1f} GB, "
+                               f"{avail / 1024:.1f} GB is free and {keep / 1024:.1f} GB must stay untouched "
+                               "(Models > Minimum untouched). Pick a smaller model or close something.")
+
     def _gpu_layers_for(self, entry: catalog.ModelEntry) -> Any:
-        """The -ngl value for llama-server: a fixed number, or for "auto" a function
-        that measures free VRAM when the model actually loads."""
+        """The -ngl value for llama-server: a function that, when the model actually loads,
+        measures free VRAM (Auto) or takes the hand-set number, applies Minimum untouched
+        VRAM/GPU, and checks that the part left on the CPU fits in the RAM allowed."""
         setting = self.settings.get("models.gpu_layers", "auto")
+        fixed = None
         if setting != "auto":
             try:
-                n = int(setting)
+                fixed = int(setting)
             except (TypeError, ValueError):
-                n = 0
-            self.gpu_offload[entry.id] = {"layers": n, "why": "set by hand"}
-            return n
+                fixed = 0
 
         def resolve(model_path: Any, ctx_size: int) -> int:
-            n, info = hardware.auto_gpu_layers(model_path, ctx_size, self.hardware())
+            keep = self.keep_free()
+            n, info = hardware.auto_gpu_layers(model_path, ctx_size, self.hardware(),
+                                               keep_vram_mb=int(keep["vram_gb"] * 1024),
+                                               gpu_share=1.0 - keep["gpu_percent"] / 100.0, fixed=fixed)
             self.gpu_offload[entry.id] = dict(info, model=entry.name)
-            log.info("Auto GPU layers for %s: %s (%s)", entry.id, n, info.get("why"))
+            log.info("GPU layers for %s: %s (%s)", entry.id, n, info.get("why"))
             self.publish("models", self.status())
+            of = info.get("of")
+            if of and info.get("model_mb"):
+                on_gpu = min(1.0, info.get("layers", 0) / of)
+                self._check_ram(entry, info["model_mb"] * (1 - on_gpu) + info.get("kv_mb", 0) * (1 - on_gpu) + 300)
+            elif not n:
+                self._check_ram(entry)
             return n
         return resolve
 
     def stt(self, agent: dict[str, Any] | None = None) -> STT:
         entry = self._check("stt", self.model_id("stt", agent))
-        threads = int(self.settings.get("models.threads", 0))
-        return self._loaded(self._instance(entry, lambda: make_stt(entry, threads)), "stt")
+        threads = self._threads()
+        gpu = bool(self.budget().get("whisper_gpu"))
+        inst = self._instance(entry, lambda: make_stt(entry, threads, gpu))
+        if hasattr(inst, "threads"):
+            inst.threads = threads             # Minimum untouched applies on the next load
+        if hasattr(inst, "gpu"):
+            inst.gpu = gpu
+        if not inst.loaded():
+            try:
+                self._check_ram(entry)
+            except BackendError as exc:
+                raise ModelUnavailable("stt", str(exc)) from exc
+        return self._loaded(inst, "stt")
 
     def llm(self, kind: str, agent: dict[str, Any] | None = None) -> LLM:
         entry = self._check(kind, self.model_id(kind, agent))
-        threads = int(self.settings.get("models.threads", 0))
+        threads = self._threads()
         ngl = self._gpu_layers_for(entry)
         reasoning = self.settings.get("models.reasoning", "off")
-        return self._loaded(self._instance(entry, lambda: make_llm(entry, threads, ngl, reasoning)), kind)
+        inst = self._instance(entry, lambda: make_llm(entry, threads, ngl, reasoning))
+        if hasattr(inst, "gpu_layers"):
+            inst.threads, inst.gpu_layers = threads, ngl
+        return self._loaded(inst, kind)
 
     def tts(self, agent: dict[str, Any] | None = None) -> tuple[TTS, catalog.ModelEntry | None]:
         entry = self._check("tts", self.model_id("tts", agent))
@@ -317,10 +373,10 @@ class ModelManager:
         return cached[1]
 
     def recommend(self) -> dict[str, Any]:
-        return hardware.recommend(self.hardware())
+        return hardware.recommend(self.budget())
 
     def status(self) -> dict[str, Any]:
-        hw = self.hardware()
+        hw = self.budget()
         with self._lock:
             loaded = {mid for mid, inst in self.instances.items() if inst.loaded()}
         kinds = {}

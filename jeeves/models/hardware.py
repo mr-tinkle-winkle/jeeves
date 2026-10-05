@@ -90,6 +90,33 @@ def detect() -> dict[str, Any]:
     }
 
 
+def keep_free(settings: Any) -> dict[str, float]:
+    """The 'Minimum untouched' settings, cleaned up."""
+    k = (settings.get("models.keep_free", {}) if settings is not None else {}) or {}
+    num = lambda key, d: max(0.0, float(k.get(key, d) if k.get(key) is not None else d))  # noqa: E731
+    return {"ram_gb": num("ram_gb", 4.0), "vram_gb": num("vram_gb", 1.0),
+            "cpu_threads": int(num("cpu_threads", 1)), "gpu_percent": min(100.0, num("gpu_percent", 0))}
+
+
+def budget(hw: dict[str, Any], keep: dict[str, float] | None) -> dict[str, Any]:
+    """What the AIs may use: the hardware minus what must stay untouched. Same shape as
+    detect(), plus 'total' (the real numbers), 'keep_free' and 'gpu_share' (the part of
+    each model's layers allowed on the GPU)."""
+    keep = keep or {"ram_gb": 0, "vram_gb": 0, "cpu_threads": 0, "gpu_percent": 0}
+    out = dict(hw)
+    out["total"] = {"ram_mb": hw["ram_mb"], "vram_mb": hw["vram_mb"], "cpu_threads": hw["cpu_threads"]}
+    out["keep_free"] = keep
+    out["ram_mb"] = max(0, int(hw["ram_mb"] - keep["ram_gb"] * 1024))
+    out["vram_mb"] = max(0, int(hw["vram_mb"] - keep["vram_gb"] * 1024))
+    out["cpu_threads"] = max(1, int(hw["cpu_threads"] - keep["cpu_threads"]))
+    share = 1.0 - keep["gpu_percent"] / 100.0
+    out["gpu_share"] = share
+    out["gpu_usable"] = bool(hw.get("gpu_usable") and out["vram_mb"] > 0 and share > 0)
+    if share <= 0 or out["vram_mb"] <= 0:
+        out["whisper_gpu"] = []
+    return out
+
+
 # ---------------------------------------------------------------------------
 # How each model fits
 # ---------------------------------------------------------------------------
@@ -98,13 +125,19 @@ def fit(entry: catalog.ModelEntry, hw: dict[str, Any]) -> str:
     """'gpu' (fits in VRAM with a GPU backend), 'cpu' (runs from RAM), 'slow' (fits in
     RAM but too big to be responsive on a CPU) or 'no' (not enough memory)."""
     need = max(entry.ram_mb, 1)
-    if entry.kind == "llm" and hw.get("gpu_usable") and entry.size_mb + 1000 <= hw["vram_mb"] * 0.95:
+    share = float(hw.get("gpu_share", 1.0))
+    budgeted = "keep_free" in hw                   # ram_mb is already what's left for the AIs
+    if entry.kind == "llm" and hw.get("gpu_usable") and share >= 0.999 and \
+            entry.size_mb + 1000 <= hw["vram_mb"] * 0.95:
         return "gpu"
-    if need > hw["ram_mb"] * 0.75:
+    on_gpu = 0.0                                   # part of the model that can sit in VRAM
+    if entry.kind == "llm" and hw.get("gpu_usable") and entry.size_mb:
+        on_gpu = max(0.0, min(share, (hw["vram_mb"] * 0.95 - 1000) / entry.size_mb))
+    if need * (1 - on_gpu * 0.8) > hw["ram_mb"] * (1.0 if budgeted else 0.75):
         return "no"
     if entry.kind == "llm":
         active = entry.active_b or entry.params_b
-        limit = 8 if hw["cpu_threads"] >= 12 else 4
+        limit = (8 if hw["cpu_threads"] >= 12 else 4) / max(0.15, 1 - on_gpu)
         return "cpu" if active <= limit else "slow"
     if entry.kind == "stt" and entry.engine == "whisper.cpp" and not hw.get("whisper_gpu"):
         return "cpu" if entry.speed >= 3 or hw["cpu_threads"] >= 12 else "slow"
@@ -123,7 +156,8 @@ def recommend(hw: dict[str, Any] | None = None) -> dict[str, Any]:
     """{role: {"id", "why"}} for this computer, plus fast/smart alternatives."""
     hw = hw or detect()
     llms = catalog.of_kind("llm")
-    where = "your GPU" if hw.get("gpu_usable") else "your CPU"
+    where = "your GPU" if hw.get("gpu_usable") and hw.get("gpu_share", 1) >= 0.999 else \
+        "your GPU and CPU" if hw.get("gpu_usable") else "your CPU"
     out: dict[str, Any] = {}
 
     def pick(role: str, entry: catalog.ModelEntry | None, why: str) -> None:
@@ -132,7 +166,7 @@ def recommend(hw: dict[str, Any] | None = None) -> dict[str, Any]:
 
     pick("wake", catalog.get("vosk-small-en"), "Light enough to listen all the time.")
     stts = catalog.of_kind("stt")
-    if hw.get("whisper_gpu") and hw["vram_mb"] >= 3000:
+    if hw.get("whisper_gpu") and hw["vram_mb"] >= 3000 and hw.get("gpu_share", 1) >= 0.5:
         pick("stt", catalog.get("whisper-large-v3-turbo"), "Most accurate; whisper.cpp can use your GPU.")
     else:
         pick("stt", _best([e for e in stts if e.engine == "whisper.cpp"], hw, min_speed=3),
@@ -179,15 +213,24 @@ def free_vram_mb() -> int | None:
 
 
 def auto_gpu_layers(model_path: str | Path, ctx_size: int, hw: dict[str, Any] | None = None,
-                    free_mb: int | None = None) -> tuple[int, dict[str, Any]]:
+                    free_mb: int | None = None, keep_vram_mb: int = 0, gpu_share: float = 1.0,
+                    fixed: int | None = None) -> tuple[int, dict[str, Any]]:
     """How many layers of this model fit on the GPU right now.
 
     Each layer on the GPU costs its share of the weights plus its share of the
     conversation memory (KV cache: context x KV heads x head size, f16). On top of
     that llama.cpp needs the output layer and a compute buffer. Whatever doesn't
-    fit stays on the CPU. Returns (layers for -ngl, explanation)."""
+    fit stays on the CPU. keep_vram_mb stays free on top; gpu_share caps the part
+    of the layers allowed on the GPU; fixed = a hand-set layer count (still capped).
+    Returns (layers for -ngl, explanation)."""
     hw = hw or detect()
     info: dict[str, Any] = {"layers": 0, "of": None}
+    if gpu_share <= 0:
+        info["why"] = "Minimum untouched GPU is 100%: everything runs on the CPU"
+        return 0, info
+    if fixed == 0:
+        info["why"] = "CPU only (set by hand)"
+        return 0, info
     if not hw.get("gpu_usable"):
         info["why"] = "no GPU backend in llama.cpp" if hw.get("gpus") else "no GPU found"
         return 0, info
@@ -198,7 +241,7 @@ def auto_gpu_layers(model_path: str | Path, ctx_size: int, hw: dict[str, Any] | 
         n_layers = int(meta["block_count"])
     except (OSError, ValueError, KeyError) as exc:
         info["why"] = f"couldn't read the model's layer count ({exc}); using all layers"
-        return 99, info
+        return (fixed if fixed is not None else 99), info
     size_mb = path.stat().st_size / (1024 * 1024)
     emb = int(meta.get("embedding_length") or 4096)
     heads = int(meta.get("attention.head_count") or 32)
@@ -211,14 +254,36 @@ def auto_gpu_layers(model_path: str | Path, ctx_size: int, hw: dict[str, Any] | 
     if free is None:
         free = int(hw.get("vram_mb", 0) * 0.85) - 1500        # unknown: assume the desktop uses some
     reserve = 600 + w_per_layer                              # compute buffer + output layer
-    budget = free - reserve - 256                            # safety margin
+    room = free - keep_vram_mb - reserve - 256               # safety margin
     per_layer = w_per_layer + kv_per_layer
-    fit = max(0, int(budget // per_layer)) if per_layer > 0 else 0
+    fit = max(0, int(room // per_layer)) if per_layer > 0 else 0
     info.update(of=n_layers, free_mb=int(free), per_layer_mb=round(per_layer, 1),
-                kv_mb=round(kv_per_layer * n_layers), model_mb=round(size_mb))
+                kv_mb=round(kv_per_layer * n_layers), model_mb=round(size_mb), kept_free_mb=int(keep_vram_mb))
+    limits = []
+    if gpu_share < 1.0:
+        cap = int(n_layers * gpu_share)
+        if cap < fit:
+            fit = cap
+            limits.append(f"Minimum untouched GPU allows {round(gpu_share * 100)}% of the layers")
+    if fixed is not None and fixed < fit:
+        fit = fixed
+        limits.append("set by hand")
+    kept = f" (keeping {int(keep_vram_mb)} MB untouched)" if keep_vram_mb else ""
     if fit >= n_layers:
-        info.update(layers=n_layers, why="the whole model fits on the GPU")
+        info.update(layers=n_layers, why="the whole model fits on the GPU" + kept)
         return 99, info
-    info.update(layers=fit, why=f"{fit} of {n_layers} layers fit in {int(free)} MB of free VRAM; "
-                                 "the rest run on the CPU")
+    info.update(layers=fit, why=f"{fit} of {n_layers} layers on the GPU"
+                + (f" ({'; '.join(limits)})" if limits else f": that's what fits in {int(free)} MB of free VRAM{kept}")
+                + "; the rest run on the CPU")
     return fit, info
+
+
+def available_ram_mb() -> int | None:
+    """MemAvailable: what can be used right now without pushing anything into swap."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return None

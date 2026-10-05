@@ -113,6 +113,9 @@ DEFAULTS: dict[str, Any] = {
         "favorites": [],                  # starred models (shown first on the Models page)
         "reasoning": "off",               # thinking models: off (fast) | auto (think first, smarter)
         "threads": 0,                     # 0 = auto
+        # Minimum untouched: what the AIs must always leave for everything else. Limits what
+        # gets loaded (and how) and what the Models page recommends.
+        "keep_free": {"ram_gb": 4.0, "vram_gb": 1.0, "cpu_threads": 1, "gpu_percent": 0},
     },
     "audio": {
         "microphone": "",                 # PipeWire/Pulse source; "" = default

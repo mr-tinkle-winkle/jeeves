@@ -598,3 +598,54 @@ def test_virtual_mic_carries_your_mic(monkeypatch):
     monkeypatch.setattr(audio, "_pactl", lambda *a: "jeeves-mic-source\n" if a == ("get-default-source",) else
                         "1\tjeeves-mic-source\tx\n2\talsa_input.real\tx\n" if a[:2] == ("list", "short") else "")
     assert audio.real_mic_source() == "alsa_input.real"
+
+
+def test_minimum_untouched_limits_gpu_layers(tmp_path):
+    from jeeves.models import hardware
+    p = tmp_path / "model.gguf"
+    _fake_gguf(p, 4000)
+    hw = {"gpu_usable": True, "gpus": [{"vram_mb": 12000}], "vram_mb": 12000}
+    full, _ = hardware.auto_gpu_layers(p, 8192, hw, free_mb=10000)
+    kept, info = hardware.auto_gpu_layers(p, 8192, hw, free_mb=10000, keep_vram_mb=8000)
+    assert full == 99 and 0 < kept < 36 and info["kept_free_mb"] == 8000
+    half, info = hardware.auto_gpu_layers(p, 8192, hw, free_mb=10000, gpu_share=0.5)
+    assert half == 18 and "50%" in info["why"]
+    assert hardware.auto_gpu_layers(p, 8192, hw, free_mb=10000, gpu_share=0.0)[0] == 0
+    assert hardware.auto_gpu_layers(p, 8192, hw, free_mb=10000, fixed=10)[0] == 10      # hand-set
+    assert hardware.auto_gpu_layers(p, 8192, hw, free_mb=10000, fixed=99, gpu_share=0.5)[0] == 18
+
+
+def test_minimum_untouched_changes_recommendations():
+    from jeeves.models import catalog, hardware
+    hw = dict(ram_mb=64000, cpu_threads=32, gpus=[{"name": "AMD", "vendor": "amd", "vram_mb": 25000}],
+              vram_mb=25000, llama_gpu=["vulkan"], whisper_gpu=["vulkan"], gpu_usable=True)
+    free = hardware.recommend(hardware.budget(hw, None))["picks"]
+    tight = hardware.budget(hw, {"ram_gb": 56, "vram_gb": 22, "cpu_threads": 28, "gpu_percent": 0})
+    assert tight["ram_mb"] < 9000 and tight["vram_mb"] < 3500 and tight["cpu_threads"] == 4
+    picks = hardware.recommend(tight)["picks"]
+    big = catalog.get(free["local_response"]["id"])
+    small = catalog.get(picks["local_response"]["id"])
+    assert small.ram_mb < big.ram_mb and small.ram_mb <= tight["ram_mb"]
+    cpu_only = hardware.budget(hw, {"ram_gb": 4, "vram_gb": 1, "cpu_threads": 1, "gpu_percent": 100})
+    assert not cpu_only["gpu_usable"] and cpu_only["whisper_gpu"] == []
+    assert hardware.recommend(cpu_only)["picks"]["stt"]["id"] != "whisper-large-v3-turbo"
+
+
+def test_minimum_untouched_threads_and_ram(engine, monkeypatch):
+    import os
+    from jeeves.models import backends, hardware
+    from jeeves.models.backends import BackendError
+    cores = len(os.sched_getaffinity(0))
+    engine.settings.set("models.keep_free", {"ram_gb": 4, "vram_gb": 1, "cpu_threads": 1, "gpu_percent": 0})
+    if cores > 1:
+        assert engine.models._threads() == cores - 1 and len(backends.CPU_SET) == cores - 1
+    engine.settings.set("models.threads", 999)
+    assert engine.models._threads() == max(1, cores - 1)                # capped
+    engine.settings.set("models.keep_free.cpu_threads", 0)
+    engine.models._threads()
+    assert backends.CPU_SET is None
+    from jeeves.models import catalog
+    monkeypatch.setattr(hardware, "available_ram_mb", lambda: 6000)
+    with pytest.raises(BackendError, match="must stay untouched"):
+        engine.models._check_ram(catalog.get("qwen3-4b") or catalog.of_kind("llm")[0], 3000)
+    engine.models._check_ram(catalog.of_kind("llm")[0], 1000)
