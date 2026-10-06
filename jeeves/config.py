@@ -48,7 +48,8 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         "listen_device": "",          # listen_to=device: exact source (a mic, or an output's .monitor)
         # Jump in whenever the AI wants to: 1 = a full part of the conversation, 0 = never
         "jump_in": {"enabled": False, "frequency": 0.3},
-        "output_to": "speakers",      # speakers | microphone | both
+        "output_to": "speakers",      # speakers | microphone | both | device | device_mic
+        "output_device": "",          # output_to=device/device_mic: exact output (sink), e.g. a headset
         "show_output": True,          # also show the response text on screen
         "enable_when_open": [],       # agent only active while one of these apps is open
         "enable_when_focused": [],    # ... or focused

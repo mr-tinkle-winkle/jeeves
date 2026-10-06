@@ -111,3 +111,13 @@ def test_paused_agent_resumes_when_called_again(engine):
     engine.on_wake("microphone", "jeeves", 0.99, [])
     assert engine._after_interruption(engine.sessions["microphone"].interrupting, "continue")
     assert not ctx.suspend_event.is_set()
+
+
+def test_speaks_through_a_specific_device(monkeypatch):
+    from jeeves.daemon import audio
+    monkeypatch.setattr(audio, "ensure_virtual_mic", lambda *a, **k: True)
+    t = lambda mode, dev="headset": audio.output_targets(mode, "", "jeeves-mic", True, "", dev)  # noqa: E731
+    assert t("device") == ["headset"]
+    assert t("device_mic") == ["headset", "jeeves-mic"]
+    assert t("device", "") == [""]                 # no device chosen yet: the default output
+    assert t("speakers") == [""] and t("both") == ["", "jeeves-mic"]

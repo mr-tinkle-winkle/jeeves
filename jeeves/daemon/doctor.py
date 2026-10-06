@@ -36,7 +36,7 @@ def audio_checks(settings: Any) -> list[dict[str, Any]]:
     out.append(_check("Jeeves-Microphone", has, detail,
                       "" if has else "it's created when Jeeves is on; check that Jeeves is on"))
     agents = (settings.get("agents", {}) or {}) if settings is not None else {}
-    into = [a.get("name", k) for k, a in agents.items() if a.get("output_to") in ("microphone", "both")]
+    into = [a.get("name", k) for k, a in agents.items() if a.get("output_to") in ("microphone", "both", "device_mic")]
     both = [a.get("name", k) for k, a in agents.items() if a.get("output_to") == "both"]
     out.append(_check("Agents speaking into it", bool(into), ", ".join(into) if into else "none",
                       "" if into else "set an agent's Speaks through to Microphone or Both (Agents page), or "

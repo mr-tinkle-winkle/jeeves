@@ -305,13 +305,37 @@ def ensure_virtual_mic(sink: str, include_mic: bool = True, mic: str = "") -> bo
 
 
 def output_targets(output_to: str, speaker: str, virtual_sink: str, include_mic: bool = True,
-                   mic: str = "") -> list[str]:
+                   mic: str = "", device: str = "") -> list[str]:
+    """Where an agent's voice plays. output_to: speakers | microphone | both | device (one exact
+    output, e.g. a headset) | device_mic (that output and Jeeves-Microphone)."""
     targets = []
-    if output_to in ("speakers", "both"):
+    if output_to in ("speakers", "both") or (output_to in ("device", "device_mic") and not device):
         targets.append(speaker or "")
-    if output_to in ("microphone", "both") and ensure_virtual_mic(virtual_sink, include_mic, mic):
+    if output_to in ("device", "device_mic") and device:
+        targets.append(device)
+    if output_to in ("microphone", "both", "device_mic") and ensure_virtual_mic(virtual_sink, include_mic, mic):
         targets.append(virtual_sink)
     return targets or [speaker or ""]
+
+
+def list_outputs() -> list[dict[str, str]]:
+    """Every output (sink) an agent could speak through, with readable names."""
+    import json as _json
+    if not which("pactl"):
+        return []
+    try:
+        items = _json.loads(_pactl("-f", "json", "list", "sinks") or "[]")
+    except ValueError:
+        items = []
+    if items:
+        return [{"name": it["name"], "description": it.get("description") or it["name"]}
+                for it in items if it.get("name") and not it["name"].startswith("jeeves-mic")]
+    out = []
+    for line in _pactl("list", "short", "sinks").splitlines():
+        parts = line.split("\t")
+        if len(parts) > 1 and not parts[1].startswith("jeeves-mic"):
+            out.append({"name": parts[1], "description": parts[1]})
+    return out
 
 
 def have_player() -> bool:

@@ -13,7 +13,8 @@ from .widgets import discard, Page, combo, is_locked, label, row
 
 LISTEN = [("Just me (microphone)", "user"), ("Just desktop audio", "desktop"), ("Both", "both"),
           ("A specific device…", "device")]
-OUTPUT = [("Speakers", "speakers"), ("Microphone (Jeeves-Microphone source)", "microphone"), ("Both", "both")]
+OUTPUT = [("Speakers", "speakers"), ("Microphone (Jeeves-Microphone source)", "microphone"), ("Both", "both"),
+          ("A specific device…", "device"), ("A specific device + Jeeves-Microphone", "device_mic")]
 
 
 class AgentsPage(Page):
@@ -100,6 +101,10 @@ class AgentsPage(Page):
         for lab, v in OUTPUT:
             self.output.addItem(lab, v)
         g.addWidget(row(label("Speaks through", False), self.output))
+        self.out_device = combo()
+        self.out_device_row = row(label("Output device", False), self.out_device, stretch_last=True)
+        g.addWidget(self.out_device_row)
+        self.output.currentIndexChanged.connect(lambda _i: self._device_visibility())
         self.show_output = CustomCheckBox("Also show responses on screen")
         g.addWidget(self.show_output)
         g.addWidget(label("To let friends in a call hear an agent: set Speaks through to Microphone or Both, "
@@ -421,6 +426,9 @@ class AgentsPage(Page):
         self.mem_own.setChecked(bool(m.get("own_only", False)))
         self._memory_enabled(self.mem_enabled.isChecked())
         self.output.setCurrentIndex(max(0, self.output.findData(a.get("output_to", "speakers"))))
+        self._want_out_device = a.get("output_device", "")
+        self._fill_out_devices()
+        self._device_visibility()
         self.show_output.setChecked(a.get("show_output", True))
         self.color_edit.setText(a.get("indicator_color") or "")
         self.enable_open.setText(", ".join(a.get("enable_when_open", [])))
@@ -470,6 +478,16 @@ class AgentsPage(Page):
         on = self.listen.currentData() == "device"
         self.device_row.setVisible(on)
         self.device_hint.setVisible(on)
+        self.out_device_row.setVisible(self.output.currentData() in ("device", "device_mic"))
+
+    def _fill_out_devices(self) -> None:
+        want = getattr(self, "_want_out_device", "")
+        self.out_device.clear()
+        for d in getattr(self, "outputs", []):
+            self.out_device.addItem(d["description"], d["name"])
+        if want and self.out_device.findData(want) < 0:
+            self.out_device.addItem(f"{want}  (not connected)", want)
+        self.out_device.setCurrentIndex(max(0, self.out_device.findData(want)))
 
     def _fill_devices(self) -> None:
         want = getattr(self, "_want_device", "")
@@ -483,7 +501,9 @@ class AgentsPage(Page):
 
     def _got_devices(self, res: Any) -> None:
         self.devices = (res or {}).get("devices", [])
+        self.outputs = (res or {}).get("outputs", [])
         self._fill_devices()
+        self._fill_out_devices()
 
     def _collect(self) -> dict[str, Any]:
         a = copy.deepcopy(self.agents.get(self.current or "", {}))
@@ -501,6 +521,8 @@ class AgentsPage(Page):
                        "recent": None if self.mem_recent.value() < 0 else self.mem_recent.value(),
                        "notes": self.mem_notes.value(), "own_only": self.mem_own.isChecked()},
             "output_to": self.output.currentData(), "show_output": self.show_output.isChecked(),
+            "output_device": self.out_device.currentData() or "" if self.output.currentData() in
+            ("device", "device_mic") else a.get("output_device", ""),
             "indicator_color": self.color_edit.text().strip() or None,
             "enable_when_open": split(self.enable_open), "enable_when_focused": split(self.enable_focus),
             "disable_when_open": split(self.disable_open), "disable_when_focused": split(self.disable_focus),

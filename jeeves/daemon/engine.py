@@ -1015,11 +1015,7 @@ class Engine:
             ctx.trace("tts_failed", reason=str(exc))
             self._tts_problem(f"Text to speech failed: {exc}")
             return
-        targets = output_targets(agent.get("output_to", "speakers"), self.settings.get("audio.speaker", ""),
-                                 self.settings.get("audio.virtual_mic_sink", "jeeves-mic"),
-                                 bool(self.settings.get("audio.virtual_mic_include_mic", True)),
-                                 self.settings.get("audio.microphone", ""))
-        pb = Playback(pcm, rate, targets)
+        pb = Playback(pcm, rate, self.voice_targets(agent))
         ctx.playback = pb
         ctx.saying = text
         with self._lock:
@@ -1076,6 +1072,13 @@ class Engine:
                 "detail": "Your friends should have heard the test sentence if Discord uses Jeeves-Microphone."
                 if ok else "Jeeves played the sentence but nothing came out of Jeeves-Microphone."}
 
+    def voice_targets(self, agent: dict[str, Any]) -> list[str]:
+        """Where this agent's voice plays (Speaks through)."""
+        return output_targets(agent.get("output_to", "speakers"), self.settings.get("audio.speaker", ""),
+                              self.settings.get("audio.virtual_mic_sink", "jeeves-mic"),
+                              bool(self.settings.get("audio.virtual_mic_include_mic", True)),
+                              self.settings.get("audio.microphone", ""), agent.get("output_device", ""))
+
     def _synth(self, agent: dict[str, Any], text: str) -> tuple[bytes, int]:
         """The agent's TTS in its voice style; if that fails, eSpeak NG so there's always a voice."""
         from ..models import voicefx
@@ -1093,10 +1096,11 @@ class Engine:
         return voicefx.apply(pcm, rate, style, pitch_done=pitch_done), rate
 
     def preview_voice(self, agent: dict[str, Any], text: str = "") -> dict[str, Any]:
-        """Agents page > Preview: say a sample in this (possibly unsaved) agent's voice, on the speakers."""
+        """Agents page > Preview: say a sample in this (possibly unsaved) agent's voice, where it speaks
+        (Speaks through) -- a specific device or Jeeves-Microphone included."""
         name = agent.get("name") or "your assistant"
         pcm, rate = self._synth(agent, text or f"Hello, I'm {name}. This is how I sound.")
-        pb = Playback(pcm, rate, [self.settings.get("audio.speaker", "")])
+        pb = Playback(pcm, rate, self.voice_targets(agent))
         with self._lock:
             self.speaking += 1
         try:
