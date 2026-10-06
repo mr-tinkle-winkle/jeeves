@@ -26,6 +26,7 @@ include = ["jeeves*"]
 
 [tool.setuptools.package-data]
 "jeeves.gui.ui_kit.resources" = ["*.png"]
+"jeeves.resources" = ["icons/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

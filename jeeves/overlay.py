@@ -125,6 +125,9 @@ def main(popups: bool = False) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("jeeves-popups" if popups else "jeeves-overlay")
+    app.setDesktopFileName("jeeves")
+    from .resources import app_icon
+    app.setWindowIcon(app_icon())              # popups, thoughts, sources and the video player
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("jeeves.overlay").info("%s on %s (layer-shell: %s)", "popups" if popups else "indicators",

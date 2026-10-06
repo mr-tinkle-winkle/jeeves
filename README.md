@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" alt="Jeeves logo: a red bow tie with a gold gothic J on the knot and gold sound waves on either side" width="480"></p>
+
 # Jeeves
 
 A local-first voice assistant for Linux (NixOS). Named agents respond to spoken or typed requests; an intent model maps each request to a function from a user-editable dictionary of composable functions, and runs it.

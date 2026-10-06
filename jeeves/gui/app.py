@@ -16,6 +16,8 @@ def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("jeeves")
     app.setDesktopFileName("jeeves")
+    from ..resources import app_icon
+    app.setWindowIcon(app_icon())
     install_theme()            # before any kit widget is built
     w = MainWindow()
     w.show()

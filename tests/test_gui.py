@@ -75,3 +75,13 @@ def test_models_page_shows_hybrid_models_and_the_vision_pick(qapp, engine):
     page._got(st)                                 # filling twice doesn't duplicate entries
     assert page.light_boxes["local_response"].count() == len(items)
     page._got_recs(engine.models.recommend())
+
+
+def test_the_logo_ships_in_every_size(qapp):
+    from jeeves.resources import ICON_SIZES, app_icon, icon_path
+    from PySide6.QtGui import QImage
+    for s in ICON_SIZES:
+        img = QImage(str(icon_path(s)))
+        assert img.width() == s and img.height() == s and img.hasAlphaChannel()
+    assert icon_path(20).name == "jeeves-22.png" and icon_path(1000).name == "jeeves-512.png"
+    assert not app_icon().isNull() and len(app_icon().availableSizes()) == len(ICON_SIZES)

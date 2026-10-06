@@ -110,6 +110,7 @@ def send_notification(ctx, title, body=""):
 def notify(title: str, body: str = "", app: str = "Jeeves") -> None:
     if which("notify-send"):
         try:
-            run(["notify-send", "-a", app, title, body], timeout=5)
+            from ...resources import icon_path
+            run(["notify-send", "-a", app, "-i", str(icon_path(64)), title, body], timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             pass

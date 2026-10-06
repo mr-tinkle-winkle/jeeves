@@ -84,13 +84,21 @@ py.buildPythonApplication {
     (makeDesktopItem {
       name = "jeeves";
       exec = "jeeves";
-      icon = "audio-input-microphone";
+      icon = "jeeves";
       desktopName = "Jeeves";
       comment = "Voice assistant settings";
       categories = [ "Utility" ];
       startupWMClass = "jeeves";
     })
   ];
+
+  # the logo in the icon theme, so the launcher, task bar and notifications show it
+  postInstall = ''
+    for f in jeeves/resources/icons/jeeves-*.png; do
+      size=''${f##*jeeves-}; size=''${size%.png}
+      install -Dm644 "$f" "$out/share/icons/hicolor/''${size}x''${size}/apps/jeeves.png"
+    done
+  '';
 
   nativeCheckInputs = [ py.pytest ];
   checkPhase = ''
