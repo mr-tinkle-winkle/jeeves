@@ -65,8 +65,23 @@ class AgentsPage(Page):
         self.prompt = QPlainTextEdit()
         self.prompt.setPlaceholderText("Default prompt: personality, tone, things to always keep in mind")
         self.prompt.setMinimumHeight(90)
-        g.addWidget(label("Default prompt"))
+        g.addWidget(label("Personality (default prompt)"))
         g.addWidget(self.prompt)
+        g.addWidget(label("Who the agent is and how it talks. Be specific: \u201cDry, formal British butler. Calls "
+                          "the user sir. Short sentences, understated wit, never says 'awesome'.\u201d beats \u201cbe a "
+                          "butler\u201d. Every reply ends with a reminder to stay in character."))
+        self.persona_check = CustomCheckBox("Check replies stay in character (rewrites ones that don't; one or two "
+                                            "extra model calls per reply)")
+        g.addWidget(self.persona_check)
+        self.persona_btn = CustomButton("Test personality")
+        self.persona_btn.clicked.connect(self.test_persona)
+        g.addWidget(row(self.persona_btn))
+        self.persona_result = QPlainTextEdit()
+        self.persona_result.setReadOnly(True)
+        self.persona_result.setMaximumHeight(170)
+        self.persona_result.setPlaceholderText("Asks the agent a few questions with the prompt above (saved or not) "
+                                               "and grades each answer for staying in character.")
+        g.addWidget(self.persona_result)
 
         # --- audio
         g = self._group(f, "Listening and speaking")
@@ -341,6 +356,22 @@ class AgentsPage(Page):
                 "expressiveness": round(self.v_expr.value(), 2), "effect": self.v_effect.currentData() or "none",
                 "blend": self.v_blend.currentData() or "", "blend_amount": round(self.v_blend_amount.value(), 2)}
 
+    def test_persona(self) -> None:
+        self.persona_btn.setEnabled(False)
+        self.persona_result.setPlainText("Asking a few questions… (uses the local response model)")
+
+        def done(res: Any) -> None:
+            self.persona_btn.setEnabled(True)
+            if not isinstance(res, dict):
+                self.persona_result.setPlainText(str(res))
+                return
+            lines = [f"Error: {res['error']}"] if res.get("error") else \
+                [f"Average {res.get('average')}/5 — {res.get('verdict')}", ""]
+            for r in res.get("results", []):
+                lines += [f"Q: {r['question']}", f"A: {r['reply']}", f"   {r['score']}/5 {r['why']}", ""]
+            self.persona_result.setPlainText("\n".join(lines))
+        self.daemon.call("persona.test", done, done, agent=self._collect())
+
     def preview(self) -> None:
         a = self._collect()
         self.preview_btn.setEnabled(False)
@@ -374,6 +405,7 @@ class AgentsPage(Page):
         self.threshold_global.setChecked(a.get("threshold") is None)
         self.threshold.setValue(a.get("threshold") or 0.6)
         self.prompt.setPlainText(a.get("prompt", ""))
+        self.persona_check.setChecked(bool(a.get("persona_check", False)))
         self.listen.setCurrentIndex(max(0, self.listen.findData(a.get("listen_to", "user"))))
         self._want_device = a.get("listen_device", "")
         self._fill_devices()
@@ -460,7 +492,8 @@ class AgentsPage(Page):
             "enabled": self.enabled.isChecked(), "name": self.name.text().strip() or self.current,
             "call_names": split(self.call_names) or [self.name.text().strip() or self.current],
             "threshold": None if self.threshold_global.isChecked() else round(self.threshold.value(), 2),
-            "prompt": self.prompt.toPlainText(), "listen_to": self.listen.currentData(),
+            "prompt": self.prompt.toPlainText(), "persona_check": self.persona_check.isChecked(),
+            "listen_to": self.listen.currentData(),
             "listen_device": self.device.currentData() or "" if self.listen.currentData() == "device" else
             a.get("listen_device", ""),
             "jump_in": {"enabled": self.jump_in.isChecked(), "frequency": round(self.jump_freq.value(), 2)},

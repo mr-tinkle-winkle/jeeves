@@ -57,6 +57,7 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         # None -> global model choice
         "models": {"stt": None, "intent": None, "tts": None, "tts_voice": None, "local_response": None},
         "prompt": prompt,
+        "persona_check": False,       # grade each reply against the prompt and rewrite it once if it's off
         # function name -> bool; missing -> the function's own default
         "functions": {},
         # agent ids this agent may hand off to (Handoff function); "*" = any agent
@@ -129,7 +130,9 @@ DEFAULTS: dict[str, Any] = {
         "vad_threshold": 0.012,           # RMS level that counts as speech
     },
     "agents": {
-        "jeeves": default_agent("Jeeves", prompt="You are Jeeves, a dry-witted, efficient butler."),
+        "jeeves": default_agent("Jeeves", prompt=(
+            "You are Jeeves, an unflappable British butler. Formal, concise and quietly amused; you call the user "
+            "'sir', favour understatement and dry wit, and never gush or sound like a generic chatbot.")),
     },
     "accounts": {
         "codex": {"enabled": False, "binary": "codex"},

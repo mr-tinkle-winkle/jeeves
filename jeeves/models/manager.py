@@ -17,7 +17,7 @@ import threading
 from typing import Any, Callable
 
 from ..daemon import desktop as dk
-from . import backends, catalog, hardware
+from . import backends, catalog, hardware, persona
 from .backends import LLM, STT, TTS, BackendError, VoskWake, make_llm, make_stt, make_tts
 from .download import install, is_installed, uninstall
 
@@ -253,10 +253,29 @@ class ModelManager:
             if exc.queueable:
                 raise
             return None
+        messages = self.build_messages(agent, prompt, system, ctx, with_memory, raw)
+        on_token = (lambda t: ctx.think(t, append=True)) if ctx is not None else None
+        cancelled = ctx.is_cancelled if ctx is not None else None
+        max_tokens = int(self.settings.get("models.local_response.max_tokens", 512))
+        try:
+            reply = llm.chat(messages, max_tokens=max_tokens, on_token=on_token, cancelled=cancelled).strip()
+            if not raw and reply and persona.has_persona(agent) and agent.get("persona_check"):
+                reply = self._keep_in_character(llm, agent, reply, ctx, max_tokens)
+            return reply
+        except BackendError as exc:
+            if ctx is not None:
+                ctx.think(f"Model error: {exc}")
+            return None
+
+    def build_messages(self, agent: dict[str, Any], prompt: str, system: str = "", ctx: Any = None,
+                       with_memory: bool = False, raw: bool = False) -> list[dict[str, str]]:
+        """The chat for a reply: character first, then the task, memory and style; the agent's own
+        earlier turns as real turns, other agents' as a note; a character reminder at the end."""
         messages: list[dict[str, str]] = []
         sys_parts = []
-        if not raw and agent.get("prompt"):
-            sys_parts.append(agent["prompt"])
+        in_character = not raw and persona.has_persona(agent)
+        if in_character:
+            sys_parts.append(persona.identity_block(agent))
         if system:
             sys_parts.append(system)
         if with_memory and ctx is not None:
@@ -267,25 +286,47 @@ class ModelManager:
                 sys_parts.append(mem)
             recent = ctx.engine.recent_for(ctx.agent_id, agent, am["recent"], am["own_only"],
                                            ctx.request.get("id"))
+            others = [r for r in recent if r.get("agent") not in (None, ctx.agent_id)]
+            note = persona.others_note(others, {k: v.get("name", k) for k, v in ctx.engine.agents().items()})
+            if note:
+                sys_parts.append(note)
             for r in recent:
+                if r in others:
+                    continue
                 messages.append({"role": "user", "content": r["text"]})
                 if r.get("result"):
                     messages.append({"role": "assistant", "content": str(r["result"])})
         if not raw:
-            sys_parts.append("Reply in plain spoken English: your reply is read aloud, so no markdown, lists or "
-                             "code unless asked. Keep it short unless asked for detail.")
+            sys_parts.append("Your reply is read aloud: plain spoken sentences, no markdown, lists or code unless "
+                             "asked. Keep it short unless asked for detail -- but short still sounds like you.")
         if sys_parts:
             messages.insert(0, {"role": "system", "content": "\n\n".join(sys_parts)})
-        messages.append({"role": "user", "content": prompt})
-        on_token = (lambda t: ctx.think(t, append=True)) if ctx is not None else None
-        cancelled = ctx.is_cancelled if ctx is not None else None
+        messages.append({"role": "user", "content": f"{prompt}\n\n{persona.reminder(agent)}" if in_character
+                         else prompt})
+        return messages
+
+    def _keep_in_character(self, llm: Any, agent: dict[str, Any], reply: str, ctx: Any, max_tokens: int) -> str:
+        """Agents > Personality > Check replies: grade the reply; rewrite it once if it's off."""
+        score, why = persona.judge(llm.chat, agent, reply)
+        if ctx is not None:
+            ctx.think(f"\nCharacter check: {score}/5 ({why})")
+        if score >= 3:
+            return reply
+        fixed = llm.chat(persona.rewrite_messages(agent, reply), max_tokens=max_tokens).strip()
+        if ctx is not None:
+            ctx.trace("rewritten_in_character", before=reply, score=score, why=why)
+        return fixed or reply
+
+    def test_persona(self, agent: dict[str, Any]) -> dict[str, Any]:
+        """Agents > Personality > Test personality."""
         try:
-            return llm.chat(messages, max_tokens=int(self.settings.get("models.local_response.max_tokens", 512)),
-                            on_token=on_token, cancelled=cancelled).strip()
-        except BackendError as exc:
-            if ctx is not None:
-                ctx.think(f"Model error: {exc}")
-            return None
+            llm = self.llm("local_response", agent)
+        except ModelUnavailable as exc:
+            return {"error": exc.reason, "results": []}
+
+        def answer(q: str) -> str | None:
+            return self.respond(dict(agent, persona_check=False), q)
+        return persona.test(answer, llm.chat, agent)
 
     def vision_locate(self, image_path: Any, target: str) -> dict[str, Any] | None:
         # A multimodal llama-server needs an --mmproj file; none of the catalog

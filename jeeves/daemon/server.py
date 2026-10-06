@@ -206,6 +206,7 @@ class Server:
             "audio.devices": audio_devices,
             "audio.test_virtual_mic": e.test_virtual_mic,
             "voice.preview": lambda agent, text="": e.preview_voice(agent, text),
+            "persona.test": lambda agent: e.models.test_persona(agent),
             "voice.speakers": lambda voice: e.voice_speakers(voice),
             "voice.effects": lambda: {"effects": [[k, v[0]] for k, v in voicefx.EFFECTS.items()],
                                       "sox": voicefx.available()},
