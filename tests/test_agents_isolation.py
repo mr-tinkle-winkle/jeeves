@@ -232,9 +232,14 @@ def test_a_stuck_listen_restarts_on_the_wake_word(engine):
 def test_too_little_speech_is_not_a_request(engine):
     from jeeves.daemon.listener import Session
     s = engine.open_session("microphone", "jeeves", "request")
-    s.got_speech, s.voiced_frames = True, 4          # 0.12 s: a click or a cough
+    s.got_speech, s.voiced_frames = True, 3          # 0.09 s: a click
     engine.end_session(s)
     assert not s.got_speech
+    s = engine.open_session("microphone", "jeeves", "request")
+    s.got_speech, s.voiced_frames = True, 6          # 0.18 s: a short "stop" is transcribed (it used to be dropped)
+    engine.run_async = lambda fn, *a: None
+    engine.end_session(s)
+    assert s.got_speech
 
 
 def test_unsure_wake_is_checked_by_speech_recognition(engine, monkeypatch):

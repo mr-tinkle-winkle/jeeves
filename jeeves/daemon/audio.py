@@ -145,6 +145,10 @@ class Capture:
             except queue.Full:
                 pass
 
+    def backlog(self) -> int:
+        """Frames read but not yet taken: more than zero means the listener is behind."""
+        return self._q.qsize()
+
     def frames(self) -> Iterator[bytes]:
         checked = time.monotonic()
         while True:
@@ -210,8 +214,15 @@ class Playback:
     def play(self) -> None:
         procs = []
         try:
-            procs = [subprocess.Popen(_player(True, self.rate, t), stdin=subprocess.PIPE,
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) for t in self.targets]
+            try:
+                procs = [subprocess.Popen(_player(True, self.rate, t), stdin=subprocess.PIPE,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) for t in self.targets]
+            except (RuntimeError, OSError) as exc:     # no player installed, or it can't start: say why
+                self.error = str(exc)
+                log.warning("can't play audio: %s", exc)
+                for p in procs:
+                    p.kill()
+                return
             step = self.rate * 2 // 20   # 50 ms chunks so pause/stop react quickly
             for i in range(0, len(self.pcm), step):
                 if self.stopped.is_set():

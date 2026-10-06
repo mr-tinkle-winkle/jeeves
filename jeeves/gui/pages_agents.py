@@ -63,6 +63,12 @@ class AgentsPage(Page):
         self.threshold.setDecimals(2)
         self.threshold_global.toggled.connect(lambda on: self.threshold.setEnabled(not on))
         g.addWidget(row(self.threshold_global, label("or this agent's threshold:", False), self.threshold))
+        self.wake_reply = CustomLineEdit()
+        self.wake_reply.setPlaceholderText("Yes? | Hello. | At your service.")
+        self.wake_reply.setToolTip("Said when it starts listening and you're waiting for it (not when you say the "
+                                   "name and the request in one go). Several, separated by |, are picked at "
+                                   "random. Empty = says nothing.")
+        g.addWidget(row(label("Wake-up reply", False), self.wake_reply, stretch_last=True))
         self.prompt = QPlainTextEdit()
         self.prompt.setPlaceholderText("Default prompt: personality, tone, things to always keep in mind")
         self.prompt.setMinimumHeight(90)
@@ -409,6 +415,8 @@ class AgentsPage(Page):
         self.call_names.setText(", ".join(a.get("call_names", [])))
         self.threshold_global.setChecked(a.get("threshold") is None)
         self.threshold.setValue(a.get("threshold") or 0.6)
+        reply = a.get("wake_reply") or ""
+        self.wake_reply.setText(" | ".join(reply) if isinstance(reply, list) else str(reply))
         self.prompt.setPlainText(a.get("prompt", ""))
         self.persona_check.setChecked(bool(a.get("persona_check", False)))
         self.listen.setCurrentIndex(max(0, self.listen.findData(a.get("listen_to", "user"))))
@@ -512,6 +520,7 @@ class AgentsPage(Page):
             "enabled": self.enabled.isChecked(), "name": self.name.text().strip() or self.current,
             "call_names": split(self.call_names) or [self.name.text().strip() or self.current],
             "threshold": None if self.threshold_global.isChecked() else round(self.threshold.value(), 2),
+            "wake_reply": " | ".join(p.strip() for p in self.wake_reply.text().split("|") if p.strip()),
             "prompt": self.prompt.toPlainText(), "persona_check": self.persona_check.isChecked(),
             "listen_to": self.listen.currentData(),
             "listen_device": self.device.currentData() or "" if self.listen.currentData() == "device" else

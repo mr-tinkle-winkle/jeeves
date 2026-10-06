@@ -179,6 +179,92 @@ def sync_graphical_env() -> None:
             os.environ[k] = v
 
 
+def speakable(text: str) -> str:
+    """Text as it should be said: models write markdown, links and citations even when told not to,
+    and a voice reading out "asterisk asterisk" or a whole URL sounds broken. The text shown on
+    screen keeps them."""
+    t = re.sub(r"```.*?```", " ", text, flags=re.S)                     # code blocks aren't read out
+    t = re.sub(r"`([^`]*)`", r"\1", t)
+    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", t)                          # images
+    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)                       # [text](link) -> text
+    t = re.sub(r"https?://(?:www\.)?([^/\s)]+)[^\s)]*", r"\1", t)         # a link -> its site
+    t = re.sub(r"\s*\[\d+(?:\s*[,–-]\s*\d+)*\]", "", t)                   # citations [2]
+    t = re.sub(r"(\*\*|__)(.+?)\1", r"\2", t)                              # **bold**
+    t = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", r"\1", t)   # *italic*
+    t = re.sub(r"^\s{0,3}#{1,6}\s*", "", t, flags=re.M)                    # headings
+    t = re.sub(r"^\s*(?:[-*•+]|\d{1,2}[.)])\s+", "", t, flags=re.M)         # list markers
+    t = re.sub(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$", "", t, flags=re.M)   # table rules
+    t = re.sub(r"^[ \t]*\|(.*?)\|?[ \t]*$", r"\1", t, flags=re.M)        # | a | b | rows
+    t = re.sub(r"[ \t]*\|[ \t]*", ", ", t)
+    t = re.sub("[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF\uFE0F]", "", t)   # emoji
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    # a list item or heading without punctuation still ends where it ends
+    t = " ".join(ln if re.search(r"[.!?:;,…]$", ln) else ln + "." for ln in lines)
+    return re.sub(r"\s{2,}", " ", t).strip()
+
+
 def truncate(text: str, n: int = 400) -> str:
     text = str(text)
     return text if len(text) <= n else text[: n - 1] + "…"
+
+
+# ---------------------------------------------------------------------------
+# How alike two words sound (no pronunciation dictionary needed)
+# ---------------------------------------------------------------------------
+
+_SOUND_RULES = [
+    (r"[^a-z]", ""), (r"tch", "C"), (r"ch", "C"), (r"sh", "S"), (r"th", "T"), (r"ph", "f"), (r"gh", ""),
+    (r"ck", "k"), (r"qu", "kw"), (r"x", "ks"), (r"^wh", "w"), (r"^wr", "r"), (r"^kn", "n"), (r"mb$", "m"),
+    (r"dg(?=[eiy])", "j"), (r"c(?=[eiy])", "s"), (r"g(?=[eiy])", "j"), (r"c", "k"),
+    (r"(?<=[^aeiouIUAOV])e$", ""), (r"(?<=[^aeiouIUAOV])es$", "s"),
+    (r"ee|ea|ie|ei|ey|(?<=[^aeiou])y$", "I"), (r"oo|ou|ue|ew", "U"), (r"ai|ay|a(?=[^aeiou]e)", "A"),
+    (r"oa|ow|o(?=[^aeiou]e)", "O"), (r"igh|i(?=[^aeiou]e)", "Y"),
+    (r"[aeiouy]+", "V"), (r"v", "f"), (r"z", "s"), (r"d$", "t"), (r"(.)\1+", r"\1"),
+]
+_SIMILAR_SOUNDS = {frozenset(p) for p in ("Cj", "sS", "ft", "kg", "td", "pb", "IV", "UV", "AV", "OV", "YV")}
+
+
+def sound_key(word: str) -> str:
+    """A rough spelling-to-sound key: 'Jeeves' and 'Jeevs' -> 'jIfs', 'cheese' -> 'CIs'."""
+    w = word.lower()
+    for pat, rep in _SOUND_RULES:
+        w = re.sub(pat, rep, w)
+    return w
+
+
+def same_onset(a: str, b: str) -> bool:
+    """Do the two words start with the same sound ('Jeevs'/'Geeves'/'Jeeves' do; 'Reeves', 'eves' and
+    'Keeves' don't)? Mishearings keep a name's first sound far more often than not."""
+    ka, kb = sound_key(a), sound_key(b)
+    if not ka or not kb:
+        return False
+    vowels = "IUAOYV"
+    return ka[0] == kb[0] or (ka[0] in vowels and kb[0] in vowels)
+
+
+def sound_similarity(a: str, b: str) -> float:
+    """1 = sounds the same .. 0 = nothing alike (edit distance over sound keys; close sounds cost half)."""
+    return _key_similarity(sound_key(a), sound_key(b))
+
+
+def ends_like(word: str, name: str) -> float:
+    """How much the word -- or its ending -- sounds like the name: 'believes' ends like 'Jeeves' (the
+    wake word model hears the name in it), 'gives' sounds like it."""
+    kw, kn = sound_key(word), sound_key(name)
+    best = _key_similarity(kw, kn)
+    if len(kw) > len(kn):
+        best = max(best, _key_similarity(kw[-len(kn):], kn) - 0.1)
+    return best
+
+
+def _key_similarity(ka: str, kb: str) -> float:
+    if not ka or not kb:
+        return 0.0
+    prev = [float(j) for j in range(len(kb) + 1)]
+    for i, ca in enumerate(ka, 1):
+        cur = [float(i)] + [0.0] * len(kb)
+        for j, cb in enumerate(kb, 1):
+            sub = 0.0 if ca == cb else (0.5 if frozenset((ca, cb)) in _SIMILAR_SOUNDS else 1.0)
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + sub)
+        prev = cur
+    return 1.0 - prev[-1] / max(len(ka), len(kb))

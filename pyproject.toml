@@ -16,6 +16,7 @@ input = ["evdev"]
 wake = ["vosk"]
 wikipedia = ["libzim"]
 kokoro = ["kokoro-onnx"]
+speech-detector = ["onnxruntime", "numpy"]
 test = ["pytest"]
 
 [project.scripts]
@@ -26,7 +27,7 @@ include = ["jeeves*"]
 
 [tool.setuptools.package-data]
 "jeeves.gui.ui_kit.resources" = ["*.png"]
-"jeeves.resources" = ["icons/*.png"]
+"jeeves.resources" = ["icons/*.png", "silero_vad.onnx", "silero_vad.LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -110,7 +110,7 @@ def test_answer_session_routes_to_waiting_question(engine, monkeypatch):
     while time.time() < deadline and not engine.answer_pending():
         time.sleep(0.02)
     lst = Listener(engine, "microphone")
-    for _ in range(5):
+    for _ in range(8):
         lst.process(LOUD)        # speech opens an answer session without a wake word
     s = engine.sessions["microphone"]
     assert s.mode == "answer"

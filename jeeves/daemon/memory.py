@@ -75,11 +75,31 @@ class Memory:
             notes = [n for n in notes if n.get("agent") == agent]
         return notes[-limit:] if limit > 0 else []
 
-    def context_for(self, agent: str | None = None, limit: int = 30, own_only: bool = False) -> str:
+    def context_for(self, agent: str | None = None, limit: int = 30, own_only: bool = False, about: str = "",
+                    max_chars: int = 1500) -> str:
+        """The notes for a reply. With many of them, the ones that have to do with what was just said
+        (`about`) and the newest few -- every note on every reply made small models bring up things
+        nobody asked about."""
         notes = self.notes_for(agent, limit, own_only)
         if not notes:
             return ""
-        return "Things the user asked you to remember:\n" + "\n".join(f"- {n['text']}" for n in notes)
+        if len(notes) > 8 or sum(len(n["text"]) for n in notes) > max_chars:
+            words = {w for w in normalize(about).split() if len(w) > 2}
+            newest = {id(n) for n in notes[-3:]}
+            ranked = sorted(notes, key=lambda n: (-len(words & set(normalize(n["text"]).split())),
+                                                  id(n) not in newest, -n.get("time", 0)))
+            keep, total = set(), 0
+            for n in ranked:
+                if total + len(n["text"]) > max_chars or len(keep) >= 12:
+                    break
+                if id(n) in newest or words & set(normalize(n["text"]).split()):
+                    keep.add(id(n))
+                    total += len(n["text"]) + 3
+            notes = [n for n in notes if id(n) in keep]
+        if not notes:
+            return ""
+        return ("Things the user asked you to remember (use them only when they matter to what they say now):\n"
+                + "\n".join(f"- {n['text']}" for n in notes))
 
     @staticmethod
     def detect(text: str) -> tuple[str | None, str]:

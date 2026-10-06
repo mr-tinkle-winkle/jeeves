@@ -253,7 +253,11 @@ class ModelManager:
 
     # ---- conveniences used by functions ------------------------------------
     def respond(self, agent: dict[str, Any], prompt: str, system: str = "", ctx: Any = None,
-                with_memory: bool = False, raw: bool = False) -> str | None:
+                with_memory: bool = False, raw: bool = False, temperature: float | None = None,
+                max_tokens: int | None = None) -> str | None:
+        """The local response model's reply. raw: a step of some task (no character, no memory, not
+        spoken). temperature: lower for answers that must stick to given material (research, the
+        screen), default for conversation. max_tokens: for short structured steps."""
         watcher = self._watcher_for(ctx, raw)
         llm = self.vision_llm(agent) if watcher is not None and watcher.latest_jpeg else None
         try:
@@ -276,9 +280,10 @@ class ModelManager:
                     {"type": "text", "text": messages[-1]["content"]}]}
         on_token = (lambda t: ctx.think(t, append=True)) if ctx is not None else None
         cancelled = ctx.is_cancelled if ctx is not None else None
-        max_tokens = int(self.settings.get("models.local_response.max_tokens", 512))
+        max_tokens = max_tokens or int(self.settings.get("models.local_response.max_tokens", 512))
         try:
-            reply = llm.chat(messages, max_tokens=max_tokens, on_token=on_token, cancelled=cancelled).strip()
+            reply = llm.chat(messages, max_tokens=max_tokens, on_token=on_token, cancelled=cancelled,
+                             **({} if temperature is None else {"temperature": temperature})).strip()
             if not raw and reply and persona.has_persona(agent) and agent.get("persona_check"):
                 reply = self._keep_in_character(llm, agent, reply, ctx, max_tokens)
             if not reply and not (cancelled and cancelled()):
@@ -315,7 +320,7 @@ class ModelManager:
         if with_memory and ctx is not None:
             from ..config import agent_memory
             am = agent_memory(agent, self.settings)
-            mem = ctx.engine.memory.context_for(ctx.agent_id, am["notes"], am["own_only"])
+            mem = ctx.engine.memory.context_for(ctx.agent_id, am["notes"], am["own_only"], about=prompt)
             if mem:
                 sys_parts.append(mem)
             recent = ctx.engine.recent_for(ctx.agent_id, agent, am["recent"], am["own_only"],

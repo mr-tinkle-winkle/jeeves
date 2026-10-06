@@ -1,4 +1,5 @@
-"""Jeeves' own assets: the logo as square icons (icons/jeeves-<size>.png).
+"""Jeeves' own assets: the logo as square icons (icons/jeeves-<size>.png), and the speech
+detector's model (silero_vad.onnx: Silero VAD, MIT licence -- see silero_vad.LICENSE).
 
 Sizes 48 px and up are the whole logo (the bow tie with its sound waves); 32 px and
 below are the bow tie alone, since the waves turn to noise that small."""
@@ -9,6 +10,7 @@ from typing import Any
 
 ICON_DIR = Path(__file__).resolve().parent / "icons"
 ICON_SIZES = (16, 22, 24, 32, 48, 64, 96, 128, 256, 512)
+VAD_MODEL = Path(__file__).resolve().parent / "silero_vad.onnx"
 
 
 def icon_path(size: int = 256) -> Path:

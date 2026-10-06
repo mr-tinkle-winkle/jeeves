@@ -246,17 +246,14 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
         if answer is None and text:
             answer = ctx.engine.models.respond(
                 ctx.agent,
-                f"You looked at the user's screen, found the part that matters and read it closely (OCR of an "
-                f"enlarged crop -- small recognition mistakes are still possible: fix obvious ones silently and "
-                f"never repeat garbled fragments; if a bit is unreadable, just skip it).\n\n{app}{text[:6000]}\n\n"
-                f"Everything else on the screen at a glance (rough OCR, only to understand the layout -- which app "
-                f"is where, what's next to what):\n{_glance(blocks, picked)}\n\n"
-                f"The user said: {q}\n\nThink about what the screen shows -- the apps, what kind of list or view "
-                "each part is, what belongs to what -- then answer what they asked. If they asked you to read something, read "
-                "it naturally and in a sensible order -- skip usernames, timestamps, buttons and menus unless they "
-                "matter, and summarize instead of reading word for word when that serves them better. If what "
-                "they asked about isn't there, say so.",
-                ctx=ctx)
+                f"The rest of the screen at a glance (rough, only to understand the layout):\n{_glance(blocks, picked)}"
+                f"\n\n{app}The part of the screen that matters, read closely (OCR: fix obvious misreadings silently, "
+                f"skip anything garbled -- never read it out):\n{text[:5000]}\n\n"
+                f"The user said: {q}\n\nWork out what the screen shows -- which app, what kind of list or view, what "
+                "belongs to what -- then answer that. To read something out, read it naturally and in order, "
+                "skipping usernames, timestamps, buttons and menus unless they matter; summarize when that serves "
+                "them better. If it isn't there, say so. Don't describe anything they didn't ask about.",
+                ctx=ctx, temperature=0.3)
         if answer:
             return ctx.say(answer)
         if not text:
@@ -343,16 +340,23 @@ def _with_neighbours(blocks: list[dict], picked: list[dict], per_block: int = 6)
 
 
 def _glance(blocks: list[dict], picked: list[dict]) -> str:
-    lines = [f"- ({b['where']}) {b['text'][:70].replace(chr(10), ' / ')}" for b in blocks[:70] if b not in picked]
-    return "\n".join(lines)[:3000] or "(nothing else)"
+    lines = [f"- ({b['where']}) {b['text'][:60].replace(chr(10), ' / ')}" for b in blocks[:60] if b not in picked]
+    return "\n".join(lines)[:1800].rsplit("\n", 1)[0] if len("\n".join(lines)) > 1800 else \
+        ("\n".join(lines) or "(nothing else)")
 
 
 def _pick_blocks(ctx, question: str, blocks: list[dict], app: str) -> list[dict]:
     """The blocks the question is about, in reading order -- chosen by the model from an outline."""
     import re as _re
     from .research import keywords
-    outline = "\n".join(f"[{i + 1}] ({b['where']}{', *' if b['focused'] else ''}) "
-                         f"{b['text'][:160].replace(chr(10), ' / ')}" for i, b in enumerate(blocks[:80]))
+    lines, total = [], 0
+    for i, b in enumerate(blocks[:80]):                  # within ~7000 characters: the model's context is small
+        ln = f"[{i + 1}] ({b['where']}{', *' if b['focused'] else ''}) {b['text'][:140].replace(chr(10), ' / ')}"
+        if total + len(ln) > 7000:
+            break
+        lines.append(ln)
+        total += len(ln) + 1
+    outline = "\n".join(lines)
     reply = ctx.engine.models.respond(
         ctx.agent,
         f"Text found on the user's screen, as numbered blocks (where each is; * = in the window they're using):\n"
@@ -362,7 +366,7 @@ def _pick_blocks(ctx, question: str, blocks: list[dict], app: str) -> list[dict]
         "channel), pick the header AND the entries under it. Leave out anything unrelated -- menus and sidebars "
         "too, unless the question is about what's in them. Reply with the numbers only, "
         "like: 4, 7, 2. Reply ALL to read everything in the window they're using, or NONE if nothing fits.",
-        ctx=None, raw=True)
+        ctx=None, raw=True, temperature=0.0, max_tokens=60)
     if reply is not None:
         ctx.think(f"Looking at blocks: {reply.strip()[:80]}")
         if _re.search(r"\bNONE\b", reply, _re.I) and not _re.search(r"\d", reply):
@@ -402,7 +406,7 @@ def _look_with_vision(ctx, vision, question: str, text: str, image: bytes | None
         if persona.has_persona(ctx.agent):
             messages.insert(0, {"role": "system", "content": persona.identity_block(ctx.agent)})
         return (vision.chat(messages, max_tokens=int(ctx.settings.get("models.local_response.max_tokens", 512)),
-                            cancelled=ctx.is_cancelled) or "").strip() or None
+                            temperature=0.3, cancelled=ctx.is_cancelled) or "").strip() or None
     except Exception as exc:  # noqa: BLE001 -- fall back to the text answer
         ctx.think(f"Vision model failed: {exc}")
         return None
@@ -666,7 +670,7 @@ ACKS = ["Let me look that up.", "One moment, I'll check.", "Looking into it.", "
 )
 def research(ctx, question, depth=""):
     import random
-    from .research import run
+    from .research import best_of, fit, run
     if ctx.dry_run:
         return f"<researched answer to: {question}>"
     question = str(question)
@@ -677,30 +681,30 @@ def research(ctx, question, depth=""):
     except FunctionError as exc:
         ctx.think(f"Research failed: {exc}")
         sources, _, notes = [], [], []
-    learned = ("What you learned along the way (context):\n" + "\n".join(f"- {n}" for n in notes) + "\n\n") \
-        if notes else ""
+    learned = ("Background you looked up first:\n" + "\n".join(f"- {n}" for n in notes) + "\n\n") if notes else ""
     if not sources:                              # nothing online: answer from what it knows, and say so
         reply = ctx.engine.models.respond(
             ctx.agent, f"{learned}{original}\n\n(You couldn't look this up online just now. If you genuinely know the "
             "answer, give it and say briefly that you couldn't check it. If it's about something specific you "
             "don't clearly know -- a particular game's moves or items, a small community, a recent event -- do NOT "
-            "guess or make something up: say you couldn't look it up and don't know.)", ctx=ctx)
+            "guess or make something up: say you couldn't look it up and don't know.)", ctx=ctx, temperature=0.3)
         if reply is None:
             raise FunctionError("I couldn't look that up online, and I don't know it myself")
         return ctx.say(reply)
+    sources = best_of(sources, f"{original} {question}")
     ctx.trace("sources", sources=[{"title": s["title"], "url": s["url"]} for s in sources])
-    material = "\n\n".join(f"[{i + 1}] {s['title']} ({s['url']})\n{s['text']}" for i, s in enumerate(sources))
+    material = fit(sources, 9000)
     ctx.state("thinking", "Writing the answer")
+    asked = original if original.strip().lower() == question.strip().lower() else f"{original}\n(Meaning: {question})"
     answer = ctx.engine.models.respond(
         ctx.agent,
-        f"The user asked: {original}\n(Put clearly: {question})\n\n{learned}Sources:\n{material}\n\n"
-        "Using only these sources (and the context above), answer exactly what the user asked -- nothing more. First check that the sources "
-        "are about the same thing (the same game, item or person); ignore ones that aren't, and if none are, say "
-        f"you couldn't find it. {_answer_shape(original + ' ' + question)} Leave out history, background, how it works and anything "
-        "about the game or topic in general unless they asked for it. After each fact put the number of the "
-        "source it came from in square brackets, like [2]. Don't add facts the sources don't give: if they only "
-        "partly answer it, say what's missing in one sentence.",
-        ctx=ctx)
+        f"Sources:\n{material}\n\n{learned}The user asked: {asked}\n\n"
+        "Answer exactly that from these sources, nothing more. Skip any source that's about something else (another "
+        "game, item or person); if none of them answer it, say you couldn't find it. "
+        f"{_answer_shape(original + ' ' + question)} No history, background or general information unless they "
+        "asked for it. After each fact put the number of its source in square brackets, like [2]. Never add "
+        "anything the sources don't say; if they only partly answer it, say in one sentence what's missing.",
+        ctx=ctx, temperature=0.3)
     if answer is None:
         # no answer from the model: never read a raw snippet out as if it were one (that's how a line
         # about something else entirely got said as the answer) -- point at the sources instead

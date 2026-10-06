@@ -62,7 +62,7 @@ def understand(ctx: Any, question: str) -> dict[str, Any]:
         "TERMS: unfamiliar words or names in the question to look up, comma-separated, or NONE\n\n"
         "Example:\nQuestion: how do i do a wumpy in parkour reborn\n"
         "GOAL: How do I perform a 'wumpy' in the game Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy",
-        ctx=None, raw=True)
+        ctx=None, raw=True, temperature=0.1, max_tokens=120)
     goal = _lines(reply, "GOAL") or question
     context = [c.strip() for c in re.split(r",|;| and ", _lines(reply, "CONTEXT")) if len(c.strip()) > 1][:2]
     terms = [t.strip() for t in _lines(reply, "TERMS").split(",") if len(t.strip()) > 1][:3]
@@ -87,7 +87,7 @@ def refine(ctx: Any, goal: str, notes: list[str], terms: list[str]) -> tuple[str
         "search queries that would find the answer. Use the context's exact name and the right category word "
         "(movement, item, boss, setting, command...). For 'how do I...' questions aim at guides and the wiki. "
         "Reply with GUESS: <one sentence> on the first line, then one query per line, nothing else.",
-        ctx=None, raw=True)
+        ctx=None, raw=True, temperature=0.2, max_tokens=160)
     guess = _lines(reply, "GUESS")
     lines = [re.sub(r"^\s*(?:\d+[.)]|[-*•]|QUERY\s*:)\s*", "", ln, flags=re.I).strip().strip('"')
              for ln in (reply or "").splitlines() if not re.match(r"^\s*GUESS\s*:", ln, re.I)]
@@ -163,26 +163,54 @@ def what_counts(question: str) -> str:
     return "a direct, specific answer to exactly what was asked -- not just general information about the topic"
 
 
+def fit(sources: list[dict[str, Any]], budget: int, newest: int = 0, urls: bool = True) -> str:
+    """The sources as numbered material within `budget` characters (the model's context is limited:
+    ten pages of 4000 characters overflowed it and the answer came back empty). Each source gets an
+    even share, the `newest` one up to three shares (it's the one being judged)."""
+    if not sources:
+        return ""
+    weights = [3 if newest and i == len(sources) - 1 else 1 for i in range(len(sources))]
+    unit = budget / sum(weights)
+    parts = []
+    for i, (src, w) in enumerate(zip(sources, weights)):
+        room = max(300, int(unit * w))
+        text = src["text"] if len(src["text"]) <= room else src["text"][:room].rsplit(" ", 1)[0] + " …"
+        parts.append(f"[{i + 1}] {src['title']}" + (f" ({src['url']})" if urls and src.get("url") else "")
+                     + f"\n{text}")
+    return "\n\n".join(parts)
+
+
 def assess(ctx: Any, question: str, sources: list[dict[str, Any]]) -> tuple[str, Any]:
     """After each page: ("answered", [source numbers that answer it]) to stop reading,
     ("search", query) for something missing, or ("more", None) to keep reading."""
-    material = "\n\n".join(f"[{i + 1}] {s['title']}\n{s['text'][:1500]}" for i, s in enumerate(sources))
+    material = fit(sources[-6:], 6000, newest=1, urls=False)
+    offset = len(sources) - len(sources[-6:])
     reply = ctx.engine.models.respond(
         ctx.agent,
         f"Question: {question}\n\nWhat was found so far:\n{material}\n\nDoes this material actually answer the "
         f"question? That means {what_counts(question)}. Reply ANSWERED: followed by the numbers of the sources "
         "that answer it (e.g. ANSWERED: 2). If not, reply SEARCH: followed by one web search query for exactly "
         "what's missing (keep the exact names), or MORE if the next pages might have it.",
-        ctx=None, raw=True) or ""
+        ctx=None, raw=True, temperature=0.0, max_tokens=60) or ""
     head = reply.upper().split("SEARCH")[0]
     if "ANSWERED" in head:
         after = reply[reply.upper().index("ANSWERED") + 8:]
-        nums = [int(n) for n in re.findall(r"\d+", after.split("\n")[0])]
+        nums = [int(n) + offset for n in re.findall(r"\d+", after.split("\n")[0])]
         return "answered", [n for n in nums if 1 <= n <= len(sources)]
     m = re.search(r"SEARCH:\s*(.+)", reply)
     if m:
         return "search", m.group(1).strip().strip('"')[:150]
     return "more", None
+
+
+def best_of(sources: list[dict[str, Any]], question: str, n: int = 5) -> list[dict[str, Any]]:
+    """The n sources that talk most about the question, in their original order."""
+    if len(sources) <= n:
+        return sources
+    kws = set(keywords(question))
+    ranked = sorted(range(len(sources)), key=lambda i: -sum(1 for k in kws if k in sources[i]["text"].lower()))
+    keep = set(ranked[:n])
+    return [s for i, s in enumerate(sources) if i in keep]
 
 
 def _squash(text: str) -> str:
@@ -222,7 +250,8 @@ def learn_context(ctx: Any, subject: str, notes: list[str], results_all: list[di
     if text.strip():
         summary = ctx.engine.models.respond(
             ctx.agent, f"From this text, say in one or two sentences what {subject} is (what kind of thing, and what "
-            f"it's about). If the text isn't about it, reply UNKNOWN.\n\n{text[:3000]}", ctx=None, raw=True)
+            f"it's about). If the text isn't about it, reply UNKNOWN.\n\n{text[:3000]}", ctx=None, raw=True,
+            temperature=0.1, max_tokens=100)
         if summary and "UNKNOWN" not in summary.upper():
             notes.append(f"{subject}: {summary.strip()}")
             ctx.think(f"  {summary.strip()}")
@@ -294,8 +323,8 @@ def run(ctx: Any, question: str, depth: str | None = None
         wiki = learn_context(ctx, subject, notes, results_all) or wiki
     guess, queries = refine(ctx, goal, notes, terms)
     if guess:
+        # only for searching: an unconfirmed guess in the answer's context got said as if it were a fact
         ctx.think(f"Probably: {guess}")
-        notes.append(f"(my guess, unconfirmed) {guess}")
     if wiki:
         done = read_wiki(ctx, wiki, goal, terms, guess, queries, sources, seen, per_page)
         if done:

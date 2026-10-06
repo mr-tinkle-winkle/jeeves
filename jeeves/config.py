@@ -46,6 +46,9 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         "threshold": None,
         "listen_to": "user",          # user | desktop | both | device
         "listen_device": "",          # listen_to=device: exact source (a mic, or an output's .monitor)
+        # said when it starts listening and you're waiting ("Yes?"); several separated by | (one is picked
+        # at random); "" = say nothing
+        "wake_reply": "",
         # Jump in whenever the AI wants to: 1 = a full part of the conversation, 0 = never
         "jump_in": {"enabled": False, "frequency": 0.3},
         "output_to": "speakers",      # speakers | microphone | both | device | device_mic
@@ -107,6 +110,9 @@ DEFAULTS: dict[str, Any] = {
         "global_threshold_enabled": True,
         "global_threshold": 0.6,
         "verify_near_misses": True,       # unsure detections (half the threshold or more) are checked by STT
+        # things you say that the wake word model heard no name in are checked by speech recognition too,
+        # which catches the calls it misses ("hey Jeeves what time is it", fast, over loud sound)
+        "stt_backup": True,
     },
     "models": {
         # all "model" values are catalog ids from jeeves.models.catalog
@@ -134,7 +140,10 @@ DEFAULTS: dict[str, Any] = {
         "speaker": "",                    # sink; "" = default
         "virtual_mic_sink": "jeeves-mic", # null sink that apps can record from (output_to=microphone)
         "virtual_mic_include_mic": True,  # Jeeves-Microphone carries your real mic too (pick it in Discord)
-        "vad_threshold": 0.012,           # RMS level that counts as speech
+        "vad_threshold": 0.012,           # RMS level that counts as speech (level meter only)
+        # what tells speech from other sound: "auto" = the neural speech detector (Silero VAD; hears you
+        # over music, games and key presses), "level" = the level meter (louder than the background)
+        "speech_detector": "auto",
     },
     "agents": {
         "jeeves": default_agent("Jeeves", prompt=(

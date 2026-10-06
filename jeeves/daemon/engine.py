@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -27,9 +28,9 @@ from ..functions.registry import Registry
 from ..models.backends import BackendError
 from ..models.manager import ModelManager, ModelUnavailable
 from ..util import desktop as desktop_name
-from ..util import graphical_env, normalize, similarity
+from ..util import ends_like, graphical_env, normalize, same_onset, similarity, sound_similarity, speakable
 from . import desktop as dk
-from .audio import Playback, output_targets
+from .audio import FRAME_MS, Playback, output_targets
 from .context import FunctionContext
 from .control import Control
 from .history import History, new_entry
@@ -93,6 +94,9 @@ def looks_factual(text: str, agent: dict[str, Any] | None = None) -> bool:
 
 
 NAME_TAIL_FRAMES = 8          # 240 ms
+TAIL_LIMIT = 0.6              # s: speech still going on when a listen opens is the name's own end, unless it
+                              # lasts this long into the listen ("Jeeves open the mixer" in one breath)
+REPLY_WAIT = 0.4              # s of quiet after the name before the wake-up reply ("Yes?")
 
 
 def is_noise_text(text: str) -> bool:
@@ -150,6 +154,9 @@ class Engine:
         self._apply_lock = threading.Lock()
         self.speaking = 0
         self.speaking_until = 0.0
+        self._reply_cache: dict[tuple, tuple[bytes, int]] = {}      # wake-up replies, synthesized once
+        self._just_said: list[tuple[str, float, float]] = []          # (text, started, seconds) just spoken
+        self._reply_tried: set[tuple] = set()
         self.active: dict[str, FunctionContext] = {}       # request id -> ctx
         self.indicators: dict[str, dict[str, Any]] = {}     # request id -> indicator state
         self.sessions: dict[str, Session] = {}              # audio source -> open session
@@ -238,6 +245,7 @@ class Engine:
             return
         with self._apply_lock:
             self._apply_settings_locked()
+        self.run_async(self._prewarm_wake_replies)          # new or changed wake-up replies, voices
 
     def _apply_settings_locked(self) -> None:
         self._apply_power()
@@ -412,6 +420,14 @@ class Engine:
                 names += [n.lower() for n in a.get("call_names", []) if n.strip()]
         return sorted(set(names))
 
+    def wake_names(self, source: str) -> list[str]:
+        """Every enabled agent's call names on this source, app rules or not (the wake grammar)."""
+        names = []
+        for a in self.agents().values():
+            if a.get("enabled", True) and self._listens(a, source):
+                names += [n.lower() for n in a.get("call_names", []) if n.strip()]
+        return sorted(set(names))
+
     def recent_for(self, agent_id: str | None, agent: dict[str, Any], n: int, own_only: bool = False,
                    exclude: str | None = None, only_agent: str | None = None) -> list[dict[str, Any]]:
         """Recent requests an agent may know about: its own, typed ones, and ones spoken on a
@@ -488,6 +504,8 @@ class Engine:
             engine = self.settings.get("wake_word.engine", "vosk")
             if engine == "vosk" and self.models.wake_spotter() is not None:
                 modes.add("vosk")
+                if self.settings.get("wake_word.stt_backup", True) and "stt" not in self.models.suspended:
+                    modes.add("backup")
             else:
                 modes.add("transcribe")
         if summary or keyword_triggers or (names and self.summary.enabled()) or self.jump_in.wants(source):
@@ -522,13 +540,18 @@ class Engine:
         speech = s.voiced_frames * FRAME_MS / 1000
         log.info("listen ended (%s, %s): %.1fs long, %.2fs of speech%s", s.agent_id, s.mode, took, speech,
                  " -- hit the time limit" if took >= s.max_seconds - 0.5 else "")
-        if s.got_speech and (s.mode == "request" and speech < 0.29 or s.mode == "answer" and speech < 0.15):
+        # only a click or a breath: nothing to transcribe. (This used to need 0.3 s of speech, which a short
+        # "stop" or anything said over loud music often didn't reach -- those got "Didn't catch that".
+        # Speech recognition's own silence filter and the name check below catch the rest.)
+        if s.got_speech and (s.mode == "request" and speech < 0.12 or s.mode == "answer" and speech < 0.1):
             log.info("  too little speech to be a request; ignored")
             s.got_speech = False
             if s.interrupting:
                 self._resume(s.interrupting)
+            elif s.preroll is None or s.trusted():
+                self._didnt_catch(s)             # you opened this listen (a key, the mic, a clear call): say so
             else:
-                self._didnt_catch(s)
+                self.set_indicator(s.request_id, s.agent_id, "idle")   # most likely not a call at all
             return
         if not s.got_speech:
             self.set_indicator(s.request_id, s.agent_id, "idle")
@@ -539,6 +562,8 @@ class Engine:
 
     def _finish_session(self, s: Session) -> None:
         pcm = s.pcm()
+        if s.preroll and s.mode == "request":
+            pcm = b"".join(s.preroll) + pcm          # the name too: speech recognition confirms it was said
         if s.mode == "training":
             item = self.training.save_recording(s.text, pcm)
             self.set_indicator(s.request_id, s.agent_id, "idle")
@@ -558,6 +583,18 @@ class Engine:
             self.flash_unavailable(s.agent_id, "speech recognition failed (see the log)")
             self.set_indicator(s.request_id, s.agent_id, "idle")
             return
+        if s.mode == "request" and s.preroll is not None:
+            found, rest = self.strip_name(text, s.agent_id)
+            if found:
+                text = rest
+            elif not s.trusted():
+                # the wake model hears "geez", "believes", "cheese" as "Jeeves" now and then; speech
+                # recognition, which heard the whole phrase, says the name wasn't said: not for us
+                log.info("  woke on the name, but speech recognition heard '%s': not the name, ignored", text)
+                self.set_indicator(s.request_id, s.agent_id, "idle")
+                if s.interrupting:
+                    self._resume(s.interrupting)
+                return
         self.set_indicator(s.request_id, s.agent_id, "transcript", text)
         if s.mode == "answer":
             self.set_indicator(s.request_id, s.agent_id, "idle")
@@ -588,6 +625,26 @@ class Engine:
         log.info("  heard: %s", text)
         self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id)
 
+    def strip_name(self, text: str, agent_id: str | None, within: int = 10) -> tuple[bool, str]:
+        """(was the agent's name said, the rest after it): "Okay so, Jeeves, set a timer" -> (True,
+        "set a timer"). Looks at the first `within` words only and accepts spellings that sound the same
+        ("Jeevs", "Geeves") -- not merely similar ones ("Reeves", "geez")."""
+        agent = self.agents().get(agent_id or "", {})
+        names = [normalize(n).split() for n in list(agent.get("call_names", [])) + [agent.get("name", "")] if n]
+        tokens = re.findall(r"[\w'-]+|[^\w\s]", text)
+        word_idx = [i for i, t in enumerate(tokens) if re.match(r"[\w'-]", t)]
+        for k, i in enumerate(word_idx[:within]):
+            for parts in names:
+                if not parts or k + len(parts) > len(word_idx):
+                    continue
+                said = [normalize(tokens[word_idx[k + j]]) for j in range(len(parts))]
+                if all(a == b or same_onset(a, b) and (similarity(a, b) >= 0.8 or sound_similarity(a, b) >= 0.9)
+                       for a, b in zip(said, parts)):
+                    last = word_idx[k + len(parts) - 1]
+                    rest = "".join(t if not re.match(r"[\w'-]", t) else " " + t for t in tokens[last + 1:])
+                    return True, re.sub(r"^[\s,.:;!?-]+", "", rest).strip()
+        return False, text
+
     FILLER = set("um uh uhm erm er hm hmm mm hey hi oh ok okay so yeah yes no the a and you i like well right "
                  "please thanks thank".split())
 
@@ -606,7 +663,7 @@ class Engine:
         for attempt in (1, 2):
             stt = self.models.stt(agent)
             try:
-                return stt.transcribe(pcm, prompt=self.training.initial_prompt(), language=lang)
+                return stt.transcribe(pcm, prompt=self.stt_prompt(), language=lang)
             except (BackendError, OSError) as exc:
                 if attempt == 2:
                     raise ModelUnavailable("stt", f"speech recognition failed: {exc}") from exc
@@ -617,8 +674,22 @@ class Engine:
                     pass
         return ""
 
+    def stt_prompt(self) -> str:
+        """Whisper's initial prompt: the agents' names (so "Jeeves" is spelled right, which the wake
+        check relies on) and the trained vocabulary."""
+        names = sorted({n.strip() for a in self.agents().values() if a.get("enabled", True)
+                        for n in [a.get("name", "")] + list(a.get("call_names", [])) if n.strip()},
+                       key=str.lower)
+        vocab = self.training.initial_prompt()
+        lead = (", ".join(names) + ".") if names else ""
+        return " ".join(p for p in (lead, vocab) if p)
+
     def on_wake(self, source: str, name: str, conf: float, after: list[bytes], threshold: float | None = None,
-                words: int = 0) -> None:
+                words: int = 0, name_audio: list[bytes] | None = None,
+                after_voiced: list[bool] | None = None) -> None:
+        """The wake word model heard a call name. after: the audio since the name (after_voiced: the
+        speech detector's verdict on each frame), words: how many words it heard after the name,
+        name_audio: the name itself (speech recognition checks it was really said)."""
         if not self.is_on():
             return
         cur = self.sessions.get(source)
@@ -632,11 +703,17 @@ class Engine:
             return
         agent = self.agents()[aid]
         thr = self.threshold(agent)
+        if self.answer_pending(source) == aid and conf >= thr * 0.5:
+            # it asked you something and you answer with its name first ("Jeeves, yes"): that's the answer
+            log.info("wake '%s' while %s waits for an answer: listening for the answer", name, aid)
+            s = self.open_session(source, aid, "answer")
+            s.frames = list(after)
+            return
         if conf < thr and self._busy_requests(aid) and conf >= thr * 0.5:
             # called while it's talking: its own voice is in the microphone too, so the name scores lower
             # and checking it with speech recognition only hears the agent's own words. Take it.
             log.info("wake '%s' (%.2f) while %s is busy: interrupting", name, conf, aid)
-            self._start_listen(source, aid, name, after, threshold, words)
+            self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
             return
         if conf < thr:
             if conf >= thr * 0.5 and self.settings.get("wake_word.verify_near_misses", True):
@@ -645,35 +722,38 @@ class Engine:
                 n0 = lst.frame_no if lst is not None else 0
                 phrase = list(lst.ring)[-100:] if lst is not None else []
                 log.info("wake '%s' unsure (%.2f < %.2f): checking with speech recognition", name, conf, thr)
-                self.run_async(self._verify_wake, source, aid, name, conf, phrase, after, threshold, words, n0)
+                self.run_async(self._verify_wake, source, aid, name, conf, phrase, after, threshold, words, n0,
+                               name_audio, after_voiced)
             else:
                 log.info("wake '%s' ignored (confidence %.2f < %.2f)", name, conf, thr)
             return
         log.info("wake '%s' (%.2f) on %s", name, conf, source)
-        self._start_listen(source, aid, name, after, threshold, words)
+        self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
 
     def _verify_wake(self, source: str, aid: str, name: str, conf: float, phrase: list[bytes],
-                     after: list[bytes], threshold: float | None, words: int, n0: int) -> None:
+                     after: list[bytes], threshold: float | None, words: int, n0: int,
+                     name_audio: list[bytes] | None = None, after_voiced: list[bool] | None = None) -> None:
         try:
             text = self.transcribe(b"".join(phrase), self.agents().get(aid))
         except Exception as exc:  # noqa: BLE001 -- can't check: stay on the safe side
             log.info("  couldn't check (%s); ignored", exc)
             return
-        agent = self.agents().get(aid, {})
-        names = [normalize(n) for n in agent.get("call_names", []) + [agent.get("name", "")] if n]
-        words_heard = normalize(text).split()
-        found = any(similarity(" ".join(words_heard[i:i + len(n.split())]), n) >= 0.75
-                    for n in names for i in range(len(words_heard)))
+        found = self.strip_name(text, aid)[0]
         log.info("  heard '%s' -> %s", text, "the name: waking" if found else "not the name: ignored")
         if not found or self.sessions.get(source) is not None:
             return
         lst = self.listeners.get(source)
         if lst is not None and lst.frame_no > n0:      # what was said while checking belongs to the request
-            after = list(after) + list(lst.ring)[-min(len(lst.ring), lst.frame_no - n0):]
-        self._start_listen(source, aid, name, after, threshold, words)
+            k = min(len(lst.ring), lst.frame_no - n0)
+            after = list(after) + list(lst.ring)[-k:]
+            if after_voiced is not None:
+                after_voiced = list(after_voiced) + list(getattr(lst, "voiced_ring", []))[-k:]
+        self._start_listen(source, aid, name, after, threshold, words, name_audio, 1.0,   # confirmed
+                           after_voiced)
 
     def _start_listen(self, source: str, aid: str, name: str, after: list[bytes], threshold: float | None,
-                      words: int) -> None:
+                      words: int, name_audio: list[bytes] | None = None, conf: float = 1.0,
+                      after_voiced: list[bool] | None = None) -> None:
         if self._hears_itself(aid, name):
             return
         paused = self._interrupt(aid)
@@ -681,21 +761,112 @@ class Engine:
             self.flash_unavailable(aid, f"speech recognition is unloaded while {self.models.suspended['stt']} is open")
         s = self.open_session(source, aid, "extended" if aid in self.extended else "request")
         s.interrupting = paused
-        # Vosk's end time for the name is often early, so the first ~quarter second after it is mostly
-        # the name's own tail ("-ves") -- which counted as the request starting, ended the listen a moment
-        # later and got an instant answer to nothing. Judge speech only after that.
-        spoke_at = self._speech_in(after[NAME_TAIL_FRAMES:], threshold, words)
+        spoke_at, count, ongoing = self._speech_after_name(after, after_voiced, threshold, words)
         if spoke_at is not None:
             # words already followed the name ("Jeeves, open OBS" in one breath)
             s.frames = list(after)
             s.got_speech = True
-            s.last_voice = spoke_at
-            s.voiced_frames = getattr(self, "_last_voiced", 0)
+            s.last_voice = s.first_voice = spoke_at
+            s.voiced_frames = s.detected_frames = count
         elif after:
             # not clearly speech yet, but keep the audio: the name is reported as soon as it's heard,
             # so the first syllables of the request can be in here. It doesn't count as you having
             # spoken -- the session still waits up to NO_SPEECH_TIMEOUT for you to start talking.
             s.frames = list(after)[-50:]
+            if ongoing:
+                # the name is still sounding (the speech detector lags a little, more over music): that
+                # isn't the request starting -- unless it goes on into one
+                s.tail_until = time.time() + TAIL_LIMIT
+        if name_audio:
+            s.preroll = list(name_audio)
+        s.wake_conf = conf
+        if spoke_at is None and not words and self._wake_reply_phrases(self.agents().get(aid, {})):
+            s.reply_at = time.time() + REPLY_WAIT   # still quiet by then: "Yes?" (Listener.process)
+
+    def _speech_after_name(self, after: list[bytes], after_voiced: list[bool] | None, threshold: float | None,
+                           words: int) -> tuple[float | None, int, bool]:
+        """(when the request was last heard in the audio after the name or None, how many frames of it,
+        whether the name itself is still sounding at the end of it)."""
+        if after_voiced is None or len(after_voiced) != len(after):
+            # the level meter. Vosk's end time for the name is often early, so the first ~quarter second
+            # after it is mostly the name's own tail ("-ves") -- which counted as the request starting,
+            # ended the listen a moment later and got an instant answer to nothing. Judge after that.
+            spoke_at, count = self._speech_frames(after[NAME_TAIL_FRAMES:], threshold, words)
+            return spoke_at, count, False
+        v = list(after_voiced)
+        if words:
+            start = min(NAME_TAIL_FRAMES, len(v))
+        else:
+            start = 0
+            while start < len(v) and v[start]:       # the name's own end, still sounding
+                start += 1
+        ongoing = bool(v) and not words and start >= len(v)
+        idx = [i for i in range(start, len(v)) if v[i]]
+        if len(idx) < 250 // FRAME_MS and not (words >= 1 and len(idx) >= 120 // FRAME_MS):
+            return None, 0, ongoing
+        return time.time() - (len(v) - 1 - idx[-1]) * FRAME_MS / 1000, len(idx), False
+
+    # ------------------------------------------------------------------ wake-up reply ("Yes?")
+    def _wake_reply_phrases(self, agent: dict[str, Any]) -> list[str]:
+        raw = agent.get("wake_reply") or ""
+        items = raw if isinstance(raw, list) else str(raw).split("|")
+        return [p.strip() for p in items if p and p.strip()]
+
+    def wake_reply(self, s: Session) -> None:
+        """The agent's wake-up reply ("Yes?"), said when it starts listening and you're waiting. The
+        listen ignores the audio while it plays (the microphone hears it too)."""
+        agent = self.agents().get(s.agent_id or "", {})
+        phrases = self._wake_reply_phrases(agent)
+        if not phrases or s.ended:
+            return
+        s.replied = True
+        if not self.start_io:
+            return                                      # (no audio here: tests)
+        s.deaf_until = time.time() + 4.0                # until it has played (set exactly when it's done)
+        self.run_async(self._play_wake_reply, s, agent, random.choice(phrases))
+
+    def _play_wake_reply(self, s: Session, agent: dict[str, Any], phrase: str) -> None:
+        try:
+            pcm, rate = self._wake_reply_audio(agent, phrase)
+            pb = Playback(pcm, rate, self.voice_targets(agent))
+        except Exception:  # noqa: BLE001 -- never let the reply break listening
+            log.exception("wake-up reply failed")
+            s.deaf_until = 0.0
+            return
+        with self._lock:
+            self.speaking += 1
+        try:
+            if not s.ended:
+                pb.play()
+        finally:
+            with self._lock:
+                self.speaking -= 1
+                self.speaking_until = time.time() + 0.3
+            s.deaf_until = time.time() + 0.15           # its echo dies away, then the listen starts
+
+    def _wake_reply_audio(self, agent: dict[str, Any], phrase: str) -> tuple[bytes, int]:
+        """Synthesized once and kept, so the reply comes instantly."""
+        key = (phrase, self.models.model_id("tts", agent), self.models.model_id("tts_voice", agent),
+               json.dumps(agent.get("voice_style") or {}, sort_keys=True))
+        hit = self._reply_cache.get(key)
+        if hit is None:
+            hit = self._reply_cache[key] = self._synth(agent, phrase)
+        return hit
+
+    def _prewarm_wake_replies(self) -> None:
+        for aid, agent in self.agents().items():
+            if not agent.get("enabled", True):
+                continue
+            for phrase in self._wake_reply_phrases(agent):
+                key = (aid, phrase, self.models.model_id("tts", agent), self.models.model_id("tts_voice", agent),
+                       json.dumps(agent.get("voice_style") or {}, sort_keys=True))
+                if key in self._reply_tried:
+                    continue
+                self._reply_tried.add(key)
+                try:
+                    self._wake_reply_audio(agent, phrase)
+                except Exception:  # noqa: BLE001
+                    log.warning("couldn't prepare %s's wake-up reply %r", aid, phrase)
 
     def _didnt_catch(self, s: Session) -> None:
         """A listen that heard nothing usable: say so on the indicator instead of silently doing nothing."""
@@ -704,12 +875,17 @@ class Engine:
 
     def _speech_in(self, frames: list[bytes], threshold: float | None = None, words: int = 0) -> float | None:
         """When the last real speech in these frames was (a timestamp), or None if they hold no
-        more than noise. Speech is judged against this audio's own background (a quiet mic's words
-        are quiet too): ~0.25 s clearly above it counts, and so do two or more words the wake word
-        model heard after the name."""
+        more than noise (by the level meter)."""
+        return self._speech_frames(frames, threshold, words)[0]
+
+    def _speech_frames(self, frames: list[bytes], threshold: float | None = None,
+                       words: int = 0) -> tuple[float | None, int]:
+        """(_speech_in, how many frames were speech). Speech is judged against this audio's own
+        background (a quiet mic's words are quiet too): ~0.25 s clearly above it counts, and so do two
+        or more words the wake word model heard after the name."""
         from .audio import FRAME_MS, rms
         if not frames:
-            return None
+            return None, 0
         from .listener import speech_threshold
         levels = [rms(f) for f in frames]
         cfg = float(self.settings.get("audio.vad_threshold", 0.012))
@@ -719,10 +895,50 @@ class Engine:
         voiced = [i for i, lv in enumerate(levels) if lv > thr]
         # ~0.25 s clearly above the background; or words the wake model heard, if there's some speech too
         if len(voiced) < 250 // FRAME_MS and not (words >= 2 and len(voiced) >= 120 // FRAME_MS):
-            return None
-        self._last_voiced = len(voiced)
+            return None, 0
         last = voiced[-1] if voiced else len(frames) - 1
-        return time.time() - (len(frames) - 1 - last) * FRAME_MS / 1000
+        return time.time() - (len(frames) - 1 - last) * FRAME_MS / 1000, len(voiced)
+
+    BACKUP_WORDS = 4            # the name within the first few words: "okay so, Jeeves, ..."
+
+    def on_backup_utterance(self, source: str, pcm: bytes, end_frame: int | None = None) -> None:
+        """Something was said and the wake word model heard no name in it. It misses some -- a name run
+        together with other words ("hey Jeeves what time is it"), said fast, or over loud sound -- so
+        speech recognition checks: a name near the start makes it a call after all."""
+        if self.sessions.get(source) is not None or self.answer_pending(source):
+            return
+        try:
+            text = self.transcribe(pcm)
+        except ModelUnavailable:
+            return
+        if not text.strip() or is_noise_text(text) or self.sessions.get(source) is not None:
+            return
+        for aid, a in self.active_agents().items():
+            if not self._listens(a, source):
+                continue
+            found, rest = self.strip_name(text, aid, within=self.BACKUP_WORDS)
+            if not found:
+                continue
+            if self._hears_itself(aid, a.get("name", "") or aid):
+                return
+            log.info("the wake word model missed a call; speech recognition heard: %s", text)
+            paused = self._interrupt(aid)
+            if rest and not self._no_request_in(rest):
+                if paused and self._after_interruption(paused, rest):
+                    return
+                self.handle_text(rest, aid, source=f"voice:{source}")
+            else:                                  # just the name: listen for the request
+                after, voiced = [], None
+                lst = self.listeners.get(source)
+                if lst is not None and end_frame is not None and 0 < lst.frame_no - end_frame <= len(lst.ring):
+                    k = lst.frame_no - end_frame             # what you've said since (while it was checking)
+                    after, voiced = list(lst.ring)[-k:], list(lst.voiced_ring)[-k:]
+                # (words=1: speech in `after` is the request, not the name's own end)
+                self._start_listen(source, aid, "", after, None, 1, after_voiced=voiced)
+                s = self.sessions.get(source)
+                if s is not None and s.agent_id == aid and not s.got_speech and self._wake_reply_phrases(a):
+                    s.reply_at = time.time()          # still quiet: "Yes?" now (it took a moment to notice)
+            return
 
     def on_utterance(self, source: str, pcm: bytes) -> None:
         """Transcribe-everything path: Summary log, audio keyword triggers, and
@@ -765,12 +981,26 @@ class Engine:
                     and not c.background]
 
     def _hears_itself(self, agent_id: str, heard: str) -> bool:
-        """The mic picking up the agent saying its own name isn't the user calling it."""
-        h = normalize(heard)
+        """The microphone picking up an agent's own voice isn't the user calling: an agent saying the
+        name right now -- or a word that sounds like it ("achieves", "these", "Jesus"), which the wake
+        word model hears as "Jeeves" -- made it stop mid-sentence to listen to itself."""
+        h = normalize(heard).split()
+        if not h:
+            return False
+        target, now = h[0], time.time()
         with self._lock:
-            ctxs = [c for c in self.active.values() if c.agent_id == agent_id]
-        # only when it's saying the name itself right now (a whole word, not part of one)
-        return any(h and h.split()[0] in normalize(getattr(c, "saying", "") or "").split() for c in ctxs)
+            spoken = [(c.saying, getattr(c, "saying_since", 0.0), getattr(c, "saying_for", 0.0))
+                      for c in self.active.values() if getattr(c, "saying", "")] + list(self._just_said)
+        for text, since, dur in spoken:
+            words = normalize(text).split()
+            if since and dur > 0 and len(words) > 8:
+                # about where it is in the sentence (speech is evenly paced): the last ~2.5 s of it
+                hi = min(len(words), int((now - since) / dur * len(words)) + 2)
+                lo = max(0, int((now - 2.5 - since) / dur * len(words)) - 1)
+                words = words[lo:hi]
+            if any(w == target or ends_like(w, target) >= 0.6 for w in words):
+                return True
+        return False
 
     def video_quality(self, height: int, position: int = 0) -> bool:
         """The player asked for another quality: fetch those streams and carry on from position."""
@@ -891,6 +1121,8 @@ class Engine:
         if agent_id is None:
             self.set_indicator(s.request_id, None, "listening", "say an agent's name first",
                                source="microphone", mode="request")
+        else:
+            self.wake_reply(s)
         self.apply_settings()                    # starts the mic if it wasn't already listening
         return s.request_id
 
@@ -1300,6 +1532,7 @@ class Engine:
         labels = [n for n in [agent.get("name", ""), ctx.agent_id or "", "assistant"] if n]
         text = re.sub(r"^\s*(?:%s)\s*(?:\(you\))?\s*:\s*" % "|".join(re.escape(n) for n in labels), "", text,
                       flags=re.I) or text                # "Jeeves: Certainly" -> "Certainly"
+        text = speakable(text) or text               # no "asterisk asterisk", URLs or [2] read out
         self.jump_in.spoke(ctx.agent_id, text)       # part of the conversation even if TTS fails
         try:
             pcm, rate = self._synth(agent, text)
@@ -1310,6 +1543,7 @@ class Engine:
         pb = Playback(pcm, rate, self.voice_targets(agent))
         ctx.playback = pb
         ctx.saying = text
+        ctx.saying_since, ctx.saying_for = time.time(), len(pcm) / (2 * rate)
         with self._lock:
             self.speaking += 1          # desktop listening ignores Jeeves' own voice meanwhile
         try:
@@ -1320,6 +1554,9 @@ class Engine:
             with self._lock:
                 self.speaking -= 1
                 self.speaking_until = time.time() + 0.5
+                # what it just finished saying can still be in the wake word model's last phrase
+                self._just_said = [(t, a, d) for t, a, d in self._just_said if a + d > time.time() - 2] + \
+                    [(text, ctx.saying_since, ctx.saying_for)]
         if pb.error:
             ctx.trace("playback_failed", reason=pb.error)
             self._tts_problem(f"Couldn't play speech: {pb.error}")

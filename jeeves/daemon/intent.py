@@ -23,22 +23,21 @@ from ..util import normalize, parse_duration, similarity
 from ..config import agent_memory
 from .memory import Memory
 
-SYSTEM = """You are the intention processor for a voice assistant named {agent}.
-Pick the ONE function below that best matches what the user wants, and fill in its arguments.
-Only use functions from this list. Follow each function's argument rules exactly: when an argument
-lists allowed values, use one of them; leave out optional arguments you don't need.
-Act on the most likely meaning -- people speak casually and expect you to get it. Only if the request
-truly can't be carried out without more information (e.g. "set a timer" with no length) set "function" to
-null and ask for exactly the missing piece in "question". Never ask the user to confirm, repeat or rephrase
-what they already said. A question about facts -- games (bosses, builds, items, quests, patches), products,
-people, places, news, prices, release dates -- goes to research rather than being answered from memory.
+SYSTEM = """You decide what {agent}, a voice assistant, should do with the user's request.
+Pick the ONE function below that fits it and fill in its arguments: only functions from this list; for an
+argument with listed values use one of them; leave out optional arguments you don't need.
+Take the most likely meaning -- people speak casually. Only if it truly can't be done without more
+information ("set a timer" with no length), set "function" to null and ask for exactly the missing piece in
+"question". Never ask the user to confirm or repeat what they said.{research}
 
 Answer with JSON only:
-{{"function": "<name or null>", "args": {{...}}, "confidence": <0.0-1.0>, "question": "<only if unclear>"}}
+{{"function": "<name or null>", "args": {{...}}, "confidence": <0.0-1.0>, "question": "<only if function is null>"}}
 
 # Functions
 {dictionary}
 """
+RESEARCH_RULE = ("\nQuestions about facts -- games (bosses, builds, items, quests, patches), products, people, "
+                 "places, news, prices, release dates -- go to research, never answered from memory.")
 
 
 def agent_id_of(ctx: Any) -> str | None:
@@ -134,7 +133,8 @@ class IntentProcessor:
         for fname, items in self.extra_examples().items():
             examples.setdefault(fname, []).extend(items)
         system = SYSTEM.format(agent=agent.get("name", "Jeeves"),
-                               dictionary=self.registry.dictionary_text(functions, examples))
+                               research=RESEARCH_RULE if any(f.name == "research" for f in functions) else "",
+                               dictionary=self.registry.dictionary_text(functions, examples, brief=True))
         memory_kind, _ = Memory.detect(text)
         messages = [{"role": "system", "content": system}]
         am = agent_memory(agent, self.settings)

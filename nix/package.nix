@@ -58,7 +58,9 @@ py.buildPythonApplication {
   src = lib.cleanSource ../.;
 
   build-system = [ py.setuptools ];
-  dependencies = [ py.pyside6 py.evdev ] ++ lib.filter (p: p != null) [ extras.vosk extras.libzim extras.kokoro-onnx ];
+  # numpy + onnxruntime: the speech detector (Silero VAD, shipped in jeeves/resources)
+  dependencies = [ py.pyside6 py.evdev py.numpy py.onnxruntime ]
+    ++ lib.filter (p: p != null) [ extras.vosk extras.libzim extras.kokoro-onnx ];
 
   nativeBuildInputs = [ makeWrapper copyDesktopItems ];
 

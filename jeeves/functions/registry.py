@@ -16,6 +16,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import re
 import sys
 import threading
 from pathlib import Path
@@ -213,9 +214,46 @@ class Registry:
             lines.append(f"Rated {tag}: \"{ex['text']}\"{extra}{note}")
         return "\n".join(lines)
 
-    def dictionary_text(self, functions: list[FunctionDef], examples: dict[str, list[dict[str, Any]]] | None = None) -> str:
+    def brief(self, f: FunctionDef, examples: list[dict[str, Any]] | None = None) -> str:
+        """The function as the intent model needs it: what it's for, its arguments and examples --
+        none of how it works inside (that only gave small models more to get confused by)."""
+        lines = [f"### {f.name}", f.description]
+        for a in f.args:
+            if a.choices:
+                kind = "one of: " + ", ".join(str(c) for c in a.choices if c not in ("", None))
+            else:
+                kind = {"string": "text", "boolean": "true/false", "integer": "whole number"}.get(a.type, a.type)
+                if a.type in ("duration", "time", "region", "position"):
+                    kind = ARG_TYPES.get(a.type, a.type)
+            if a.required:
+                need = "required"
+            elif a.default not in (None, "", [], False):
+                need = f"default {a.default}"
+            else:
+                need = "optional"
+            lines.append(f"- {a.name} ({kind}; {need}): {a.description}".rstrip(": "))
+        said = [re.sub(r"^\w+,\s+", "", ex) for ex in f.examples]       # "Jeeves, set a timer" -> "set a timer"
+        if said:
+            lines.append("e.g. " + " | ".join(f'"{ex}"' for ex in said))
+        elif self.keywords(f):
+            lines.append("e.g. " + " | ".join(f'"{k}"' for k in self.keywords(f)[:6]))
+        blocked = self.blocked(f)
+        if blocked:
+            lines.append("Never for: " + "; ".join(blocked))
+        for ex in examples or []:
+            if ex.get("good"):
+                lines.append(f'Right for: "{ex["text"]}"')
+            elif ex.get("should_use"):
+                lines.append(f'Wrong for: "{ex["text"]}" (use {ex["should_use"]})')
+            else:
+                lines.append(f'Wrong for: "{ex["text"]}"' + (f" ({ex['comment']})" if ex.get("comment") else ""))
+        return "\n".join(lines)
+
+    def dictionary_text(self, functions: list[FunctionDef], examples: dict[str, list[dict[str, Any]]] | None = None,
+                        brief: bool = False) -> str:
         examples = examples or {}
-        return "\n\n".join(self.describe(f, examples.get(f.name)) for f in functions)
+        describe = self.brief if brief else self.describe
+        return "\n\n".join(describe(f, examples.get(f.name)) for f in functions)
 
     def to_json(self) -> list[dict[str, Any]]:
         out = []

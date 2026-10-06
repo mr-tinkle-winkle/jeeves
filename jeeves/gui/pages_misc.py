@@ -36,8 +36,14 @@ class GeneralPage(Page):
         self.b.number(s, "Longest single request", "general.max_request_seconds", 5, 600, 5, 0, suffix=" s")
         self.b.number(s, "Below this confidence, ask a clarifying question", "general.unclear_confidence",
                       0, 1, 0.05, 2)
-        self.b.number(s, "Speech detection level", "audio.vad_threshold", 0.001, 0.2, 0.002, 3,
-                      hint="Raise it if background noise keeps Jeeves listening; lower it if quiet speech is missed.")
+        self.b.choice(s, "Speech detection", "audio.speech_detector",
+                      [("Speech detector (hears you over music, games and typing)", "auto"),
+                       ("Level meter (anything louder than the background)", "level")],
+                      hint="Tells when you start and stop talking. The speech detector is a small neural network "
+                           "(Silero VAD); the level meter is the fallback when it can't run.")
+        self.b.number(s, "Level meter: speech level", "audio.vad_threshold", 0.001, 0.2, 0.002, 3,
+                      hint="Only for the level meter. Raise it if background noise keeps Jeeves listening; lower "
+                           "it if quiet speech is missed.")
 
         k = self.section("Keybinds")
         k.addWidget(label("Key names are Linux names joined with +, e.g. KEY_LEFTMETA+KEY_J. Keybinds need read "
@@ -48,6 +54,10 @@ class GeneralPage(Page):
         self.b.check(k, "Always listen for wake words", "wake_word.enabled",
                      hint="Off: the microphone is only open during a Voice Request or while an agent waits for "
                           "your answer. Voice Request: Unknown then works like a push-to-talk wake word.")
+        self.b.check(k, "Catch calls the wake word model misses", "wake_word.stt_backup",
+                     hint="What you say without an agent's name being heard is checked by speech recognition too, "
+                          "which catches a name run together with other words, said fast or over loud sound. "
+                          "Uses some extra CPU or GPU while you talk.")
         self.combo_edit(k, "Abort (stops all agents, releases all inputs)", "general.abort_key", single=True)
         self.b.check(k, "Text Request keybind", "manual_request.text_keybind_enabled")
         self.combo_edit(k, "Text Request", "manual_request.text_keybind")

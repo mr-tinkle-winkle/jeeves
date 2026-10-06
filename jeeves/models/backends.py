@@ -227,6 +227,9 @@ class VoskSTT(STT):
         return json.loads(rec.FinalResult()).get("text", "").strip()
 
 
+FRAME_SECONDS = 0.03          # the listeners feed 30 ms frames
+
+
 class WakeRecognizer:
     """One streaming recognizer over a grammar of call names. Each listener (mic,
     desktop, a device) owns its own: Vosk recognizers aren't thread-safe, and sharing
@@ -240,16 +243,24 @@ class WakeRecognizer:
         self.names = names
         self.rec = _vosk().KaldiRecognizer(model, RATE, json.dumps(names + ["[unk]"]))
         self.rec.SetWords(True)
+        # (not SetPartialWords: with word times in partial results Vosk holds partials back by a second
+        # or more, which is exactly what reporting the name early relies on)
         self.last_result: list[dict[str, Any]] = []
+        self.phrase_open = False            # words decoded in the phrase so far (someone is talking)
+        self.speech_end = 0.0               # stream time (s) speech was last decoded
         self._n = 0
         self._seen = 0
+        self._last_partial = ""
+
+    UNSURE = 0.45            # confidence reported for a name only the partial result had
 
     def _name_in(self, tokens: list[str]) -> bool:
-        for name in self.names:
-            parts = name.split()
-            if any(tokens[i:i + len(parts)] == parts for i in range(len(tokens) - len(parts) + 1)):
-                return True
-        return False
+        return any(self._name_in_one(name, tokens) for name in self.names)
+
+    @staticmethod
+    def _name_in_one(name: str, tokens: list[str]) -> bool:
+        parts = name.split()
+        return any(tokens[i:i + len(parts)] == parts for i in range(len(tokens) - len(parts) + 1))
 
     def feed(self, frame: bytes) -> list[tuple[str, float]]:
         """Returns [(name, confidence)] detected in this frame.
@@ -258,13 +269,20 @@ class WakeRecognizer:
         music, a game, Discord) that silence may not come for many seconds, so the name was reported
         late or not at all. So the partial result is checked too: once a name has been in it for a
         moment (or more words already follow it), the phrase is finished right there."""
+        self._n += 1
         if self.rec.AcceptWaveform(frame):
             self._seen = 0
+            self.phrase_open = False
+            self._last_partial = ""
             return self._found(json.loads(self.rec.Result()))
-        self._n += 1
         if self._n % self.PARTIAL_EVERY:
             return []
-        tokens = json.loads(self.rec.PartialResult()).get("partial", "").split()
+        text = json.loads(self.rec.PartialResult()).get("partial", "")
+        tokens = text.split()
+        self.phrase_open = bool(tokens)
+        if text and text != self._last_partial:
+            self.speech_end = self._n * FRAME_SECONDS     # it just decoded more speech
+        self._last_partial = text
         if not tokens or not self._name_in(tokens):
             self._seen = 0
             return []
@@ -274,11 +292,20 @@ class WakeRecognizer:
             return []
         self._seen = 0
         # FinalResult ends the phrase now; word times keep counting from the stream's start
-        return self._found(json.loads(self.rec.FinalResult()))
+        found = self._found(json.loads(self.rec.FinalResult()))
+        if not found:
+            # the finished phrase came out without the name the partial result had (it happens most
+            # over other people talking): unsure, so speech recognition gets to check it
+            found = [(n, self.UNSURE) for n in self.names if self._name_in_one(n, tokens)][:1]
+        return found
 
     def _found(self, res: dict[str, Any]) -> list[tuple[str, float]]:
         words = res.get("result", [])
         self.last_result = words      # with start/end times, for the audio after the name
+        self.phrase_open = False
+        self._last_partial = ""
+        if words:
+            self.speech_end = max(self.speech_end, max(float(w.get("end", 0)) for w in words))
         found = []
         # multi-word call names: score = mean confidence of their words in sequence
         text_words = [(w["word"], float(w.get("conf", 0))) for w in words]
@@ -322,7 +349,7 @@ class VoskWake:
     def _warn_unknown(self, names: list[str]) -> None:
         """Vosk silently drops grammar words it doesn't know, so a call name outside its vocabulary
         can never wake anything. Say so (once per word) instead of failing quietly."""
-        find = getattr(self.model, "find_word", None)
+        find = getattr(self.model, "vosk_model_find_word", None) or getattr(self.model, "find_word", None)
         if find is None:
             return
         for word in {w for n in names for w in n.split()}:

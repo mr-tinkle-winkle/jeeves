@@ -64,6 +64,16 @@ def test_wake_fires_at_once_when_words_follow_the_name(monkeypatch):
     assert rec.feed(b"") == [] and rec.feed(b"") == [("jeeves", 0.8)]   # first partial check: frame 2
 
 
+def test_a_name_only_the_partial_result_had_is_checked_not_dropped(monkeypatch):
+    # over other people talking, the finished phrase often loses the name the partial result showed
+    rec, fake = recognizer(monkeypatch, ["", "jeeves", "jeeves", "jeeves"], [{"word": "[unk]", "conf": 1.0,
+                                                                              "start": 0.5, "end": 1.4}])
+    hits = []
+    for _ in range(12):
+        hits += rec.feed(b"\0" * 960)
+    assert hits == [("jeeves", WakeRecognizer.UNSURE)] and fake.finalized == 1
+
+
 def test_a_flicker_of_the_name_does_not_wake(monkeypatch):
     rec, fake = recognizer(monkeypatch, ["jeeves", "", "jeeves", ""], [])
     for _ in range(10):
@@ -218,7 +228,7 @@ def test_screen_reading_picks_the_relevant_part_and_reads_it_closely(engine, mon
     monkeypatch.setattr(engine.models, "vision_llm", lambda agent=None: None)
     prompts = []
 
-    def respond(agent, prompt, system="", ctx=None, with_memory=False, raw=False):
+    def respond(agent, prompt, system="", ctx=None, with_memory=False, raw=False, **kw):
         prompts.append(prompt)
         if "Which blocks" in prompt:
             line = next(ln for ln in prompt.splitlines() if "bridge" in ln)
@@ -230,7 +240,7 @@ def test_screen_reading_picks_the_relevant_part_and_reads_it_closely(engine, mon
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
     ctx.call("screen_reading", question="what did dan say")
     answer_prompt = prompts[-1]
-    zoomed, glance = answer_prompt.split("Everything else on the screen")
+    glance, zoomed = answer_prompt.split("The part of the screen that matters")
     assert "build the bridge tonight" in zoomed and "iron plates" in zoomed
     assert "Options" not in zoomed and "Options" in glance       # read closely: only the part that matters
     assert said == ["Dan wants to build the bridge tonight and says to bring iron plates."]
@@ -532,6 +542,20 @@ def test_hearing_itself_only_when_it_says_its_own_name(engine):
     assert not engine._hears_itself("jeeves", "jeeves")
     ctx.saying = "Jeeves at your service."
     assert engine._hears_itself("jeeves", "jeeves")
+    ctx.saying = "One believes the weather will hold, sir."     # the wake model hears "Jeeves" in that
+    assert engine._hears_itself("jeeves", "jeeves")
+
+
+def test_hearing_itself_looks_at_where_it_is_in_a_long_reply(engine):
+    import time
+    ctx = _busy_ctx(engine)
+    ctx.saying = ("One believes the weather will hold, sir, though the forecast for the rest of the week is "
+                  "rather less kind, with rain expected from Thursday onwards and a chill in the evenings.")
+    ctx.saying_for = 12.0
+    ctx.saying_since = time.time() - 0.5                       # "believes" was just said
+    assert engine._hears_itself("jeeves", "jeeves")
+    ctx.saying_since = time.time() - 10                        # long past it: a call now is you
+    assert not engine._hears_itself("jeeves", "jeeves")
 
 
 def _discord_screen(tmp_path):
@@ -598,7 +622,7 @@ def test_screen_reading_understands_lists_not_just_text(engine, monkeypatch, tmp
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
     ctx.call("screen_reading", question=question)
     answer_prompt = prompts[-1]
-    zoomed = answer_prompt.split("Everything else on the screen")[0]
+    zoomed = answer_prompt.split("The part of the screen that matters")[1]
     assert want in zoomed and not_want not in zoomed                 # the entries under it came along
     assert "in Discord" in zoomed and "people in a voice channel are listed" in answer_prompt
 
@@ -673,3 +697,12 @@ def test_routing_without_a_model(engine, text, function):
     assert d.function == function, d
     if function == "screen_reading" and "left monitor" in text:
         assert d.args["screen"] == "left"
+
+
+def test_replies_are_spoken_without_markdown_links_or_citations():
+    from jeeves.util import speakable
+    assert speakable("**Certainly, sir.** Steps:\n1. Hold *jump* at the wall.\n2. Press `Shift` [2]") == \
+        "Certainly, sir. Steps: Hold jump at the wall. Press Shift."
+    assert speakable("See https://www.example.com/page?x=1 for more.") == "See example.com for more."
+    assert speakable("Use the [wiki](https://wiki.gg/x) page. 🎉") == "Use the wiki page."
+    assert speakable("snake_case and 2*3*4 stay") == "snake_case and 2*3*4 stay."
