@@ -6,6 +6,7 @@ every one of them in Settings > Functions.
 from __future__ import annotations
 
 import json
+import re
 
 from ..util import format_duration, parse_clock, parse_duration
 from .base import Arg, FunctionError, full
@@ -57,7 +58,10 @@ def summary(ctx, action, minutes=None, question=""):
         prompt = f"Transcript (timestamps, [mic] = the user, [desktop] = computer audio):\n{log_text}\n\n" \
                  f"Answer from the transcript only: {question}"
     else:
-        prompt = f"Summarize this transcript briefly ([mic] = the user, [desktop] = computer audio):\n{log_text}"
+        prompt = (f"Transcript ([mic] = the user, [desktop] = computer audio):\n{log_text}\n\n"
+                  "Summarize it so someone who missed it understands: the main topics, what was decided or "
+                  "asked, and anything important (names, numbers, plans) -- explained in a few plain sentences, "
+                  "not just a list of keywords.")
     return ctx.say(ctx.call("generate_text", prompt=prompt))
 
 
@@ -385,14 +389,32 @@ def research(ctx, question):
     answer = ctx.engine.models.respond(
         ctx.agent,
         f"Question: {question}\n\nSources:\n{material}\n\n"
-        "Answer the question from these sources only. Mention which site the key facts came from (by name, "
-        "not URL). If the sources disagree or don't answer it, say so.",
+        "Using only these sources, explain the answer properly -- not a one-line summary. Say what the answer "
+        "is, then explain the why or how and the key details a curious person would want (names, numbers, "
+        "dates, what it means for them), in about 4 to 8 plain sentences. After each fact put the number of "
+        "the source it came from in square brackets, like [2]. If the sources disagree or don't answer it, "
+        "say so.",
         ctx=ctx)
     if answer is None:                           # no local model: read out the best snippet
         best = next((r for r in results if r.get("snippet")), None)
-        answer = f"According to {best['title']}: {best['snippet']}" if best else sources[0]["text"][:400]
-    ctx.show(answer + "\n\nSources:\n" + "\n".join(f"- {s['title']}: {s['url']}" for s in sources))
-    return ctx.say(answer)
+        answer = f"According to {best['title']}: {best['snippet']} [1]" if best else sources[0]["text"][:400]
+    spoken = re.sub(r"\s*\[\d+(?:\s*[,-]\s*\d+)*\]", "", answer).strip()
+    show_sources(ctx, question, answer, sources)
+    ctx.trace("say", text=spoken)
+    ctx.entry["response"] = answer
+    ctx.spoke = True
+    ctx.state("responding", spoken)
+    ctx.engine.speak(ctx, spoken)
+    return spoken
+
+
+def show_sources(ctx, question: str, answer: str, sources: list[dict]) -> None:
+    """Answer + clickable sources + the text read from each: the Sources popup (and history)."""
+    items = [{"n": i + 1, "title": s["title"], "url": s["url"], "text": s["text"]} for i, s in enumerate(sources)]
+    ctx.entry["sources"] = items
+    ctx.engine.publish("sources", {"request": ctx.entry["id"], "agent": ctx.agent_id,
+                                   "agent_name": ctx.agent.get("name", ctx.agent_id), "question": question,
+                                   "answer": answer, "sources": items})
 
 
 @full(

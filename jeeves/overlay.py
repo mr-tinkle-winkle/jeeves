@@ -51,6 +51,36 @@ def _single_instance(name: str) -> Any:
     return f
 
 
+
+def sources_html(d: dict[str, Any], expanded: set[int] | None = None, link: str = "#4ea1ff") -> str:
+    """The Sources popup: question, the answer with [n] links to its sources, then each source with
+    a link to the page and the text that was read from it (first 600 characters unless expanded)."""
+    import html
+    import re as _re
+    esc = html.escape
+    expanded = expanded or set()
+
+    def cite(m: Any) -> str:
+        nums = _re.findall(r"\d+", m.group(0))
+        return " ".join(f'<a href="#s{n}" style="color:{link};text-decoration:none">[{n}]</a>' for n in nums)
+    answer = _re.sub(r"\[\d+(?:\s*[,-]\s*\d+)*\]", cite, esc(d.get("answer", "")))
+    parts = [f'<h3>{esc(d.get("question", ""))}</h3>',
+             f'<p style="font-size:15px">{answer.replace(chr(10), "<br>")}</p>', "<h4>Sources</h4>"]
+    for s in d.get("sources", []):
+        n = s["n"]
+        url = s.get("url", "")
+        title = esc(s.get("title") or url)
+        head = f'<a href="{esc(url)}" style="color:{link}">{title}</a>' if url.startswith("http") else title
+        text = s.get("text", "")
+        full = n in expanded or len(text) <= 600
+        shown = esc(text if full else text[:600].rsplit(" ", 1)[0] + "…").replace("\n", "<br>")
+        toggle = "" if len(text) <= 600 else \
+            f' <a href="more:{n}" style="color:{link}">{"show less" if full else "show all the text read"}</a>'
+        parts.append(f'<a name="s{n}"></a><p><b>[{n}]</b> {head}<br>'
+                     f'<span style="font-size:11px">{esc(url)}</span></p>'
+                     f'<blockquote>{shown}{toggle}</blockquote>')
+    return "".join(parts)
+
 def main(popups: bool = False) -> int:
     lock = _single_instance("popups" if popups else "overlay")
     if lock is None:
@@ -672,6 +702,42 @@ def main(popups: bool = False) -> int:
             if data.get("looking_at"):
                 self.looking.setText(f"Looking at: {data['looking_at']}")
 
+    class SourcesBox(Popup):
+        """A researched answer with its sources: [n] markers jump to the source, titles open the page
+        in the browser, and each source shows the text Jeeves read from it (click to expand)."""
+        current: "SourcesBox | None" = None
+
+        def __init__(self, data: dict[str, Any]) -> None:
+            super().__init__(f"{data.get('agent_name', 'Jeeves')} — sources")
+            from PySide6.QtWidgets import QTextBrowser
+            self.data = data
+            self.expanded: set[int] = set()
+            self.view = QTextBrowser()
+            self.view.setOpenLinks(False)
+            self.view.anchorClicked.connect(self._clicked)
+            self.lay.addWidget(self.view, 1)
+            self.setAttribute(Qt.WA_ShowWithoutActivating)
+            self.resize(720, 640)
+            self._render()
+
+        def _render(self) -> None:
+            t = self.theme
+            pos = self.view.verticalScrollBar().value()
+            self.view.setHtml(sources_html(self.data, self.expanded, t.accent().name()))
+            self.view.verticalScrollBar().setValue(pos)
+
+        def _clicked(self, url: Any) -> None:
+            s = url.toString()
+            if s.startswith("#s"):
+                self.view.scrollToAnchor(s[1:])
+            elif s.startswith("more:"):
+                n = int(s[5:])
+                self.expanded ^= {n}
+                self._render()
+            elif s.startswith(("http://", "https://")):
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(url)
+
     class AnswerBox(Popup):
         def __init__(self, rid: str | None, question: str, choices: list[str] | None = None) -> None:
             super().__init__("Answer")
@@ -885,10 +951,24 @@ def main(popups: bool = False) -> int:
             elif topic == "settings":
                 load_settings()
             return
+        if topic == "sources":
+            if SourcesBox.current is not None:
+                SourcesBox.current.close()
+            SourcesBox.current = SourcesBox(data)
+            keep.append(SourcesBox.current)
+            SourcesBox.current.show()             # without taking focus from what you're doing
+            return
         if topic == "popup":
             d = data.get("data") or {}
             if data.get("kind") == "answer":
                 popup(AnswerBox(d.get("request"), d.get("question", ""), d.get("choices")))
+            elif data.get("kind") == "sources":
+                def got(e: Any) -> None:
+                    if isinstance(e, dict) and e.get("sources"):
+                        on_event("sources", {"request": e["id"], "agent_name": e.get("agent") or "Jeeves",
+                                             "question": e.get("text", ""), "answer": e.get("response", ""),
+                                             "sources": e["sources"]})
+                daemon.call("history.get", got, lambda _e: None, id=d.get("request"))
             elif data.get("kind") == "thoughts":
                 Thoughts.open(d.get("request"), d.get("state") or {})
         elif topic == "thoughts" and Thoughts.current is not None and Thoughts.current.isVisible():

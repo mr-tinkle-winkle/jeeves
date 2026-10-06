@@ -49,6 +49,22 @@ from .wikipedia import Wikipedia
 log = logging.getLogger("jeeves.engine")
 
 
+
+# What Whisper "hears" in silence or noise (it was trained on subtitles). Alone, these are dropped
+# instead of being treated as a request -- otherwise a wake word followed by a pause got an answer.
+NOISE_TEXTS = {
+    "thank you", "thank you very much", "thanks for watching", "thank you for watching", "thanks", "you", "bye",
+    "bye bye", "so", "uh", "um", "hmm", "mm", "oh", "the end", "subtitles by the amaraorg community",
+    "please subscribe", "like and subscribe", "blank audio", "silence", "music", "applause", "laughter",
+    "inaudible", "foreign", "see you next time", "i'm sorry", "okay",
+}
+
+
+def is_noise_text(text: str) -> bool:
+    t = re.sub(r"[\[\]()*♪.,!?'\"_-]", " ", text.lower())
+    t = " ".join(t.split()).replace("amara org", "amaraorg")
+    return not t or t in NOISE_TEXTS
+
 class Waiter:
     """Something a running function is waiting on from the user."""
 
@@ -469,6 +485,9 @@ class Engine:
             self.set_indicator(s.request_id, s.agent_id, "idle")
             self._deliver_answer(s.agent_id, text)
             return
+        if s.mode == "request" and is_noise_text(text):
+            log.info("ignored '%s' (what speech recognition hears in silence)", text)
+            text = ""
         if s.interrupting:
             if self._after_interruption(s.interrupting, text):
                 self.set_indicator(s.request_id, s.agent_id, "idle")
@@ -500,10 +519,26 @@ class Engine:
             self.flash_unavailable(aid, f"speech recognition is unloaded while {self.models.suspended['stt']} is open")
         s = self.open_session(source, aid, "extended" if aid in self.extended else "request")
         s.interrupting = paused
-        if after:
+        spoke_at = self._speech_in(after)
+        if spoke_at is not None:
+            # words already followed the name ("Jeeves, open OBS" in one breath)
             s.frames = list(after)
             s.got_speech = True
-            s.last_voice = time.time()
+            s.last_voice = spoke_at
+        # otherwise just the pause after the name (or breathing, keys, the name's tail): wait for the
+        # request -- the session waits up to NO_SPEECH_TIMEOUT for you to start talking
+
+    def _speech_in(self, frames: list[bytes]) -> float | None:
+        """When the last real speech in these frames was (a timestamp), or None if they hold no
+        more than noise: at least ~0.3 s of voiced audio counts as words."""
+        from .audio import FRAME_MS, rms
+        if not frames:
+            return None
+        thr = float(self.settings.get("audio.vad_threshold", 0.012))
+        voiced = [i for i, f in enumerate(frames) if rms(f) > thr]
+        if len(voiced) < 300 // FRAME_MS:
+            return None
+        return time.time() - (len(frames) - 1 - voiced[-1]) * FRAME_MS / 1000
 
     def on_utterance(self, source: str, pcm: bytes) -> None:
         """Transcribe-everything path: Summary log, audio keyword triggers, and
@@ -512,7 +547,7 @@ class Engine:
             text = self.transcribe(pcm)
         except ModelUnavailable:
             return
-        if not text.strip():
+        if not text.strip() or is_noise_text(text):
             return
         self.summary.add(source, text)
         self.triggers.on_transcript(text, source)

@@ -298,6 +298,10 @@ class HistoryPage(Page):
         self.detail.setReadOnly(True)
         self.detail.setMinimumHeight(220)
         self.body_layout.addWidget(self.detail)
+        self.sources_btn = CustomButton("Show sources")
+        self.sources_btn.setEnabled(False)
+        self.sources_btn.clicked.connect(self.show_sources)
+        self.body_layout.addWidget(row(self.sources_btn))
         rate = self.section("Rate this response")
         self.good = CustomButton("👍 Good")
         self.bad = CustomButton("👎 Bad")
@@ -352,9 +356,17 @@ class HistoryPage(Page):
         for t in e.get("trace", []):
             rest = {k: v for k, v in t.items() if k not in ("t", "kind")}
             lines.append(f"  {t.get('t', 0):6.2f}s  {t.get('kind'):<14} {json.dumps(rest, default=str)}")
+        if e.get("sources"):
+            lines[4:4] = ["Sources:"] + [f"  [{s['n']}] {s['title']} — {s['url']}" for s in e["sources"]] + [""]
         self.detail.setPlainText("\n".join(lines))
+        self.sources_btn.setEnabled(bool(e.get("sources")))
         self.comment.setText(e.get("comment") or "")
         self.should.setCurrentIndex(max(0, self.should.findData(e.get("should_use"))))
+
+    def show_sources(self) -> None:
+        i = self.list.currentRow()
+        if 0 <= i < len(self.items):
+            self.daemon.call("ui.popup", None, None, kind="sources", data={"request": self.items[i]["id"]})
 
     def rate(self, value: int | None) -> None:
         i = self.list.currentRow()

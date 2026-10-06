@@ -121,3 +121,51 @@ def test_speaks_through_a_specific_device(monkeypatch):
     assert t("device_mic") == ["headset", "jeeves-mic"]
     assert t("device", "") == [""]                 # no device chosen yet: the default output
     assert t("speakers") == [""] and t("both") == ["", "jeeves-mic"]
+
+
+def _frames(voiced: int, silent: int):
+    import math, struct
+    loud = b"".join(struct.pack("<h", int(8000 * math.sin(i / 3))) for i in range(480))
+    return [loud] * voiced + [b"\0\0" * 480] * silent
+
+
+def test_pause_after_the_name_waits_for_you_to_speak(engine):
+    engine.on_wake("microphone", "jeeves", 0.99, _frames(3, 30))      # a click or breath, then silence
+    s = engine.sessions["microphone"]
+    assert not s.got_speech                    # still waiting for the request
+    import time
+    assert not s.should_end(time.time() + 3, 1.2)          # a 3 s pause doesn't end it
+    engine.sessions.clear()
+    engine.on_wake("microphone", "jeeves", 0.99, _frames(20, 5))      # "Jeeves, open OBS" in one breath
+    assert engine.sessions["microphone"].got_speech
+
+
+@pytest.mark.parametrize("text,noise", [("Thank you.", True), ("Thanks for watching!", True), ("[BLANK_AUDIO]", True),
+                                        ("you", True), ("open OBS", False), ("thank you, set a timer", False)])
+def test_whisper_silence_hallucinations_are_ignored(text, noise):
+    from jeeves.daemon.engine import is_noise_text
+    assert is_noise_text(text) == noise
+
+
+def test_research_explains_and_shows_clickable_sources(engine, monkeypatch):
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    from jeeves.functions.partials import web
+    monkeypatch.setattr(web, "search", lambda settings, q, n: [
+        {"title": "Patch notes", "url": "https://example.com/a", "snippet": "s"},
+        {"title": "News", "url": "https://example.org/b", "snippet": "s"}])
+    monkeypatch.setattr(web, "request_website", lambda ctx, url, max_chars=4000: f"Long article text from {url}. " * 20)
+    monkeypatch.setattr(engine.models, "respond", lambda *a, **k: "It's out on the 14th [1]. It fixes saves [1, 2].")
+    events, said = [], []
+    engine.publish = lambda topic, data: events.append((topic, data))
+    engine.speak = lambda ctx, text: said.append(text)
+    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
+    ctx.call("research", question="when is the patch")
+    assert said == ["It's out on the 14th. It fixes saves."]             # numbers aren't read out
+    src = next(d for t, d in events if t == "sources")
+    assert src["answer"].endswith("[1, 2].") and [s["url"] for s in src["sources"]] == \
+        ["https://example.com/a", "https://example.org/b"]
+    assert "Long article text" in src["sources"][0]["text"] and ctx.entry["sources"][1]["n"] == 2
+    from jeeves.overlay import sources_html
+    html = sources_html(src)
+    assert 'href="#s2"' in html and 'href="https://example.com/a"' in html and "show all the text read" in html
