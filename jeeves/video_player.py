@@ -147,6 +147,7 @@ class VideoPlayer(QWidget):
         self.heights: list[int] = []
         self.height_now = 0
         self.pending_seek: int | None = None
+        self.rate = 1.0          # kept here: some backends report 0 or reset it when a new source loads
         self.resize(1100, 680)
 
     # ------------------------------------------------------------------ loading
@@ -162,7 +163,6 @@ class VideoPlayer(QWidget):
         self.height_now = int(d.get("height") or 0)
         self.quality_btn.setText(f"{self.height_now}p" if self.height_now else "Auto")
         self.quality_btn.setVisible(bool(self.heights))
-        rate = self.video.playbackRate() or 1.0
         self.video.setSource(QUrl(d["video"]))
         if self.split:                       # separate audio: it leads, the picture follows
             self.audio.setSource(QUrl(d["audio"]))
@@ -174,7 +174,7 @@ class VideoPlayer(QWidget):
             self.video_out.setMuted(False)
             self.sync.stop()
         self.pending_seek = int(d["start"]) if d.get("start") else None
-        self.set_speed(rate)
+        self.set_speed(self.rate)                 # a new source (quality change) keeps the speed
         self._volume(self.vol.value())
         self.video.play()
         self.play_btn.setText("Pause")
@@ -249,13 +249,13 @@ class VideoPlayer(QWidget):
 
     def set_speed(self, rate: float) -> None:
         rate = min(SPEEDS[-1], max(SPEEDS[0], float(rate)))
+        self.rate = rate
         self.video.setPlaybackRate(rate)
         self.audio.setPlaybackRate(rate)
         self.speed_btn.setText(f"{rate:g}×")
 
     def change_speed(self, steps: int) -> None:
-        cur = self.video.playbackRate() or 1.0
-        i = min(range(len(SPEEDS)), key=lambda k: abs(SPEEDS[k] - cur))
+        i = min(range(len(SPEEDS)), key=lambda k: abs(SPEEDS[k] - self.rate))
         self.set_speed(SPEEDS[max(0, min(len(SPEEDS) - 1, i + steps))])
 
     def set_quality(self, height: int) -> None:
@@ -314,8 +314,7 @@ class VideoPlayer(QWidget):
         self.show_controls()
 
     def _speed_menu(self) -> None:
-        cur = self.video.playbackRate()
-        self._menu([(f"{s:g}×", lambda _=False, s=s: self.set_speed(s), abs(s - cur) < 0.01) for s in SPEEDS],
+        self._menu([(f"{s:g}×", lambda _=False, s=s: self.set_speed(s), abs(s - self.rate) < 0.01) for s in SPEEDS],
                    self.speed_btn)
 
     def _quality_menu(self) -> None:
