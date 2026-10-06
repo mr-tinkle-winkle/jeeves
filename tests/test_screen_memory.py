@@ -153,3 +153,40 @@ def test_control_phrases():
     from jeeves.functions.base import FunctionError
     with pytest.raises(FunctionError, match="can't see"):
         simple_actions(ctx, "click Export")
+
+
+def _two_monitors(monkeypatch):
+    from jeeves.daemon import desktop as dk
+    outs = [dk.Output("DP-2", 1920, 0, 1280, 720, 2.0, False), dk.Output("DP-1", 0, 0, 1920, 1080, 1.0, True)]
+    monkeypatch.setattr(dk, "outputs", lambda: outs)
+    monkeypatch.setattr(dk, "focused", lambda: dk.Window("1", "kate", "notes", 2000, 100, 400, 300))
+    return outs
+
+
+def test_pick_monitors(monkeypatch):
+    from jeeves.functions.partials.screen import pick_outputs
+    _two_monitors(monkeypatch)
+    names = lambda s: [o.name for o in pick_outputs(s)]  # noqa: E731
+    assert names("all") == [] and names("") == []
+    assert names("left") == ["DP-1"] and names("right") == ["DP-2"]
+    assert names("primary") == ["DP-1"] and names("second") == ["DP-2"]
+    assert names("current") == ["DP-2"]            # the focused window is on DP-2
+    assert names("other") == ["DP-1"] and names("dp-2") == ["DP-2"]
+
+
+def test_regions_are_per_monitor(monkeypatch):
+    from jeeves.functions.partials.screen import Mapper, _rect_for
+    _two_monitors(monkeypatch)
+    mp = Mapper((6400, 2160), (0, 0, 3200, 1080))   # whole desktop shot at 2x
+    assert _rect_for("anywhere", 6400, 2160, mp, "right") == (3840, 0, 2560, 1440)
+    x, y, w, h = _rect_for("top", 6400, 2160, mp, "right")
+    assert (x, y) == (3840, 0) and w == 2560 and h == 1440 // 3
+    assert _rect_for("top", 6400, 2160, mp, "all") == (0, 0, 6400, 2160 // 3)
+
+
+def test_screen_words_pick_monitor_and_region():
+    from jeeves.daemon.intent import guess_region, guess_screen
+    assert (guess_region("read the top of my left screen"), guess_screen("read the top of my left screen")) == \
+        ("top", "left")
+    assert guess_region("what's on the right monitor") == "anywhere"
+    assert guess_screen("what's on all my screens") == "all"

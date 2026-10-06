@@ -143,7 +143,10 @@ def control_mode(ctx, actions=None, instruction=""):
               default=""),
           Arg("region", "region", "Where to look: anywhere, top, bottom, left, right, middle, top-left, ...",
               required=False, default="anywhere"),
-          Arg("find", "string", "Something to locate on screen (instead of reading)", required=False, default="")],
+          Arg("find", "string", "Something to locate on screen (instead of reading)", required=False, default=""),
+          Arg("screen", "string", "Which monitor: current (the one you're working on), all, primary, left, right, "
+              "other, or a monitor name. Finding something searches all of them unless one is named.",
+              required=False, default="")],
     how="Takes a screenshot, reads it with OCR (Tesseract) and has the local response model answer from the text "
         "it found. Without a local model it reads the text out. Read-only: it never clicks anything.",
     keywords=["on my screen", "on the screen", "read the screen", "read my screen", "what does it say",
@@ -152,24 +155,25 @@ def control_mode(ctx, actions=None, instruction=""):
               "Jeeves, where is the save button?"],
     default_enabled=True, category="screen", uses=["read_screen_text", "find_on_screen", "generate_text"],
 )
-def screen_reading(ctx, question="", region="anywhere", find=""):
+def screen_reading(ctx, question="", region="anywhere", find="", screen=""):
     import re as _re
     if ctx.dry_run:
         return f"<read the screen ({region}) for: {question or find}>"
     q = str(question or "")
-    m = _re.search(r"\bwhere\s+is\s+(?:the\s+)?(.+?)(?:\s+(?:button|icon|link|tab))?\s*\??$", q, _re.I)
+    m = _re.search(r"\bwhere(?:'s|\s+is)\s+(?:the\s+)?(.+?)(?:\s+(?:button|icon|link|tab))?"
+                   r"(?:\s+on\s+(?:my|the)\s+(?:\w+\s+)?(?:screens?|monitors?))?\s*\??$", q, _re.I)
     if not find and m:
         find = m.group(1)
     ctx.state("thinking", "Looking at the screen")
     if find:
-        hit = ctx.call("find_on_screen", target=str(find), region=region)
+        hit = ctx.call("find_on_screen", target=str(find), region=region, screen=screen or "all")
         where = _describe_position(ctx, hit["x"], hit["y"])
         try:
             ctx.call("mark_screen_position", x=hit["x"], y=hit["y"])     # circle it on screen
         except FunctionError:
             pass
         return ctx.say(f"{hit.get('text') or find} is {where}.")
-    text = ctx.call("read_screen_text", region=region)
+    text = ctx.call("read_screen_text", region=region, screen=screen or "current")
     ctx.think("Text on screen:\n" + text)
     if not text.strip():
         return ctx.say("I can't read any text there." if region != "anywhere" else
@@ -182,7 +186,7 @@ def screen_reading(ctx, question="", region="anywhere", find=""):
         app = ""
     answer = ctx.engine.models.respond(
         ctx.agent,
-        f"Text read from the user's screen{'' if region == 'anywhere' else f' ({region} of it)'} with OCR, top "
+        f"Text read from {_screen_words(screen)}{'' if region == 'anywhere' else f' ({region} of it)'} with OCR, top "
         f"to bottom (it may contain recognition mistakes and menu clutter):\n{text[:6000]}{app}\n\n"
         f"The user said: {q or 'read the screen'}\n\nAnswer from what's on the screen. If they asked you to read "
         "something, read the relevant part out (skip menus and buttons). If it isn't on screen, say so.",
@@ -190,6 +194,15 @@ def screen_reading(ctx, question="", region="anywhere", find=""):
     if answer is None:
         answer = text if len(text) < 600 else text[:600].rsplit(" ", 1)[0] + "…"
     return ctx.say(answer)
+
+
+def _screen_words(screen: str) -> str:
+    s = (screen or "current").lower()
+    if s in ("current", "this", "focused", ""):
+        return "the screen the user is working on"
+    if s in ("all", "every", "both", "anywhere"):
+        return "all of the user's screens"
+    return f"the user's {s} screen"
 
 
 def _describe_position(ctx, x: int, y: int) -> str:
@@ -205,8 +218,10 @@ def _describe_position(ctx, x: int, y: int) -> str:
     v = "top" if ry < 0.33 else "bottom" if ry > 0.66 else "middle"
     h = "left" if rx < 0.33 else "right" if rx > 0.66 else ("" if v == "middle" else "middle")
     spot = "the middle" if v == "middle" and not h else f"the {v} {h}".strip() if v != "middle" else f"the {h} middle"
-    screen = f" of {out.name}" if len(outs) > 1 else ""
-    return f"near {spot}{screen}"
+    if len(outs) > 1:
+        from .partials.screen import describe_output
+        return f"near {spot} of {describe_output(out, outs)}"
+    return f"near {spot}"
 
 
 @full(

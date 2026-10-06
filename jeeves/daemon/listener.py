@@ -49,6 +49,7 @@ class Session:
     ended: bool = False
     text: str = ""                # training: the phrase being read
     suspended: bool = False       # right-click > Suspend: stop taking audio until resumed
+    interrupting: list[str] = field(default_factory=list)   # requests paused because their agent was called
 
     def feed(self, frame: bytes, voiced: bool, now: float) -> None:
         self.frames.append(frame)
@@ -203,11 +204,11 @@ class Listener(threading.Thread):
                 eng.end_session(session)
             return
 
-        if self.source == "microphone" and eng.answer_pending():
+        if eng.answer_pending(self.source):
             self.answer_streak = self.answer_streak + 1 if voiced else 0
             if self.answer_streak >= START_FRAMES:
                 self.answer_streak = 0
-                agent_id = eng.answer_pending()
+                agent_id = eng.answer_pending(self.source)
                 s = eng.open_session(self.source, agent_id, "answer")
                 s.frames = list(self.ring)[-PREROLL_FRAMES:]
                 s.got_speech, s.last_voice = True, now

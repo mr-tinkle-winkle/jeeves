@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -53,7 +54,8 @@ def style(frequency: float) -> str:
 class JumpIn:
     def __init__(self, engine: Any) -> None:
         self.engine = engine
-        self.lines: deque[tuple[float, str, str]] = deque()     # (time, who, text)
+        # (time, who, text, source): source = where it was heard, or "agent:<id>" for an agent's own line
+        self.lines: deque[tuple[float, str, str, str]] = deque()
         self.last_spoke: dict[str, float] = {}
         self.last_said: dict[str, str] = {}
         self.busy: set[str] = set()
@@ -87,7 +89,7 @@ class JumpIn:
             # the agent's own voice coming back through the mic is not new conversation
             if any(similarity(text, said) > 0.8 for said in self.last_said.values()):
                 return
-            self.lines.append((now, self._who(source), text.strip()))
+            self.lines.append((now, self._who(source), text.strip(), source))
             while self.lines and self.lines[0][0] < now - WINDOW_SECONDS:
                 self.lines.popleft()
 
@@ -96,11 +98,47 @@ class JumpIn:
         with self._lock:
             self.last_spoke[agent_id] = time.time()
             self.last_said[agent_id] = text
-            self.lines.append((time.time(), agent.get("name", agent_id), text.strip()))
+            self.lines.append((time.time(), agent.get("name", agent_id), text.strip(), f"agent:{agent_id}"))
 
-    def transcript(self) -> str:
+    def can_hear(self, agent_id: str, agent: dict[str, Any], source: str) -> bool:
+        """Only what this agent could actually hear: its own sources, its own lines, and other
+        agents' lines when it listens to the speakers (desktop audio)."""
+        if source.startswith("agent:"):
+            return source == f"agent:{agent_id}" or agent.get("listen_to") in ("desktop", "both")
+        return self.engine._listens(agent, source)
+
+    def transcript(self, agent_id: str | None = None, agent: dict[str, Any] | None = None) -> str:
         with self._lock:
-            return "\n".join(f"{who}: {text}" for _t, who, text in self.lines)
+            lines = list(self.lines)
+        if agent_id is not None and agent is not None:
+            lines = [ln for ln in lines if self.can_hear(agent_id, agent, ln[3])]
+        name = (agent or {}).get("name")
+        return "\n".join(f"{who}{' (you)' if who == name else ''}: {text}" for _t, who, text, _s in lines)
+
+    def speaker_names(self) -> set[str]:
+        names = {"user", "others", "you", "me", "assistant"}
+        for aid, a in self.engine.agents().items():
+            names.update(n.lower() for n in [aid, a.get("name", "")] + list(a.get("call_names", [])) if n)
+        return names
+
+    def clean(self, reply: str, agent: dict[str, Any]) -> str:
+        """The model's reply as something to say out loud, or "" for nothing. Small models often
+        answer with a speaker label ("Jeeves: sure") or just a name -- never say those."""
+        r = (reply or "").strip()
+        r = re.sub(r"^\s*[\"'*(\[]+|[\"'*)\]]+\s*$", "", r).strip()
+        names = self.speaker_names()
+        for _ in range(2):                                   # "Jeeves (you): ..." / "Jeeves: User: ..."
+            m = re.match(r"^\s*([\w .'-]{1,40}?)\s*(\(you\))?\s*:\s*", r)
+            if m and (m.group(1).lower() in names or len(m.group(1).split()) <= 2):
+                r = r[m.end():].strip()
+        if not r or re.search(r"\bpass\b", r, re.I) and len(r.split()) <= 4:
+            return ""
+        bare = re.sub(r"[^\w ]", "", r).strip().lower()
+        if not bare or bare in names or all(w in names for w in bare.split()):
+            return ""                                        # just a name (or names)
+        if len(bare.split()) < 2 and len(bare) < 4:
+            return ""
+        return r
 
     # ---- deciding -----------------------------------------------------------
     def consider(self, source: str) -> None:
@@ -123,18 +161,19 @@ class JumpIn:
     def _decide(self, aid: str, agent: dict[str, Any], freq: float) -> None:
         from ..models.manager import ModelUnavailable
         try:
-            convo = self.transcript()
-            if not convo:
-                return
+            convo = self.transcript(aid, agent)
+            if not convo or convo.splitlines()[-1].startswith(f"{agent.get('name', aid)} (you):"):
+                return                                       # nothing new, or its own line is the latest
             prompt = (f"You are listening to a conversation (most recent line last):\n{convo}\n\n"
                       f"Would you, {agent.get('name', aid)}, say something right now? If yes, reply with exactly "
-                      "what you'd say out loud (one or two short sentences). If not, reply with just PASS.")
+                      "the words you'd say out loud (one or two short sentences) -- no name, label or quotes in "
+                      "front. If not, reply with just PASS.")
             try:
                 reply = self.engine.models.respond(agent, prompt, system=style(freq))
             except ModelUnavailable:
                 return
-            reply = (reply or "").strip().strip('"')
-            if not reply or reply.upper().startswith("PASS") or len(reply) < 2:
+            reply = self.clean(reply or "", agent)
+            if not reply:
                 return
             self._speak(aid, agent, reply, convo)
         except Exception:

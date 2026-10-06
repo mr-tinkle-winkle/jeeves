@@ -73,10 +73,15 @@ class History:
         items = [e for e in reversed(self.entries) if not e.get("dry_run") and (agent is None or e["agent"] == agent)]
         return items[offset: offset + limit]
 
-    def recent(self, n: int, agent: str | None = None, exclude: str | None = None) -> list[dict[str, Any]]:
+    def recent(self, n: int, agent: str | None = None, exclude: str | None = None, viewer: str | None = None,
+               can_hear: Any = None) -> list[dict[str, Any]]:
+        """Newest last. viewer + can_hear(source): skip other agents' requests from sources the
+        viewer can't hear."""
         out = []
         for e in reversed(self.entries):
             if e.get("dry_run") or e["id"] == exclude or (agent and e["agent"] != agent):
+                continue
+            if can_hear is not None and e["agent"] != viewer and not can_hear(e.get("source") or "text"):
                 continue
             out.append({"text": e["text"], "agent": e["agent"], "function": e["function"], "args": e["args"],
                         "result": e["response"], "time": e["time"]})

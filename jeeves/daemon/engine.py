@@ -81,6 +81,7 @@ class Engine:
         self.intent.extra_examples = self.training.intent_examples
         self.control = Control(self.settings)
         self.on_exit: Callable[[], None] | None = None     # set by the server: stop the daemon
+        self.interrupted: dict[str, list[str]] = {}       # agent -> requests paused by calling its name
         self.puppetry = Puppetry(self.settings)
         self.online = Online(self.settings)
         self.wikipedia = Wikipedia(self.settings, self.publish)
@@ -220,7 +221,7 @@ class Engine:
         if source == "microphone":
             # only while something needs it: always-on wake words, the summary log, keyword
             # triggers, or a voice request / question that is listening right now
-            if self.sessions.get("microphone") is not None or self.waiters:
+            if self.sessions.get("microphone") is not None or self.answer_pending("microphone"):
                 return True
             if self.summary.enabled() and "microphone" in (self.settings.get("summary.sources") or []):
                 return True
@@ -335,8 +336,29 @@ class Engine:
                 names += [n.lower() for n in a.get("call_names", []) if n.strip()]
         return sorted(set(names))
 
-    def agent_by_name(self, name: str) -> str | None:
+    def recent_for(self, agent_id: str | None, agent: dict[str, Any], n: int, own_only: bool = False,
+                   exclude: str | None = None, only_agent: str | None = None) -> list[dict[str, Any]]:
+        """Recent requests an agent may know about: its own, typed ones, and ones spoken on a
+        source it listens to -- never what you said into the mic for a mic-less agent."""
+        if n <= 0:
+            return []
+
+        def can_hear(source: str) -> bool:
+            return not source.startswith("voice:") or self._listens(agent, source.split(":", 1)[1])
+        return self.history.recent(n, agent=agent_id if own_only else only_agent, exclude=exclude,
+                                   viewer=agent_id, can_hear=can_hear)
+
+    def agent_by_name(self, name: str, source: str | None = None) -> str | None:
+        """The agent called this; with a source, only agents that listen to it."""
         n = normalize(name)
+        if source is not None:
+            hearing = {aid: a for aid, a in self.active_agents().items() if self._listens(a, source)}
+            for aid, a in hearing.items():
+                if n == normalize(a.get("name", "")) or any(n == normalize(c) for c in a.get("call_names", [])):
+                    return aid
+            best = max(((similarity(n, c), aid) for aid, a in hearing.items()
+                        for c in a.get("call_names", []) + [a.get("name", "")]), default=(0.0, None))
+            return best[1] if best[0] >= 0.75 else None
         for aid, a in self.agents().items():
             if n == normalize(aid) or n == normalize(a.get("name", "")) or \
                     any(n == normalize(c) for c in a.get("call_names", [])):
@@ -421,6 +443,8 @@ class Engine:
         self.run_async(self.apply_settings)      # the mic may not be needed any more
         if not s.got_speech:
             self.set_indicator(s.request_id, s.agent_id, "idle")
+            if s.interrupting:                   # called by name, then nothing said: carry on
+                self._resume(s.interrupting)
             return
         self.run_async(self._finish_session, s)
 
@@ -445,6 +469,10 @@ class Engine:
             self.set_indicator(s.request_id, s.agent_id, "idle")
             self._deliver_answer(s.agent_id, text)
             return
+        if s.interrupting:
+            if self._after_interruption(s.interrupting, text):
+                self.set_indicator(s.request_id, s.agent_id, "idle")
+                return
         if not text.strip():
             self.set_indicator(s.request_id, s.agent_id, "idle")
             return
@@ -458,16 +486,20 @@ class Engine:
     def on_wake(self, source: str, name: str, conf: float, after: list[bytes]) -> None:
         if self.sessions.get(source) is not None or not self.is_on():
             return
-        aid = self.agent_by_name(name)
+        aid = self.agent_by_name(name, source)
         if aid is None:
             return
         agent = self.agents()[aid]
         if conf < self.threshold(agent):
             log.debug("wake '%s' below threshold (%.2f)", name, conf)
             return
+        if self._hears_itself(aid, name):
+            return
+        paused = self._interrupt(aid)
         if "stt" in self.models.suspended:
             self.flash_unavailable(aid, f"speech recognition is unloaded while {self.models.suspended['stt']} is open")
         s = self.open_session(source, aid, "extended" if aid in self.extended else "request")
+        s.interrupting = paused
         if after:
             s.frames = list(after)
             s.got_speech = True
@@ -485,7 +517,7 @@ class Engine:
         self.summary.add(source, text)
         self.triggers.on_transcript(text, source)
         self.jump_in.heard(source, text)
-        if self.sessions.get(source) is not None or self.answer_pending():
+        if self.sessions.get(source) is not None or self.answer_pending(source):
             return
         wake_by_text = (self.summary.enabled() or self.settings.get("wake_word.engine") == "stt-match"
                         or self.models.wake_spotter() is None) and self.settings.get("wake_word.enabled", True) \
@@ -496,10 +528,79 @@ class Engine:
             return
         if not wake_by_text:                   # the wake word model handles addressed requests
             return
+        if self._hears_itself(aid, text):
+            return
+        paused = self._interrupt(aid)
         if rest:
+            if paused and self._after_interruption(paused, rest):
+                return
             self.handle_text(rest, aid, source=f"voice:{source}")
         else:
-            self.open_session(source, aid, "request")
+            self.open_session(source, aid, "request").interrupting = paused
+
+    # ------------------------------------------------------------------ calling a busy agent
+    def _busy_requests(self, agent_id: str) -> list[str]:
+        with self._lock:
+            return [rid for rid, c in self.active.items()
+                    if c.agent_id == agent_id and not c.dry_run and not c.suspend_event.is_set()]
+
+    def _hears_itself(self, agent_id: str, heard: str) -> bool:
+        """The mic picking up the agent saying its own name isn't the user calling it."""
+        h = normalize(heard)
+        with self._lock:
+            ctxs = [c for c in self.active.values() if c.agent_id == agent_id]
+        return any(h and h.split()[0] in normalize(getattr(c, "saying", "") or "") for c in ctxs)
+
+    def _interrupt(self, agent_id: str) -> list[str]:
+        """Called by name while busy: pause what it's doing (speech stops mid-sentence) and listen.
+        Returns everything now paused for it, including work still paused from an earlier call."""
+        paused = []
+        for rid in self._busy_requests(agent_id):
+            try:
+                if self.suspend(rid):
+                    paused.append(rid)
+            except KeyError:
+                pass
+        if paused:
+            log.info("%s was called while busy: paused %s", agent_id, paused)
+        with self._lock:
+            held = self.interrupted.setdefault(agent_id, [])
+            held[:] = [r for r in held if r in self.active] + [r for r in paused if r not in held]
+            return list(held)
+
+    def _resume(self, request_ids: list[str]) -> None:
+        for rid in request_ids:
+            ctx = self.active.get(rid)
+            if ctx is not None and ctx.suspend_event.is_set():
+                try:
+                    self.suspend(rid)
+                except KeyError:
+                    pass
+        with self._lock:
+            for held in self.interrupted.values():
+                held[:] = [r for r in held if r not in request_ids]
+
+    def _after_interruption(self, paused: list[str], text: str) -> bool:
+        """What was said after calling a busy agent: "carry on" (or nothing) resumes, "wait" keeps it
+        paused, "stop" drops the paused work -- returns True when that was all. Anything else is a
+        new request that replaces what it was doing (returns False so it gets handled)."""
+        t = re.sub(r"^(?:no|ok|okay|oh|um|uh|sorry)[,.\s]+", "", text.strip().lower()).strip(" .,!?")
+        if not t or re.match(r"^(continue|go on|go ahead|carry on|keep going|resume|proceed|never ?mind|nothing|"
+                             r"as you were|sorry|that's all|it's fine|you can continue|unpause)\b", t):
+            self._resume(paused)
+            return True
+        if re.match(r"^(wait|hold on|hang on|one (sec|second|moment)|just a (sec|second|moment)|pause)\b", t):
+            return True                                    # stays paused until called again
+        for rid in paused:
+            try:
+                self.close_request(rid)
+            except KeyError:
+                pass
+        with self._lock:
+            for held in self.interrupted.values():
+                held[:] = [r for r in held if r not in paused]
+        return bool(re.match(r"^(stop|cancel|shut up|be quiet|quiet|enough|that's enough|abort|forget it|"
+                             r"stop talking|hush|silence)\b", t))
 
     def mic(self, action: str) -> None:
         """Onscreen microphone: click = +5 s, hold = keep listening until release (+1 s)."""
@@ -597,11 +698,15 @@ class Engine:
         return True
 
     # ------------------------------------------------------------------ waiting for the user
-    def answer_pending(self) -> str | None:
+    def answer_pending(self, source: str | None = None) -> str | None:
+        """The agent waiting for a spoken answer; with a source, only one that listens to it
+        (a desktop-only agent's question doesn't open your microphone)."""
         with self._lock:
             for w in self.waiters.values():
                 if w.kind in ("answer", "confirm", "click"):
-                    return w.ctx.agent_id
+                    if source is None or self._listens(w.ctx.agent, source) or \
+                            w.ctx.entry.get("source") == f"voice:{source}":    # asked where the request came from
+                        return w.ctx.agent_id
         return None
 
     def wait_for_answer(self, ctx: FunctionContext, question: str, choices: list[str] | None,
@@ -742,7 +847,8 @@ class Engine:
         if not dry_run and self._refuse_if_off():
             return {"error": "Jeeves is turned off"}
         if agent_id is None:
-            agent_id, rest, _ = self.split_agent(text)
+            heard_on = source.split(":", 1)[1] if source.startswith("voice:") else None
+            agent_id, rest, _ = self.split_agent(text, heard_on)
             if agent_id is None:
                 if dry_run:
                     raise ValueError("start with an agent's name, e.g. 'Jeeves, set a timer for 5 minutes'")
@@ -899,6 +1005,9 @@ class Engine:
     # ------------------------------------------------------------------ speech output
     def speak(self, ctx: FunctionContext, text: str) -> None:
         agent = ctx.agent
+        labels = [n for n in [agent.get("name", ""), ctx.agent_id or "", "assistant"] if n]
+        text = re.sub(r"^\s*(?:%s)\s*(?:\(you\))?\s*:\s*" % "|".join(re.escape(n) for n in labels), "", text,
+                      flags=re.I) or text                # "Jeeves: Certainly" -> "Certainly"
         self.jump_in.spoke(ctx.agent_id, text)       # part of the conversation even if TTS fails
         try:
             pcm, rate = self._synth(agent, text)
@@ -912,12 +1021,14 @@ class Engine:
                                  self.settings.get("audio.microphone", ""))
         pb = Playback(pcm, rate, targets)
         ctx.playback = pb
+        ctx.saying = text
         with self._lock:
             self.speaking += 1          # desktop listening ignores Jeeves' own voice meanwhile
         try:
             pb.play()
         finally:
             ctx.playback = None
+            ctx.saying = ""
             with self._lock:
                 self.speaking -= 1
                 self.speaking_until = time.time() + 0.5
@@ -966,15 +1077,52 @@ class Engine:
                 if ok else "Jeeves played the sentence but nothing came out of Jeeves-Microphone."}
 
     def _synth(self, agent: dict[str, Any], text: str) -> tuple[bytes, int]:
-        """The agent's TTS; if that fails, eSpeak NG so there's always a voice."""
+        """The agent's TTS in its voice style; if that fails, eSpeak NG so there's always a voice."""
+        from ..models import voicefx
+        style = voicefx.style_of(agent)
         try:
             tts, voice = self.models.tts(agent)
-            return tts.synth(text, voice)
+            pcm, rate = tts.synth(text, voice, style)
+            pitch_done = voice is not None and voice.engine == "espeak-ng"
         except Exception as exc:
             from ..models.backends import EspeakTTS
             log.warning("TTS failed (%s); falling back to eSpeak NG", exc)
             self._tts_problem(f"Text to speech: {exc} -- using eSpeak NG instead")
-            return EspeakTTS().synth(text, None)
+            pcm, rate = EspeakTTS().synth(text, None, style)
+            pitch_done = True
+        return voicefx.apply(pcm, rate, style, pitch_done=pitch_done), rate
+
+    def preview_voice(self, agent: dict[str, Any], text: str = "") -> dict[str, Any]:
+        """Agents page > Preview: say a sample in this (possibly unsaved) agent's voice, on the speakers."""
+        name = agent.get("name") or "your assistant"
+        pcm, rate = self._synth(agent, text or f"Hello, I'm {name}. This is how I sound.")
+        pb = Playback(pcm, rate, [self.settings.get("audio.speaker", "")])
+        with self._lock:
+            self.speaking += 1
+        try:
+            pb.play()
+        finally:
+            with self._lock:
+                self.speaking -= 1
+                self.speaking_until = time.time() + 0.5
+        return {"ok": pb.error is None, "error": pb.error, "seconds": round(len(pcm) / 2 / rate, 1)}
+
+    def voice_speakers(self, voice_id: str) -> dict[str, Any]:
+        """Speakers of a multi-speaker voice, with accent/character labels where known."""
+        from ..models import catalog
+        from ..models.backends import speaker_map
+        from ..models.download import is_installed
+        v = catalog.get(voice_id)
+        if v is None or v.engine != "piper":
+            return {"speakers": [], "count": 0, "installed": False}
+        base = catalog.get(v.shares) if v.shares else v
+        family = (base.voice or "").split("-")[1] if base and base.voice and "-" in base.voice else ""
+        labels = catalog.SPEAKER_LABELS.get(family, {})
+        m = speaker_map(base) if is_installed(base) else {}
+        names = sorted(m, key=lambda k: m[k]) if m else list(labels)
+        return {"installed": is_installed(base), "count": max(base.speakers, len(m)),
+                "speakers": [{"name": n, "id": m.get(n), "label": labels.get(n, labels.get(n.lower(), ""))}
+                             for n in names]}
 
     def _tts_problem(self, text: str) -> None:
         # once per distinct problem, so a broken voice doesn't spam a notice per sentence
@@ -1086,8 +1234,7 @@ class Engine:
         funcs = self.registry.enabled_for(receiver)
         listing = "\n".join(f"- {f.name}: {f.description}" for f in funcs)
         am = agent_memory(ctx.agent, self.settings)
-        recent = self.history.recent(am["recent"], agent=ctx.agent_id if am["own_only"] else None,
-                                     exclude=ctx.entry["id"]) if am["recent"] else []
+        recent = self.recent_for(ctx.agent_id, ctx.agent, am["recent"], am["own_only"], ctx.entry["id"])
         convo = "\n".join(f"User: {r['text']}\n{self.agents().get(r['agent'] or '', {}).get('name', 'Agent')}: "
                           f"{r['result']}" for r in recent)
         composed = None

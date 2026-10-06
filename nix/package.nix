@@ -21,6 +21,7 @@
 , pulseaudio
 , grim
 , kdotool
+, sox
 , kdePackages ? null
 , callPackage
 , extraRuntimePackages ? [ ]
@@ -72,7 +73,7 @@ py.buildPythonApplication {
   ] ++ [
     "--prefix" "PATH" ":" (lib.makeBinPath ([
       whisper llama piper-tts espeak-ng tesseract wl-clipboard xclip libnotify
-      pipewire pulseaudio grim kdotool
+      pipewire pulseaudio grim kdotool sox
     ] ++ lib.optional (kdePackages != null && kdePackages ? spectacle) kdePackages.spectacle
       ++ lib.optional (kdePackages != null && kdePackages ? libkscreen) kdePackages.libkscreen
       ++ extraRuntimePackages))

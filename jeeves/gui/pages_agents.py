@@ -146,12 +146,62 @@ class AgentsPage(Page):
             w.setPlaceholderText("obs, steam")
             g.addWidget(row(label(lab, False), w, stretch_last=True))
 
+        # --- voice
+        g = self._group(f, "Voice")
+        self.model_boxes: dict[str, Any] = {}
+        self.voice_filter = CustomLineEdit()
+        self.voice_filter.setPlaceholderText("Search voices: scottish, female, deep, kokoro, accent…")
+        self.voice_filter.textChanged.connect(lambda _t: self._fill_voices())
+        g.addWidget(row(label("Find", False), self.voice_filter, stretch_last=True))
+        self.voice_box = combo()
+        self.model_boxes["tts_voice"] = self.voice_box
+        self.voice_box.currentIndexChanged.connect(lambda _i: self._voice_changed())
+        g.addWidget(row(label("Voice", False), self.voice_box, stretch_last=True))
+        self.voice_info = label("")
+        g.addWidget(self.voice_info)
+        self.speaker_box = combo()
+        self.speaker_row = row(label("Speaker", False), self.speaker_box, stretch_last=True)
+        g.addWidget(self.speaker_row)
+
+        def dspin(lo: float, hi: float, step: float, dec: int = 2, suffix: str = "") -> CustomDoubleSpinBox:
+            sp = CustomDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setSingleStep(step)
+            sp.setDecimals(dec)
+            if suffix:
+                sp.setSuffix(suffix)
+            sp.wheelEvent = lambda e: e.ignore()
+            return sp
+        self.v_speed = dspin(0.5, 2.0, 0.05, suffix="×")
+        self.v_pitch = dspin(-12, 12, 0.5, 1, " semitones")
+        self.v_expr = dspin(0.0, 1.2, 0.05)
+        g.addWidget(row(label("Speed", False), self.v_speed))
+        g.addWidget(row(label("Pitch", False), self.v_pitch))
+        self.expr_row = row(label("Expressiveness (Piper)", False), self.v_expr)
+        g.addWidget(self.expr_row)
+        self.v_effect = combo()
+        for key, (title, _chain) in __import__("jeeves.models.voicefx", fromlist=["EFFECTS"]).EFFECTS.items():
+            self.v_effect.addItem(title, key)
+        g.addWidget(row(label("Effect", False), self.v_effect))
+        self.v_blend = combo()
+        self.v_blend_amount = dspin(0.0, 1.0, 0.05)
+        self.blend_row = row(label("Mix in (Kokoro)", False), self.v_blend, label("amount", False),
+                             self.v_blend_amount)
+        g.addWidget(self.blend_row)
+        self.preview_btn = CustomButton("Preview voice")
+        self.preview_btn.clicked.connect(self.preview)
+        self.download_voice_btn = CustomButton("Download this voice")
+        self.download_voice_btn.clicked.connect(self._download_voice)
+        g.addWidget(row(self.preview_btn, self.download_voice_btn))
+        self.voice_status = label("Pitch and effects need SoX (included in the Nix package). Mixing two Kokoro "
+                                  "voices makes a new one; multi-speaker Piper voices have dozens to hundreds of "
+                                  "speakers to pick from.")
+        g.addWidget(self.voice_status)
+
         # --- models
         g = self._group(f, "Model overrides (empty = global choice)")
-        self.model_boxes: dict[str, Any] = {}
         for kind, title in (("stt", "Speech to text"), ("intent", "Intention processing"),
-                            ("tts", "Text to speech"), ("tts_voice", "Voice"),
-                            ("local_response", "Local response")):
+                            ("tts", "Text to speech"), ("local_response", "Local response")):
             c = combo()
             self.model_boxes[kind] = c
             g.addWidget(row(label(title, False), c, stretch_last=True))
@@ -215,12 +265,100 @@ class AgentsPage(Page):
         self.catalog = (st or {}).get("catalog", [])
         kinds = {"stt": "stt", "intent": "llm", "tts": "tts", "tts_voice": "voice", "local_response": "llm"}
         for kind, cbox in self.model_boxes.items():
+            if kind == "tts_voice":
+                continue
             cbox.clear()
             cbox.addItem("(global choice)", None)
             for m in self.catalog:
                 if m["kind"] == kinds[kind]:
                     cbox.addItem(f"{m['name']}{'' if m['installed'] else '  (not downloaded)'}", m["id"])
+        self.v_blend.clear()
+        self.v_blend.addItem("(none)", "")
+        for m in self.catalog:
+            if m["kind"] == "voice" and m["engine"] == "kokoro":
+                self.v_blend.addItem(m["name"], m["id"])
+        self._fill_voices()
         self.select(self.current)
+
+    # ---- voice ----------------------------------------------------------------
+    ENGINE_NAMES = {"piper": "Piper", "kokoro": "Kokoro", "espeak-ng": "eSpeak"}
+
+    def _fill_voices(self, want: Any = "keep") -> None:
+        box = self.voice_box
+        cur = box.currentData() if want == "keep" else want
+        words = [w for w in self.voice_filter.text().lower().split() if w]
+        box.blockSignals(True)
+        box.clear()
+        box.addItem("(global choice)", None)
+        for m in self.catalog:
+            if m["kind"] != "voice":
+                continue
+            text = f"{self.ENGINE_NAMES.get(m['engine'], m['engine'])} · {m['name']}"
+            hay = (text + " " + m.get("description", "")).lower()
+            if words and not all(w in hay for w in words) and m["id"] != cur:
+                continue
+            box.addItem(text + ("" if m["installed"] else "  (not downloaded)"), m["id"])
+        box.setCurrentIndex(max(0, box.findData(cur)))
+        box.blockSignals(False)
+        self._voice_changed(load_speakers=True)
+
+    def _voice_entry(self) -> dict[str, Any] | None:
+        vid = self.voice_box.currentData()
+        return next((m for m in self.catalog if m["id"] == vid), None)
+
+    def _voice_changed(self, load_speakers: bool = True) -> None:
+        m = self._voice_entry()
+        engine = m["engine"] if m else ""
+        multi = bool(m and engine == "piper" and m.get("speakers", 1) > 1)
+        self.speaker_row.setVisible(multi)
+        self.expr_row.setVisible(engine in ("piper", ""))
+        self.blend_row.setVisible(engine in ("kokoro", ""))
+        self.download_voice_btn.setVisible(bool(m and not m["installed"]))
+        if m:
+            extra = f" {m['speakers']} speakers." if multi and str(m["speakers"]) not in m.get("description", "") else ""
+            self.voice_info.setText(f"{m.get('description', '')}{extra}" +
+                                    ("" if m["installed"] else " Not downloaded yet."))
+        else:
+            self.voice_info.setText("Uses the voice chosen on the Models page.")
+        if multi and load_speakers:
+            self.daemon.call("voice.speakers", self._got_speakers, lambda _e: None, voice=m["id"])
+
+    def _got_speakers(self, res: Any) -> None:
+        want = getattr(self, "_want_speaker", "")
+        self.speaker_box.clear()
+        self.speaker_box.addItem("(default)", "")
+        for sp in (res or {}).get("speakers", []):
+            self.speaker_box.addItem(sp["name"] + (f" — {sp['label']}" if sp.get("label") else ""), sp["name"])
+        if not (res or {}).get("installed"):
+            self.speaker_box.addItem("(download the voice to list every speaker)", "")
+        if want and self.speaker_box.findData(want) < 0:
+            self.speaker_box.addItem(want, want)
+        self.speaker_box.setCurrentIndex(max(0, self.speaker_box.findData(want)))
+
+    def _style(self) -> dict[str, Any]:
+        return {"speaker": self.speaker_box.currentData() or "" if self.speaker_row.isVisible() else "",
+                "speed": round(self.v_speed.value(), 2), "pitch": round(self.v_pitch.value(), 1),
+                "expressiveness": round(self.v_expr.value(), 2), "effect": self.v_effect.currentData() or "none",
+                "blend": self.v_blend.currentData() or "", "blend_amount": round(self.v_blend_amount.value(), 2)}
+
+    def preview(self) -> None:
+        a = self._collect()
+        self.preview_btn.setEnabled(False)
+        self.voice_status.setText("Speaking…")
+
+        def done(res: Any) -> None:
+            self.preview_btn.setEnabled(True)
+            if isinstance(res, dict):
+                self.voice_status.setText("Played." if res.get("ok") else f"Couldn't play it: {res.get('error')}")
+            else:
+                self.voice_status.setText(str(res))
+        self.daemon.call("voice.preview", done, done, agent=a)
+
+    def _download_voice(self) -> None:
+        m = self._voice_entry()
+        if m:
+            self.daemon.call("models.download", None, None, id=m["id"])
+            self.voice_status.setText(f"Downloading {m['name']}… (progress on the Models page)")
 
     def select(self, aid: str | None) -> None:
         self.current = aid
@@ -258,7 +396,17 @@ class AgentsPage(Page):
         self.disable_open.setText(", ".join(a.get("disable_when_open", [])))
         self.disable_focus.setText(", ".join(a.get("disable_when_focused", [])))
         for kind, cbox in self.model_boxes.items():
-            cbox.setCurrentIndex(max(0, cbox.findData((a.get("models") or {}).get(kind))))
+            if kind != "tts_voice":
+                cbox.setCurrentIndex(max(0, cbox.findData((a.get("models") or {}).get(kind))))
+        vs = dict(a.get("voice_style") or {})
+        self._want_speaker = str(vs.get("speaker") or "")
+        self.v_speed.setValue(float(vs.get("speed", 1.0)))
+        self.v_pitch.setValue(float(vs.get("pitch", 0.0)))
+        self.v_expr.setValue(float(vs.get("expressiveness", 0.667)))
+        self.v_effect.setCurrentIndex(max(0, self.v_effect.findData(vs.get("effect", "none"))))
+        self.v_blend.setCurrentIndex(max(0, self.v_blend.findData(vs.get("blend", ""))))
+        self.v_blend_amount.setValue(float(vs.get("blend_amount", 0.3)))
+        self._fill_voices(want=(a.get("models") or {}).get("tts_voice"))
         per = a.get("functions") or {}
         for f in self.functions:
             cb = self.func_checks.get(f["name"])
@@ -324,6 +472,7 @@ class AgentsPage(Page):
             "enable_when_open": split(self.enable_open), "enable_when_focused": split(self.enable_focus),
             "disable_when_open": split(self.disable_open), "disable_when_focused": split(self.disable_focus),
             "models": {k: c.currentData() for k, c in self.model_boxes.items()},
+            "voice_style": self._style(),
             "functions": {name: cb.isChecked() for name, cb in self.func_checks.items()},
             "handoff_to": ["*"] if self.any_handoff.isChecked() else
             [k for k, cb in self.handoff_checks.items() if cb.isChecked()],

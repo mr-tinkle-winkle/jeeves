@@ -33,6 +33,7 @@ class FunctionContext:
         self.thoughts: list[str] = []
         self.looking_at: str = ""
         self.playback = None
+        self.saying = ""                                # the sentence being spoken right now
         self.stage = "thinking"
 
     # ---- cancellation ------------------------------------------------------

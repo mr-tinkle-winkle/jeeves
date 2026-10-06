@@ -14,6 +14,7 @@ import subprocess
 from typing import Any, Callable
 
 from .. import config, paths
+from ..models import voicefx
 from ..ipc import encode
 from ..util import which
 from . import desktop as dk
@@ -204,6 +205,10 @@ class Server:
             "desktop.apps": lambda: {"open": dk.open_apps(), "processes": dk.processes()[:400]},
             "audio.devices": audio_devices,
             "audio.test_virtual_mic": e.test_virtual_mic,
+            "voice.preview": lambda agent, text="": e.preview_voice(agent, text),
+            "voice.speakers": lambda voice: e.voice_speakers(voice),
+            "voice.effects": lambda: {"effects": [[k, v[0]] for k, v in voicefx.EFFECTS.items()],
+                                      "sox": voicefx.available()},
             "summary.text": lambda minutes=None: e.summary.text(minutes),
             "summary.clear": e.summary.clear,
             "doctor": lambda move_test=True: doctor.run(e.control, bool(move_test), s, e.registry),

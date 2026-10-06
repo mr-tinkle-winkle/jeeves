@@ -397,23 +397,54 @@ class TTS:
     def load(self) -> None: ...
     def unload(self) -> None: ...
     def loaded(self) -> bool: return True
-    def synth(self, text: str, voice: ModelEntry | None) -> tuple[bytes, int]: raise NotImplementedError
+    def synth(self, text: str, voice: ModelEntry | None,
+              style: dict[str, Any] | None = None) -> tuple[bytes, int]: raise NotImplementedError
+
+
+def speaker_map(voice: ModelEntry) -> dict[str, int]:
+    """A downloaded Piper voice's speakers: name -> id (empty for single-speaker voices)."""
+    try:
+        cfg = json.loads((model_dir(voice) / "voice.onnx.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return {str(k): int(v) for k, v in (cfg.get("speaker_id_map") or {}).items()}
+
+
+def speaker_id(voice: ModelEntry, wanted: str | int | None) -> int | None:
+    """The id for a speaker name/number; None = the model's default."""
+    want = str(wanted if wanted not in (None, "") else (voice.speaker or "")).strip()
+    if not want:
+        return None
+    m = speaker_map(voice)
+    if want in m:
+        return m[want]
+    low = {k.lower(): v for k, v in m.items()}
+    if want.lower() in low:
+        return low[want.lower()]
+    if want.isdigit() and (not m or int(want) in m.values() or int(want) < max(voice.speakers, 1)):
+        return int(want)
+    return None
 
 
 class EspeakTTS(TTS):
-    def synth(self, text: str, voice: ModelEntry | None) -> tuple[bytes, int]:
+    def synth(self, text: str, voice: ModelEntry | None,
+              style: dict[str, Any] | None = None) -> tuple[bytes, int]:
         exe = _find("espeak-ng", "espeak")
         if not exe:
             raise BackendError("espeak-ng isn't installed")
+        st = style or {}
         v = voice.voice if voice and voice.engine == "espeak-ng" else "en-us"
-        out = subprocess.run([exe, "-v", v or "en-us", "--stdout", text], capture_output=True, timeout=60)
+        cmd = [exe, "-v", v or "en-us", "-s", str(int(175 * float(st.get("speed", 1.0)))),
+               "-p", str(int(max(0, min(99, 50 + float(st.get("pitch", 0)) * 4)))), "--stdout", text]
+        out = subprocess.run(cmd, capture_output=True, timeout=60)
         if out.returncode != 0:
             raise BackendError(out.stderr.decode(errors="replace")[:200])
         return wav_to_pcm(out.stdout)
 
 
 class PiperTTS(TTS):
-    def synth(self, text: str, voice: ModelEntry | None) -> tuple[bytes, int]:
+    def synth(self, text: str, voice: ModelEntry | None,
+              style: dict[str, Any] | None = None) -> tuple[bytes, int]:
         exe = _find("piper", "piper-tts")
         if not exe:
             raise BackendError("piper isn't installed")
@@ -424,8 +455,14 @@ class PiperTTS(TTS):
             rate = int(json.loads((d / "voice.onnx.json").read_text())["audio"]["sample_rate"])
         except (OSError, ValueError, KeyError):
             rate = 22050
-        out = subprocess.run([exe, "--model", str(d / "voice.onnx"), "--output_raw"], input=text.encode(),
-                             capture_output=True, timeout=120)
+        st = style or {}
+        cmd = [exe, "--model", str(d / "voice.onnx"), "--output_raw",
+               "--length_scale", f"{1.0 / max(0.5, float(st.get('speed', 1.0))):.3f}",
+               "--noise_scale", f"{float(st.get('expressiveness', 0.667)):.3f}"]
+        sid = speaker_id(voice, st.get("speaker"))
+        if sid is not None:
+            cmd += ["--speaker", str(sid)]
+        out = subprocess.run(cmd, input=text.encode(), capture_output=True, timeout=120)
         if out.returncode != 0:
             raise BackendError(out.stderr.decode(errors="replace")[-300:])
         return out.stdout, rate
@@ -451,15 +488,25 @@ class KokoroTTS(TTS):
     def loaded(self) -> bool:
         return self.k is not None
 
-    def synth(self, text: str, voice: ModelEntry | None) -> tuple[bytes, int]:
+    def synth(self, text: str, voice: ModelEntry | None,
+              style: dict[str, Any] | None = None) -> tuple[bytes, int]:
         with self._lock:
-            return self._synth(text, voice)
+            return self._synth(text, voice, style or {})
 
-    def _synth(self, text: str, voice: ModelEntry | None) -> tuple[bytes, int]:
+    def _synth(self, text: str, voice: ModelEntry | None, st: dict[str, Any]) -> tuple[bytes, int]:
         if self.k is None:
             self.load()
         v = voice.voice if voice and voice.engine == "kokoro" else "af_heart"
-        samples, rate = self.k.create(text, voice=v, speed=1.0, lang="en-us" if v.startswith("a") else "en-gb")
+        use: Any = v
+        blend = str(st.get("blend") or "").removeprefix("kokoro-")
+        amount = float(st.get("blend_amount", 0.3))
+        if blend and blend != v and 0 < amount:
+            try:                                  # mix two voices: a new voice of your own
+                use = self.k.get_voice_style(v) * (1 - amount) + self.k.get_voice_style(blend) * amount
+            except Exception:  # noqa: BLE001 -- unknown voice: just the main one
+                use = v
+        speed = max(0.5, min(2.0, float(st.get("speed", 1.0))))
+        samples, rate = self.k.create(text, voice=use, speed=speed, lang="en-gb" if v.startswith("b") else "en-us")
         import array
         pcm = array.array("h", (max(-32768, min(32767, int(s * 32767))) for s in samples)).tobytes()
         return pcm, int(rate)

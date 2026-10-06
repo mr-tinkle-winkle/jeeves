@@ -51,6 +51,9 @@ class ModelEntry:
     quality: int = 3              # 1 (basic) .. 5 (best): accuracy for STT, smarts for LLMs, naturalness for voices
     params_b: float = 0.0         # LLMs: billions of parameters
     active_b: float = 0.0         # LLMs: parameters used per word (mixture-of-experts are much lower)
+    speaker: str | None = None    # multi-speaker voices: which speaker (name in the model's speaker map)
+    shares: str | None = None     # downloads into this entry's folder (presets of one multi-speaker model)
+    speakers: int = 1             # how many speakers the model has (pick one per agent)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -72,18 +75,145 @@ def _hf(id_: str, repo: str, name: str, size: int, ram: int, desc: str, suffix: 
                       [ModelFile("", "model.gguf", hf_repo=repo, hf_suffix=suffix)])
 
 
-def _piper(lang: str, speaker: str, quality: str, name: str, desc: str) -> ModelEntry:
+def _piper(lang: str, speaker: str, quality: str, name: str, desc: str, speakers: int = 1) -> ModelEntry:
     region = lang
     family = lang.split("_")[0]
     base = f"{HF}/rhasspy/piper-voices/resolve/main/{family}/{region}/{speaker}/{quality}/{region}-{speaker}-{quality}"
-    size = {"low": 20, "medium": 63, "high": 114}[quality]
+    size = {"x_low": 20, "low": 63, "medium": 63 if speakers == 1 else 77, "high": 114}[quality]
     return ModelEntry(f"piper-{region}-{speaker}-{quality}", "voice", name, "piper", size, 150, desc,
                       [ModelFile(base + ".onnx", "voice.onnx"), ModelFile(base + ".onnx.json", "voice.onnx.json")],
-                      tts_model="piper", voice=f"{region}-{speaker}-{quality}")
+                      tts_model="piper", voice=f"{region}-{speaker}-{quality}", speakers=speakers)
+
+
+def _preset(base: ModelEntry, speaker: str, name: str, desc: str) -> ModelEntry:
+    """One speaker of a multi-speaker Piper model, as a voice of its own (shares the download)."""
+    return ModelEntry(f"{base.id}-{speaker.lower()}", "voice", name, "piper", base.size_mb, base.ram_mb, desc,
+                      list(base.files), tts_model="piper", voice=base.voice, speaker=speaker, shares=base.id)
 
 
 def _kokoro_voice(code: str, name: str, desc: str) -> ModelEntry:
     return ModelEntry(f"kokoro-{code}", "voice", name, "kokoro", 0, 0, desc, [], tts_model="kokoro", voice=code)
+
+
+# ---- Piper: every English voice ---------------------------------------------
+_P = {
+    "vctk": _piper("en_GB", "vctk", "medium", "VCTK: 109 British-Isles & world accents",
+                   "One model, 109 speakers: Scottish, Irish, Welsh, English regions, American, Canadian, "
+                   "Australian, South African, Indian... Pick the speaker per agent.", speakers=109),
+    "aru": _piper("en_GB", "aru", "medium", "ARU: 12 UK speakers", "Twelve speakers from around the UK.",
+                  speakers=12),
+    "semaine": _piper("en_GB", "semaine", "medium", "Semaine: 4 characters",
+                      "Four acted personalities: cheerful Poppy, gruff Spike, gloomy Obadiah, sensible Prudence.",
+                      speakers=4),
+    "arctic": _piper("en_US", "arctic", "medium", "CMU Arctic: 18 speakers",
+                     "Eighteen speakers incl. Scottish, Canadian and Indian English.", speakers=18),
+    "l2arctic": _piper("en_US", "l2arctic", "medium", "L2-Arctic: 24 accented speakers",
+                       "English spoken with Arabic, Mandarin, Hindi, Korean, Spanish and Vietnamese accents.",
+                       speakers=24),
+    "libritts_r": _piper("en_US", "libritts_r", "medium", "LibriTTS-R: 904 speakers",
+                         "Hundreds of audiobook readers -- every kind of voice. Pick a speaker number per agent.",
+                         speakers=904),
+    "libritts": _piper("en_US", "libritts", "high", "LibriTTS (high): 904 speakers",
+                       "The higher-quality original LibriTTS model with hundreds of readers.", speakers=904),
+}
+PIPER_VOICES = [
+    _piper("en_US", "lessac", "medium", "Lessac (US, female)", "Clear and neutral."),
+    _piper("en_US", "lessac", "high", "Lessac HQ (US, female)", "Clear and neutral, higher quality."),
+    _piper("en_US", "amy", "medium", "Amy (US, female)", "Bright."),
+    _piper("en_US", "ryan", "high", "Ryan (US, male)", "Warm, high quality."),
+    _piper("en_US", "ryan", "medium", "Ryan (US, male, lighter)", "Warm; smaller download."),
+    _piper("en_US", "joe", "medium", "Joe (US, male)", "Casual."),
+    _piper("en_US", "john", "medium", "John (US, male)", "Mature, steady narrator."),
+    _piper("en_US", "bryce", "medium", "Bryce (US, male)", "Young and upbeat."),
+    _piper("en_US", "danny", "low", "Danny (US, male)", "Youthful, quick."),
+    _piper("en_US", "norman", "medium", "Norman (US, male)", "Older, gravelly."),
+    _piper("en_US", "sam", "medium", "Sam (US, non-binary)", "Soft and friendly."),
+    _piper("en_US", "kusal", "medium", "Kusal (US, male)", "Light South Asian accent."),
+    _piper("en_US", "reza_ibrahim", "medium", "Reza (US, male)", "Light Middle Eastern accent."),
+    _piper("en_US", "hfc_female", "medium", "HFC Female (US)", "Smooth."),
+    _piper("en_US", "hfc_male", "medium", "HFC Male (US)", "Deep."),
+    _piper("en_US", "kristin", "medium", "Kristin (US, female)", "Warm audiobook reader."),
+    _piper("en_US", "kathleen", "low", "Kathleen (US, female)", "Gentle."),
+    _piper("en_US", "ljspeech", "high", "LJ (US, female)", "Classic clear narrator."),
+    _piper("en_GB", "alan", "medium", "Alan (UK, male)", "Very butler."),
+    _piper("en_GB", "alba", "medium", "Alba (Scottish, female)", "Scottish accent."),
+    _piper("en_GB", "cori", "high", "Cori (UK, female)", "Refined, high quality."),
+    _piper("en_GB", "northern_english_male", "medium", "Northern English (UK, male)", "Regional accent."),
+    _piper("en_GB", "southern_english_female", "low", "Southern English (UK, female)", "Home Counties."),
+    _piper("en_GB", "jenny_dioco", "medium", "Jenny (UK, female)", "Soft."),
+    *_P.values(),
+]
+
+# Speakers of the multi-speaker models worth naming (accent / character). Others are still
+# selectable by name or number on the Agents page.
+VCTK_ACCENTS = {
+    "p226": "English (Surrey), male", "p227": "English (Cumbria), male", "p233": "English (Staffordshire), female",
+    "p234": "Scottish (Dumfries), female", "p237": "Scottish (Fife), male", "p238": "Northern Irish (Belfast), female",
+    "p243": "English (London), male", "p245": "Irish (Dublin), male", "p247": "Scottish (Argyll), male",
+    "p248": "Indian, female", "p251": "Indian, male", "p253": "Welsh (Cardiff), female",
+    "p256": "English (Birmingham), male", "p260": "Scottish (Orkney), male", "p266": "Irish (Athlone), female",
+    "p267": "English (Yorkshire), female", "p269": "English (Newcastle), female", "p270": "English (Yorkshire), male",
+    "p283": "Irish (Cork), female", "p286": "English (Newcastle), male", "p294": "American (San Francisco), female",
+    "p298": "Irish (Tipperary), male", "p302": "Canadian (Montreal), male", "p308": "American (Alabama), female",
+    "p310": "American (Tennessee), female", "p311": "American (Iowa), male", "p314": "South African (Cape Town), female",
+    "p326": "Australian (Sydney), male", "p334": "American (Chicago), male", "p335": "New Zealand, female",
+    "p345": "American (Florida), male", "p347": "South African (Johannesburg), male", "p364": "Irish (Donegal), male",
+    "p374": "Australian, male", "p376": "Indian, male",
+}
+ARCTIC_SPEAKERS = {
+    "awb": "Scottish, male", "bdl": "American, male", "clb": "American, female", "jmk": "Canadian, male",
+    "ksp": "Indian, male", "rms": "American, male (deep)", "slt": "American, female",
+}
+SEMAINE_SPEAKERS = {
+    "poppy": "cheerful and bubbly", "spike": "gruff and argumentative", "obadiah": "gloomy and slow",
+    "prudence": "sensible and even-tempered",
+}
+SPEAKER_LABELS = {"vctk": VCTK_ACCENTS, "arctic": ARCTIC_SPEAKERS, "semaine": SEMAINE_SPEAKERS}
+
+PRESETS = (
+    [_preset(_P["semaine"], k, f"{k.title()} ({v.split(' and ')[0]}, UK)", f"Semaine character: {v}.")
+     for k, v in SEMAINE_SPEAKERS.items()]
+    + [_preset(_P["vctk"], k, f"VCTK {k}: {v}", f"{v} accent (VCTK speaker {k}).") for k, v in VCTK_ACCENTS.items()]
+    + [_preset(_P["arctic"], k, f"Arctic {k.upper()}: {v}", f"{v} (CMU Arctic speaker {k}).")
+       for k, v in ARCTIC_SPEAKERS.items()]
+)
+
+# ---- Kokoro: every voice in voices-v1.0 ------------------------------------
+KOKORO_VOICES = [
+    ("af_heart", "Heart (US, female)", "Kokoro's most natural voice."),
+    ("af_bella", "Bella (US, female)", "Expressive."), ("af_nicole", "Nicole (US, female)", "Breathy, intimate."),
+    ("af_sarah", "Sarah (US, female)", "Friendly."), ("af_sky", "Sky (US, female)", "Airy, young."),
+    ("af_nova", "Nova (US, female)", "Polished presenter."), ("af_alloy", "Alloy (US, female)", "Balanced."),
+    ("af_aoede", "Aoede (US, female)", "Lyrical."), ("af_jessica", "Jessica (US, female)", "Upbeat."),
+    ("af_kore", "Kore (US, female)", "Confident."), ("af_river", "River (US, female)", "Relaxed."),
+    ("am_michael", "Michael (US, male)", "Calm."), ("am_fenrir", "Fenrir (US, male)", "Deep."),
+    ("am_adam", "Adam (US, male)", "Plain and clear."), ("am_echo", "Echo (US, male)", "Resonant."),
+    ("am_eric", "Eric (US, male)", "Businesslike."), ("am_liam", "Liam (US, male)", "Young."),
+    ("am_onyx", "Onyx (US, male)", "Low and smooth."), ("am_puck", "Puck (US, male)", "Playful."),
+    ("am_santa", "Santa (US, male)", "Jolly old man."),
+    ("bf_emma", "Emma (UK, female)", "Crisp."), ("bf_isabella", "Isabella (UK, female)", "Warm."),
+    ("bf_alice", "Alice (UK, female)", "Proper."), ("bf_lily", "Lily (UK, female)", "Gentle."),
+    ("bm_george", "George (UK, male)", "Distinguished."), ("bm_fable", "Fable (UK, male)", "Storyteller."),
+    ("bm_lewis", "Lewis (UK, male)", "Rich and deep."), ("bm_daniel", "Daniel (UK, male)", "Newsreader."),
+    # voices made for other languages, speaking English: strong accents
+    ("ef_dora", "Dora (Spanish accent, female)", "Spanish-accented English."),
+    ("em_alex", "Alex (Spanish accent, male)", "Spanish-accented English."),
+    ("em_santa", "Santa (Spanish accent, male)", "Jolly, Spanish-accented."),
+    ("ff_siwis", "Siwis (French accent, female)", "French-accented English."),
+    ("hf_alpha", "Alpha (Hindi accent, female)", "Indian-accented English."),
+    ("hf_beta", "Beta (Hindi accent, female)", "Indian-accented English."),
+    ("hm_omega", "Omega (Hindi accent, male)", "Indian-accented English."),
+    ("hm_psi", "Psi (Hindi accent, male)", "Indian-accented English."),
+    ("if_sara", "Sara (Italian accent, female)", "Italian-accented English."),
+    ("im_nicola", "Nicola (Italian accent, male)", "Italian-accented English."),
+    ("pf_dora", "Dora (Portuguese accent, female)", "Brazilian-accented English."),
+    ("pm_alex", "Alex (Portuguese accent, male)", "Brazilian-accented English."),
+    ("pm_santa", "Santa (Portuguese accent, male)", "Jolly, Brazilian-accented."),
+    ("jf_alpha", "Alpha (Japanese accent, female)", "Japanese-accented English."),
+    ("jm_kumo", "Kumo (Japanese accent, male)", "Japanese-accented English."),
+    ("zf_xiaobei", "Xiaobei (Chinese accent, female)", "Mandarin-accented English."),
+    ("zm_yunjian", "Yunjian (Chinese accent, male)", "Mandarin-accented English."),
+]
 
 
 CATALOG: list[ModelEntry] = [
@@ -177,22 +307,9 @@ CATALOG: list[ModelEntry] = [
                voice="en-us", builtin=True),
     ModelEntry("espeak-en-gb", "voice", "eSpeak English (UK)", "espeak-ng", 0, 0, "Robotic.", tts_model="espeak-ng",
                voice="en-gb", builtin=True),
-    _piper("en_US", "lessac", "medium", "Lessac (US, female)", "Clear and neutral."),
-    _piper("en_US", "amy", "medium", "Amy (US, female)", "Bright."),
-    _piper("en_US", "ryan", "high", "Ryan (US, male)", "Warm, high quality."),
-    _piper("en_US", "joe", "medium", "Joe (US, male)", "Casual."),
-    _piper("en_US", "hfc_female", "medium", "HFC Female (US)", "Smooth."),
-    _piper("en_US", "hfc_male", "medium", "HFC Male (US)", "Deep."),
-    _piper("en_GB", "alan", "medium", "Alan (UK, male)", "Very butler."),
-    _piper("en_GB", "northern_english_male", "medium", "Northern English (UK, male)", "Regional accent."),
-    _piper("en_GB", "jenny_dioco", "medium", "Jenny (UK, female)", "Soft."),
-    _kokoro_voice("af_heart", "Heart (US, female)", "Kokoro's most natural voice."),
-    _kokoro_voice("af_bella", "Bella (US, female)", "Expressive."),
-    _kokoro_voice("am_michael", "Michael (US, male)", "Calm."),
-    _kokoro_voice("am_fenrir", "Fenrir (US, male)", "Deep."),
-    _kokoro_voice("bf_emma", "Emma (UK, female)", "Crisp."),
-    _kokoro_voice("bm_george", "George (UK, male)", "Distinguished."),
-    _kokoro_voice("bm_fable", "Fable (UK, male)", "Storyteller."),
+    *PIPER_VOICES,
+    *PRESETS,
+    *[_kokoro_voice(c, n, d) for c, n, d in KOKORO_VOICES],
 ]
 
 # (speed, quality, params_b, active_b) -- speed is for a typical desktop CPU

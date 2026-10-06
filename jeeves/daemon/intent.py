@@ -135,8 +135,11 @@ class IntentProcessor:
         memory_kind, _ = Memory.detect(text)
         messages = [{"role": "system", "content": system}]
         am = agent_memory(agent, self.settings)
-        recent = self.history.recent(am["recent"], agent=agent_id_of(ctx) if am["own_only"] else None,
-                                     exclude=ctx.request.get("id") if ctx else None) if am["recent"] else []
+        if ctx is not None and hasattr(ctx.engine, "recent_for"):
+            recent = ctx.engine.recent_for(ctx.agent_id, agent, am["recent"], am["own_only"], ctx.request.get("id"))
+        else:
+            recent = self.history.recent(am["recent"], agent=agent_id_of(ctx) if am["own_only"] else None,
+                                         exclude=ctx.request.get("id") if ctx else None) if am["recent"] else []
         if recent:
             messages.append({"role": "system", "content": "Recent requests (for 'that', 'it', 'the one I just "
                              "made'):\n" + "\n".join(f"- \"{r['text']}\" -> {r['function']} {json.dumps(r['args'])}"
@@ -215,7 +218,7 @@ class IntentProcessor:
         if re.search(SCREEN_PATTERN, low) or re.search(SCREEN_PATTERN, text.lower()):
             if "screen_reading" in by_name:
                 return Decision("screen_reading", {"question": self.strip_address(agent, text, polite=False),
-                                                   "region": guess_region(low)}, 0.9, "",
+                                                   "region": guess_region(low), "screen": guess_screen(low)}, 0.9, "",
                                 "rules")
             if self.registry.get("screen_reading") is not None:
                 return Decision(None, {}, 0.9, "", "rules", refusal=(
@@ -299,7 +302,8 @@ class IntentProcessor:
                        "", text, flags=re.I).strip(" ?.")
             return {"question": q or text}
         if f.name == "screen_reading":
-            return {"question": self.strip_address(agent, text), "region": guess_region(low)}
+            return {"question": self.strip_address(agent, text), "region": guess_region(low),
+                    "screen": guess_screen(low)}
         if f.name == "control_mode":
             return {"instruction": self.strip_address(agent, text)}
         if f.name == "remember":
@@ -324,21 +328,34 @@ class IntentProcessor:
 CONTROL_PATTERN = (r"^(left[- ]|right[- ]|middle[- ]|double[- ])?click\b|^(press|hit|tap)\s+(the\s+)?\S|"
                    r"^(hold|hold down|release|let go)\b|^type\s+\S|^scroll\s+(up|down|left|right)\b|"
                    r"^(move|put)\s+(the\s+)?(mouse|cursor|pointer)\b|^(take control|use the (mouse|keyboard))\b")
-SCREEN_PATTERN = (r"\b(on|of|at)\s+(my|the|this)\s+(screen|monitor|display)\b|"
+SCREEN_PATTERN = (r"\b(on|of|at|in)\s+(my|the|this|that)\s+(\w+\s+)?(screen|monitor|display)s?\b|"
+                  r"\b(on|of|at|across)\s+(all|both|each|every)\s+(of\s+)?(my\s+|the\s+)?(screens|monitors|displays)\b|"
                   r"\bread\s+(out\s+)?(the|my|this|that|what)\b.*\b(screen|page|window|error|message|says?|text|popup|dialog)\b|"
                   r"\bread\s+(the|my)\s+screen\b|\bwhat\s+(does|do)\s+(it|(this|that|the)(\s+\w+){0,2})\s+say\b|"
                   r"\bwhat\s+(is|'s)\s+(this|that)\s+(error|message|popup|dialog|window)\b|"
                   r"\b(can|do)\s+you\s+see\s+(my|the)\s+screen\b|\blook\s+at\s+(my|the|this)\s+screen\b|"
-                  r"\bwhat\s+am\s+i\s+looking\s+at\b|\bwhere\s+is\s+the\s+.+\s+(button|icon|link|tab)\b")
+                  r"\bwhat\s+am\s+i\s+looking\s+at\b|"
+                  r"\bwhere('s|\s+is)\s+the\s+.+\s+(button|icon|link|tab|error|message|window|menu|field|box|popup)\b")
+
+
+def guess_screen(low: str) -> str:
+    """'on my left monitor' -> 'left'; '' = let the function decide."""
+    if re.search(r"\b(all|both|every|each)\s+(of\s+)?(my\s+|the\s+)?(screens|monitors|displays)\b", low):
+        return "all"
+    m = re.search(r"\b(left|right|middle|center|centre|main|primary|first|second|third|other|top|bottom)\s+"
+                  r"(screen|monitor|display)\b", low)
+    return m.group(1) if m else ""
 
 
 def guess_region(low: str) -> str:
+    """'read the top of my screen' -> 'top'. Words naming a monitor ('my left screen') don't count."""
+    mon = r"(?!\s+(?:screen|monitor|display)s?\b)"
     for r in ("top-left", "top-right", "bottom-left", "bottom-right"):
-        if r.replace("-", " ") in low or r in low:
+        if re.search(rf"\b{r.replace('-', '[ -]')}\b{mon}", low):
             return r
     for word, r in (("top", "top"), ("bottom", "bottom"), ("left", "left"), ("right", "right"),
                     ("middle", "middle"), ("center", "middle"), ("centre", "middle")):
-        if re.search(rf"\b(at|on|in)\s+the\s+{word}\b", low):
+        if re.search(rf"\bthe\s+{word}\b{mon}", low):
             return r
     return "anywhere"
 

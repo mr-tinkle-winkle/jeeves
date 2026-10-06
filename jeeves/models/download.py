@@ -86,7 +86,8 @@ def resolve_hf(repo: str, suffix: str) -> str:
 
 
 def model_dir(entry: ModelEntry) -> Path:
-    return paths.models_dir() / entry.kind / entry.id
+    # presets of a multi-speaker voice share its download
+    return paths.models_dir() / entry.kind / (entry.shares or entry.id)
 
 
 def is_installed(entry: ModelEntry) -> bool:

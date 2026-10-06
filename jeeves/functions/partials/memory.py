@@ -17,7 +17,7 @@ def recent_requests(ctx, count=None, agent=None):
     n = int(count or am["recent"] or ctx.settings.get("memory.recent_count", 3))
     if am["own_only"]:
         agent = ctx.agent_id
-    return ctx.engine.history.recent(n, agent=agent, exclude=ctx.request.get("id"))
+    return ctx.engine.recent_for(ctx.agent_id, ctx.agent, n, False, ctx.request.get("id"), only_agent=agent)
 
 
 @partial("remember", "Commits something to memory. 'long_term' keeps it while Jeeves runs (RAM); "

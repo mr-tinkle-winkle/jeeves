@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from typing import Any
 from pathlib import Path
 
 from ...daemon import desktop as dk
@@ -138,11 +139,91 @@ def region_rect(region, width: int, height: int) -> tuple[int, int, int, int]:
     return table.get(r, table["anywhere"])
 
 
-def _rect_for(region, width: int, height: int, mp: Mapper) -> tuple[int, int, int, int]:
-    """A named region is relative to the screenshot; an {x,y,w,h} region is in desktop
-    coordinates (the same ones find_on_screen returns)."""
+SCREENS = "all, current (the one you're working on), primary, left, right, second, other, or a monitor name"
+ORDINALS = {"first": 0, "1": 0, "one": 0, "second": 1, "2": 1, "two": 1, "third": 2, "3": 2, "three": 2}
+
+
+def _current_output(outs: list) -> Any:
+    """The monitor you're working on: the focused window's, else the mouse's, else the primary."""
+    points = []
+    try:
+        f = dk.focused()
+        if f and f.w and f.h:
+            points.append((f.x + f.w // 2, f.y + f.h // 2))
+    except Exception:  # noqa: BLE001 -- no window info: try the mouse
+        pass
+    try:
+        points.append(dk.mouse_position())
+    except Exception:  # noqa: BLE001
+        pass
+    for x, y in points:
+        hit = next((o for o in outs if o.x <= x < o.x + o.w and o.y <= y < o.y + o.h), None)
+        if hit is not None:
+            return hit
+    return next((o for o in outs if o.primary), outs[0])
+
+
+def pick_outputs(screen: str | None, outs: list | None = None) -> list:
+    """Which monitors a request means. [] = all of them (or the layout is unknown)."""
+    try:
+        outs = outs if outs is not None else dk.outputs()
+    except Exception:  # noqa: BLE001
+        return []
+    if len(outs) < 2 or (len(outs) == 1 and outs[0].name == "default"):
+        return []
+    s = str(screen or "all").strip().lower().replace(" screen", "").replace(" monitor", "")
+    s = s.removeprefix("the ").removeprefix("my ")
+    if s in ("", "all", "every", "both", "anywhere", "everywhere", "all screens", "any"):
+        return []
+    by_x = sorted(outs, key=lambda o: (o.x, o.y))
+    if s in ("current", "this", "focused", "active", "here", "mine"):
+        return [_current_output(outs)]
+    if s in ("primary", "main"):
+        return [next((o for o in outs if o.primary), by_x[0])]
+    if s == "left":
+        return [by_x[0]]
+    if s == "right":
+        return [by_x[-1]]
+    if s in ("middle", "center", "centre"):
+        return [by_x[len(by_x) // 2]]
+    if s in ("top", "upper"):
+        return [min(outs, key=lambda o: o.y)]
+    if s in ("bottom", "lower"):
+        return [max(outs, key=lambda o: o.y)]
+    if s in ORDINALS:
+        return [by_x[min(ORDINALS[s], len(by_x) - 1)]]
+    if s in ("other", "second screen", "secondary"):
+        cur = _current_output(outs)
+        return [o for o in outs if o is not cur][:1]
+    named = [o for o in outs if o.name.lower() == s]
+    return named or []
+
+
+def describe_output(o: Any, outs: list) -> str:
+    """'your left screen' etc. for speaking."""
+    if len(outs) < 2:
+        return "your screen"
+    by_x = sorted(outs, key=lambda m: (m.x, m.y))
+    i = by_x.index(o)
+    if len(outs) == 2:
+        return "your left screen" if i == 0 else "your right screen"
+    return {0: "your left screen", len(by_x) - 1: "your right screen"}.get(i, "your middle screen")
+
+
+def _rect_for(region, width: int, height: int, mp: Mapper, screen: str | None = None) -> tuple[int, int, int, int]:
+    """Where to look, in screenshot pixels. A named region (top, bottom-left...) is relative to the
+    chosen monitor (or the whole desktop for 'all'); an {x,y,w,h} region is in desktop coordinates
+    (the same ones find_on_screen returns)."""
     if isinstance(region, dict):
         return mp.rect_to_image(region_rect(region, width, height))
+    picked = pick_outputs(screen)
+    if picked:
+        o = picked[0]
+        ox, oy, ow, oh = mp.rect_to_image((o.x, o.y, o.w, o.h))
+        ox, oy = max(0, ox), max(0, oy)
+        ow, oh = min(ow, width - ox), min(oh, height - oy)
+        rx, ry, rw, rh = region_rect(region, ow, oh)
+        return ox + rx, oy + ry, rw, rh
     return region_rect(region, width, height)
 
 
@@ -157,6 +238,32 @@ def _expand(rect, width, height, factor=1.5):
     nw, nh = min(width, int(w * factor) + 1), min(height, int(h * factor) + 1)
     nx, ny = max(0, x - (nw - w) // 2), max(0, y - (nh - h) // 2)
     return nx, ny, min(nw, width - nx), min(nh, height - ny)
+
+
+def _per_monitor(words: list[dict], mp: Mapper, region, width: int, height: int) -> str | None:
+    try:
+        outs = dk.outputs()
+    except Exception:  # noqa: BLE001
+        return None
+    if len(outs) < 2 or mp.box == (0, 0, mp.iw, mp.ih) and outs[0].name == "default":
+        return None
+    parts = []
+    for o in sorted(outs, key=lambda m: (m.x, m.y)):
+        rect = _rect_for(region, width, height, mp, o.name)
+        lines = _group_lines([w for w in words if _inside(w, rect)])
+        if lines:
+            parts.append(f"[{describe_output(o, outs).removeprefix('your ')}]\n" + "\n".join(l["text"] for l in lines))
+    return "\n\n".join(parts)
+
+
+def _expand_within(rect, bound, factor=1.5):
+    """Grow rect around its centre, staying inside bound (a monitor)."""
+    bx, by, bw, bh = bound
+    x, y, w, h = rect
+    nw, nh = min(bw, int(w * factor) + 1), min(bh, int(h * factor) + 1)
+    nx = min(max(bx, x - (nw - w) // 2), bx + bw - nw)
+    ny = min(max(by, y - (nh - h) // 2), by + bh - nh)
+    return nx, ny, nw, nh
 
 
 def _image_size(path: Path) -> tuple[int, int]:
@@ -184,6 +291,7 @@ def _group_lines(words: list[dict]) -> list[dict]:
     "Looks for something on the screen and returns where it is, in absolute pixels.",
     args=[Arg("target", "string", "What to look for: text shown on screen, or a short description of an object"),
           Arg("region", "region", "Where to look", required=False, default="anywhere", choices=None),
+          Arg("screen", "string", f"Which monitor: {SCREENS}", required=False, default="all"),
           Arg("bounds", "string", "Also return the object's outline: 'rectangle' (4 points) or 'polygon' "
               "(more points, more precise)", required=False, default="none",
               choices=["none", "rectangle", "polygon"])],
@@ -194,13 +302,13 @@ def _group_lines(words: list[dict]) -> list[dict]:
     category="screen",
     dry_run_safe=False,
 )
-def find_on_screen(ctx, target, region="anywhere", bounds="none"):
+def find_on_screen(ctx, target, region="anywhere", bounds="none", screen="all"):
     shot = screenshot()
     try:
         width, height = _image_size(shot)
         mp = Mapper((width, height))
         words = ocr_words(shot)
-        rect = _rect_for(region, width, height, mp)
+        rect = _rect_for(region, width, height, mp, screen)
         candidates = [w for w in words if _inside(w, rect)] + _group_lines([w for w in words if _inside(w, rect)])
         best, score = None, 0.0
         t = normalize(str(target))
@@ -238,25 +346,32 @@ def find_on_screen(ctx, target, region="anywhere", bounds="none"):
     "read_screen_text",
     "Reads the text shown on screen, optionally only in part of the screen.",
     args=[Arg("region", "region", "Where to read: anywhere, top, middle, bottom-left, ... or {x,y,w,h}",
-              required=False, default="anywhere")],
+              required=False, default="anywhere"),
+          Arg("screen", "string", f"Which monitor: {SCREENS}", required=False, default="current")],
     how="OCR on a screenshot. With a vague region (e.g. 'middle'), if no text is there the area grows until "
         "text is found.",
     returns="the text, line by line",
     category="screen",
 )
-def read_screen_text(ctx, region="anywhere"):
+def read_screen_text(ctx, region="anywhere", screen="current"):
     shot = screenshot()
     try:
         width, height = _image_size(shot)
         words = ocr_words(shot)
-        rect = _rect_for(region, width, height, Mapper((width, height)))
+        mp = Mapper((width, height))
+        if not isinstance(region, dict) and not pick_outputs(screen):
+            per = _per_monitor(words, mp, region, width, height)
+            if per is not None:                    # several monitors: one section each, left to right
+                return per
+        rect = _rect_for(region, width, height, mp, screen)
+        bound = _rect_for("anywhere", width, height, mp, screen)       # the chosen monitor (or everything)
         for _ in range(8):
             inside = [w for w in words if _inside(w, rect)]
-            if inside or rect == (0, 0, width, height):
+            if inside or rect == bound:
                 return "\n".join(l["text"] for l in _group_lines(inside))
             if isinstance(region, dict):
                 break
-            rect = _expand(rect, width, height)
+            rect = _expand_within(rect, bound)
         return ""
     finally:
         shot.unlink(missing_ok=True)

@@ -65,6 +65,9 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         # memory: recent = past requests shown to the model (None -> memory.recent_count),
         # notes = remembered notes shown to it, own_only = only this agent's requests/notes
         "memory": {"enabled": True, "recent": None, "notes": 30, "own_only": False},
+        # how the voice is shaped (models.tts_voice picks the voice itself)
+        "voice_style": {"speaker": "", "speed": 1.0, "pitch": 0.0, "expressiveness": 0.667, "effect": "none",
+                        "blend": "", "blend_amount": 0.3},
     }
 
 

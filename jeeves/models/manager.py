@@ -207,8 +207,14 @@ class ModelManager:
         return self._loaded(inst, kind)
 
     def tts(self, agent: dict[str, Any] | None = None) -> tuple[TTS, catalog.ModelEntry | None]:
-        entry = self._check("tts", self.model_id("tts", agent))
         voice = catalog.get(self.model_id("tts_voice", agent))
+        engine_id = self.model_id("tts", agent)
+        if voice is not None and voice.tts_model and voice.tts_model != engine_id:
+            # picking a voice picks its engine (a Kokoro voice while the engine says Piper, ...)
+            parent = catalog.get(voice.tts_model)
+            if parent is not None and is_installed(parent):
+                engine_id = parent.id
+        entry = self._check("tts", engine_id)
         if voice is not None and voice.tts_model != entry.id:
             voice = None
         if voice is not None and not is_installed(voice):
@@ -259,8 +265,8 @@ class ModelManager:
             mem = ctx.engine.memory.context_for(ctx.agent_id, am["notes"], am["own_only"])
             if mem:
                 sys_parts.append(mem)
-            recent = ctx.engine.history.recent(am["recent"], agent=ctx.agent_id if am["own_only"] else None,
-                                               exclude=ctx.request.get("id")) if am["recent"] else []
+            recent = ctx.engine.recent_for(ctx.agent_id, agent, am["recent"], am["own_only"],
+                                           ctx.request.get("id"))
             for r in recent:
                 messages.append({"role": "user", "content": r["text"]})
                 if r.get("result"):
