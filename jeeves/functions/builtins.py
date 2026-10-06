@@ -353,34 +353,11 @@ def timers(ctx, action, duration="", time="", label="", request=""):
     default_enabled=True, category="web", uses=["web_search", "request_website", "wikipedia", "generate_text"],
 )
 def research(ctx, question):
-    from .partials.web import request_website
+    from .research import run
     if ctx.dry_run:
         return f"<researched answer to: {question}>"
     question = str(question)
-    pages = int(ctx.settings.get("research.pages", 3))
-    per_page = int(ctx.settings.get("research.max_chars_per_page", 4000))
-    sources: list[dict] = []
-    if ctx.engine.wikipedia is not None and ctx.engine.wikipedia.available():
-        try:
-            hit = ctx.call("wikipedia", query=question, max_chars=per_page)
-            sources.append({"title": f"Wikipedia: {hit['title']}", "url": "offline Wikipedia", "text": hit["text"]})
-        except FunctionError:
-            pass
-    results = ctx.call("web_search", query=question, count=max(pages + 2, 5))
-    for r in results:
-        if len([s for s in sources if s["url"] != "offline Wikipedia"]) >= pages:
-            break
-        ctx.check_cancelled()
-        ctx.think(f"Reading {r['url']}", looking_at=r["url"])
-        try:
-            text = request_website(ctx, r["url"], max_chars=per_page)
-        except FunctionError as exc:
-            ctx.think(f"  couldn't read it: {exc}")
-            text = ""
-        if len(text.strip()) < 200:              # JavaScript-only or blocked page: use the snippet
-            text = r.get("snippet", "")
-        if text.strip():
-            sources.append({"title": r["title"], "url": r["url"], "text": text})
+    sources, results = run(ctx, question)
     if not sources:
         raise FunctionError("I couldn't find anything about that")
     ctx.trace("sources", sources=[{"title": s["title"], "url": s["url"]} for s in sources])
@@ -391,9 +368,9 @@ def research(ctx, question):
         f"Question: {question}\n\nSources:\n{material}\n\n"
         "Using only these sources, explain the answer properly -- not a one-line summary. Say what the answer "
         "is, then explain the why or how and the key details a curious person would want (names, numbers, "
-        "dates, what it means for them), in about 4 to 8 plain sentences. After each fact put the number of "
-        "the source it came from in square brackets, like [2]. If the sources disagree or don't answer it, "
-        "say so.",
+        "dates, steps, what it means for them), in about 4 to 8 plain sentences. After each fact put the number "
+        "of the source it came from in square brackets, like [2]. Don't add facts the sources don't give: if "
+        "they disagree or only partly answer it, say what they do say and what they don't.",
         ctx=ctx)
     if answer is None:                           # no local model: read out the best snippet
         best = next((r for r in results if r.get("snippet")), None)

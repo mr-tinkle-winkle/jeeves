@@ -175,7 +175,9 @@ DEFAULTS: dict[str, Any] = {
         "online_agent": "codex",          # codex | gemini | claude | grok
     },
     "memory": {"recent_count": 3, "long_term_limit": 200},
-    "research": {"engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000},
+    "research": {"engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000,
+                 "depth": "normal",            # quick (1 round, 3 pages) | normal (2 rounds, 5) | deep (3, 8)
+                 "auto_for_facts": True},      # factual questions (games, products, people...) get researched
     "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"]},
     "control_mode": {"virtual_controller": False, "absolute_moves": True},
     "puppetry": {"config_dir": "~/.config/macro-daemon", "service": "macro-daemon.service"},

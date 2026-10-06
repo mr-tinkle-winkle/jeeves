@@ -60,6 +60,25 @@ NOISE_TEXTS = {
 }
 
 
+FACT_WORDS = (r"boss|build|item|weapon|armou?r|quest|mission|level|map|patch|update|release|version|mod|dlc|"
+              r"achievement|trophy|walkthrough|guide|recipe|stats?|spawn|drop|location|where to find|how to get|"
+              r"best|price|cost|lore|ending|character|skill|perk|class|season|episode|score|record|born|died|"
+              r"population|capital|founded|invented")
+
+
+def looks_factual(text: str) -> bool:
+    """A question that needs facts (better looked up than guessed): a wh-/how question naming
+    something specific (a capitalised name, a number) or using game/product/fact words."""
+    t = text.strip()
+    low = t.lower()
+    if not re.match(r"^(who|what|when|where|which|why|how|is|are|does|do|did|can|should|was|were|tell me about|"
+                    r"explain)\b", low):
+        return False
+    words = t.split()
+    names = [w for w in words[1:] if w[:1].isupper() and w.lower() not in ("i", "i'm", "i've")]
+    return bool(names or re.search(r"\d", t) or re.search(rf"\b({FACT_WORDS})\b", low))
+
+
 def is_noise_text(text: str) -> bool:
     t = re.sub(r"[\[\]()*♪.,!?'\"_-]", " ", text.lower())
     t = " ".join(t.split()).replace("amara org", "amaraorg")
@@ -946,8 +965,13 @@ class Engine:
                     ctx.say(decision.refusal)
                 return
             threshold = float(self.settings.get("general.unclear_confidence", 0.45))
+            if decision.function is not None and decision.confidence < threshold:
+                ctx.trace("low_confidence", confidence=decision.confidence)    # act on the best guess anyway
+            if decision.function is None and not self._worth_asking(decision.question, text):
+                decision = self._best_guess(ctx, text, skip)                    # answer instead of asking
+                ctx.trace("intent", **decision.to_dict())
             rounds = 0
-            while (decision.function is None or decision.confidence < threshold) and rounds < 2:
+            while decision.function is None and rounds < 2:
                 rounds += 1
                 question = decision.question or self._clarifying_question(ctx, text)
                 ctx.state("unclear", question)
@@ -1024,6 +1048,30 @@ class Engine:
                 ctx.trace("dry_result", result=str(result)[:500])
             except FunctionError as exc:
                 ctx.trace("error", message=str(exc))
+
+    def _worth_asking(self, question: str, text: str) -> bool:
+        """A clarifying question is only worth it when it asks for something new -- not when it
+        restates the request ("Do you want me to look up X?") or is empty."""
+        q, t = normalize(question or ""), normalize(text)
+        if not q:
+            return False
+        if similarity(q, t) > 0.7:
+            return False
+        generic = {"do", "you", "want", "me", "to", "would", "like", "should", "could", "can", "i", "the", "a",
+                   "that", "this", "it", "is", "are", "mean", "exactly", "which", "what", "something", "specific",
+                   "sure", "correct", "right", "so", "just", "please", "confirm", "asking", "about", "for", "of"}
+        new = set(q.split()) - set(t.split()) - generic
+        return bool(new)                   # it asks for something the request didn't already say
+
+    def _best_guess(self, ctx: FunctionContext, text: str, skip: set[str]) -> Decision:
+        """No clear function: research it if it's a factual question, otherwise just answer."""
+        enabled = {f.name for f in self.registry.enabled_for(ctx.agent)} - skip
+        core = self.intent.strip_address(ctx.agent, text)
+        if "research" in enabled and looks_factual(core):
+            return Decision("research", {"question": core}, 0.6, "", "fallback")
+        if "local_response" in enabled:
+            return Decision("local_response", {"prompt": text}, 0.5, "", "fallback")
+        return Decision(None, {}, 0.0, "", "fallback")
 
     def _clarifying_question(self, ctx: FunctionContext, text: str) -> str:
         try:

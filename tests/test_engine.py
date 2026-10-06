@@ -503,7 +503,7 @@ def test_research_reads_pages_and_answers(engine, monkeypatch):
     assert entry["function"] == "research" and entry["args"]["question"] == "the answer to everything"
     assert entry["response"] == "It's 42, according to Site A."
     assert read == ["https://a.example", "https://b.example"]
-    assert "[1] Site A" in prompts[0] and "[2] Site B" in prompts[0]
+    assert "[1] Site A" in prompts[-1] and "[2] Site B" in prompts[-1]
     assert any(t["kind"] == "stage" and t["stage"] == "researching" for t in entry["trace"])
 
 
@@ -671,3 +671,42 @@ def test_nvidia_detected_without_nvidia_smi_on_path(monkeypatch, tmp_path):
     picks = hardware.recommend(hardware.budget(dict(hardware.detect(), llama_gpu=["cuda"], whisper_gpu=["cuda"],
                                                     gpu_usable=True), None))["picks"]
     assert picks["stt"]["id"] == "whisper-large-v3-turbo"
+
+
+def test_deep_research_digs_further_and_finds_buried_facts(engine, monkeypatch):
+    from jeeves.functions import research
+    from jeeves.functions.partials import web
+    searched = []
+
+    def fake_search(settings, q, n):
+        searched.append(q)
+        if "drop rate" in q:
+            return [{"title": "Hornet drops - Silksong Wiki", "url": "https://silksong.fandom.com/drops", "snippet": ""}]
+        return [{"title": "Pinterest board", "url": "https://pinterest.com/x", "snippet": "silksong"},
+                {"title": "Silksong Hornet - Wiki", "url": "https://silksong.fandom.com/hornet", "snippet": "Hornet"}]
+    pages = {"https://silksong.fandom.com/hornet": ("Intro text. " * 400) + "Hornet's needle deals 13 damage. " +
+             ("More filler text here. " * 400),
+             "https://silksong.fandom.com/drops": "The Silk Heart drop rate is 25 percent from Hornet."}
+    monkeypatch.setattr(web, "search", fake_search)
+    monkeypatch.setattr(web, "request_website", lambda ctx, url, max_chars=20000: pages.get(url, ""))
+    replies = iter(["silksong hornet needle damage wiki\nsilksong hornet reddit",    # planned queries
+                    "SEARCH: silksong silk heart drop rate",                         # round 1: not answered
+                    "Her needle deals 13 damage [1] and drops a Silk Heart 25% of the time [2]."])
+    engine.models.respond = lambda agent, prompt, **kw: next(replies)
+    said = []
+    engine.speak = lambda ctx, t: said.append(t)
+    res = engine.handle_text("Jeeves, how much damage does Hornet's needle do in Silksong", wait=True)
+    entry = engine.history.get(res["id"])
+    assert entry["function"] == "research"                       # a game fact: researched, not guessed
+    assert any("drop rate" in q for q in searched)               # a second round followed up
+    urls = [s["url"] for s in entry["sources"]]
+    assert urls[0] == "https://silksong.fandom.com/hornet" and "https://pinterest.com/x" not in urls
+    assert "13 damage" in entry["sources"][0]["text"]            # buried mid-page, still found
+    assert said == ["Her needle deals 13 damage and drops a Silk Heart 25% of the time."]
+
+
+def test_fewer_pointless_questions(engine):
+    assert not engine._worth_asking("Do you want me to look up the Silksong release date?",
+                                    "look up the Silksong release date")
+    assert not engine._worth_asking("", "anything")
+    assert engine._worth_asking("How long should the timer be?", "set a timer")

@@ -101,7 +101,7 @@ def test_remember_refused_when_memory_off(engine):
     ("Jeeves, could you type hello world please", "control_mode"),
     ("Jeeves, press ctrl+s", "control_mode"),
     ("Jeeves, at 7pm open OBS", "timers"),
-    ("Jeeves, what is the capital of France", "local_response"),
+    ("Jeeves, how are you today", "local_response"),
 ])
 def test_unmistakable_requests_route_without_a_model(engine, text, function):
     engine.settings.set("agents.jeeves.functions.control_mode", True)

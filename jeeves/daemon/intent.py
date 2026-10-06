@@ -27,8 +27,11 @@ SYSTEM = """You are the intention processor for a voice assistant named {agent}.
 Pick the ONE function below that best matches what the user wants, and fill in its arguments.
 Only use functions from this list. Follow each function's argument rules exactly: when an argument
 lists allowed values, use one of them; leave out optional arguments you don't need.
-If the request is ambiguous or you can't tell what they want, set "function" to null and write a short
-clarifying question in "question".
+Act on the most likely meaning -- people speak casually and expect you to get it. Only if the request
+truly can't be carried out without more information (e.g. "set a timer" with no length) set "function" to
+null and ask for exactly the missing piece in "question". Never ask the user to confirm, repeat or rephrase
+what they already said. A question about facts -- games (bosses, builds, items, quests, patches), products,
+people, places, news, prices, release dates -- goes to research rather than being answered from memory.
 
 Answer with JSON only:
 {{"function": "<name or null>", "args": {{...}}, "confidence": <0.0-1.0>, "question": "<only if unclear>"}}
@@ -224,6 +227,10 @@ class IntentProcessor:
                 return Decision(None, {}, 0.9, "", "rules", refusal=(
                     f"Screen Reading is turned off for {name}. Turn it on in Settings > Agents > {name} > "
                     "Functions."))
+        if "research" in by_name and self.settings.get("research.auto_for_facts", True):
+            from .engine import looks_factual
+            if looks_factual(core):        # specific facts get looked up, not guessed
+                return Decision("research", {"question": core}, 0.85, "", "rules")
         if re.match(r"^at\s+\d{1,2}(:\d{2})?\s*(am|pm|a\.m\.|p\.m\.)?\b", low) and "timers" in by_name:
             args, problems = self.validate(by_name["timers"], self._guess_args(by_name["timers"], core, agent))
             if not problems:
