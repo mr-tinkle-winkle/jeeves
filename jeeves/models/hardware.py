@@ -253,6 +253,10 @@ def recommend(hw: dict[str, Any] | None = None) -> dict[str, Any]:
     pick("local_response_fast", _best(llms, hw, min_speed=4), "If you'd rather have instant answers.")
     pick("local_response_smart", _best(llms, hw, fits=("gpu", "cpu", "slow")),
          "The smartest model your memory can hold -- expect slow answers.")
+    vis = [e for e in llms if e.vision]
+    pick("vision", _best(vis, hw, min_speed=2) or _best(vis, hw, min_speed=1, fits=("gpu", "cpu", "slow")),
+         f"Lets agents actually see the screen (people, icons, game UIs) instead of only reading its text; the "
+         f"best one that runs at a usable speed on {where}.")
     pick("tts", catalog.get("piper"), "Natural voices that run fast on any CPU.")
     pick("tts_voice", catalog.get("piper-en_GB-alan-medium"), "A suitably butler-ish voice (try the others too).")
     return {"hardware": hw, "picks": out}

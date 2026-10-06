@@ -90,6 +90,27 @@ class ModelsPage(Page):
             if kind == "local_response":
                 self.b.number(s, "Longest answer (tokens)", "models.local_response.max_tokens", 64, 8192, 64)
 
+        hy = self.section("Hybrid Models")
+        hy.addWidget(label("Use the full models while your computer is otherwise quiet, and switch to lighter ones "
+                           "(unloading the big ones) as soon as a game or anything else needs the CPU, GPU or "
+                           "memory. Back to the full models once it's calm again."))
+        self.hybrid_status = label("")
+        hy.addWidget(self.hybrid_status)
+        self.b.check(hy, "Hybrid Models", "models.hybrid.enabled")
+        self.light_boxes: dict[str, Any] = {}
+        for kind, title in (("stt", "Light speech to text"), ("intent", "Light intention processing"),
+                            ("local_response", "Light local responses"), ("vision", "Light vision")):
+            opts = [("Automatic: a smaller downloaded model", "auto"), ("Keep the normal model", "same")]
+            if kind == "vision":
+                opts.append(("Off: read the screen's text instead", "off"))
+            self.light_boxes[kind] = self.b.choice(hy, title, f"models.hybrid.{kind}", opts)
+        self.b.number(hy, "Switch when other programs use", "models.hybrid.cpu_percent", 10, 100, 5, suffix=" % CPU")
+        self.b.number(hy, "…or the GPU is busier than", "models.hybrid.gpu_percent", 10, 100, 5, suffix=" %")
+        self.b.number(hy, "…or free RAM drops under", "models.hybrid.ram_free_gb", 0, 256, 0.5, 1, suffix=" GB")
+        self.b.number(hy, "For at least", "models.hybrid.switch_after", 2, 120, 1, suffix=" s",
+                      hint="Short spikes (loading a page) don't count.")
+        self.b.number(hy, "Back to the full models after", "models.hybrid.back_after", 5, 600, 5, suffix=" s calm")
+
         p = self.section("Performance")
         self._gpu_layers_row(p)
         self.b.number(p, "CPU threads", "models.threads", 0, 128, 1, hint="0 = automatic")
@@ -222,8 +243,26 @@ class ModelsPage(Page):
         for kind, (_t, cat_kind, _p) in KIND_TITLES.items():
             self._fill(self.kind_boxes[kind], cat_kind)
         self._fill(self.voice_box, "voice")
+        self._fill_light()
+        hy = st.get("hybrid") or {}
+        self.hybrid_status.setText(
+            "" if not hy.get("enabled") else
+            f"<b>Now:</b> light models — {hy.get('reason') or 'other programs are busy'}" if hy.get("light") else
+            "<b>Now:</b> full models")
         self.b.load(self._settings, self._locked)
         self._render_catalog()
+
+    def _fill_light(self) -> None:
+        """The light-set choosers: the fixed options, then each downloaded model of that kind."""
+        for kind, box in self.light_boxes.items():
+            keep = box.count() - (3 if kind == "vision" else 2)
+            for _ in range(max(0, keep)):
+                box.removeItem(box.count() - 1)
+            pool = [m for m in self.catalog if m["installed"] and
+                    (m["kind"] == "stt" if kind == "stt" else m["kind"] == "llm" and bool(m.get("vision")) ==
+                     (kind == "vision"))]
+            for m in sorted(pool, key=lambda m: m.get("ram_mb", 0)):
+                box.addItem(m["name"], m["id"])
 
     # ------------------------------------------------------------------ your computer
     def _got_recs(self, res: Any) -> None:
@@ -273,6 +312,7 @@ class ModelsPage(Page):
                  ("local_response", "Local responses", "models.local_response.model"),
                  ("local_response_fast", "  …or faster", "models.local_response.model"),
                  ("local_response_smart", "  …or smarter", "models.local_response.model"),
+                 ("vision", "Vision (seeing the screen)", "models.vision.model"),
                  ("tts", "Text to speech", "models.tts.model"), ("tts_voice", "Voice", "models.tts_voice")]
         for role, title, path in roles:
             pick = picks.get(role)

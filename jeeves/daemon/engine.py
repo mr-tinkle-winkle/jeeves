@@ -75,6 +75,15 @@ def looks_factual(text: str, agent: dict[str, Any] | None = None) -> bool:
     if not re.match(r"^(who|what|when|where|which|why|how|is|are|does|do|did|can|should|was|were|tell me about|"
                     r"explain)\b", low):
         return False
+    if re.search(r"\b(you|your|yourself|we)\b|\b(what time|what day|today|tonight|what'?s up|how are|how'?s it going|"
+                 r"should i|do you think|joke|story)\b", low) and not re.match(r"^how (do|can|would) you (do|get|make|"
+                                                                               r"beat|unlock|find)\b", low):
+        return False                              # about the conversation, or asking for an opinion
+    if re.match(r"^(how (do|can|would|does|did) (i|one|people|someone|they)|how to)\s+\w+", low):
+        return True                               # "how do I do a wumpy in parkour reborn": look it up
+    if re.match(r"^(what|who)('s|\s+is|\s+are|\s+was|\s+were)\s+(a|an|the)?\s*[\w'-]+", low) and \
+            re.search(r"\b(in|on|from|for)\s+[\w'.:-]+(\s+[\w'.:-]+){0,3}\s*\??$", low):
+        return True                               # "what is a wumpy in parkour reborn"
     words = t.split()
     own = {"i", "i'm", "i've", "i'd", "i'll"}
     if agent:                                  # "how are you, Jeeves" isn't a fact to look up
@@ -127,6 +136,7 @@ class Engine:
         self.interrupted: dict[str, list[str]] = {}       # agent -> requests paused by calling its name
         self.watchers: dict[str, Any] = {}                # agent -> Watcher (watching the screen)
         self.video_state: dict[str, Any] = {"playing": False}   # the Jeeves video player
+        self.models.busy = lambda: bool(self.active) or bool(self.speaking)  # Hybrid Models ignores our own load
         self.puppetry = Puppetry(self.settings)
         self.online = Online(self.settings)
         self.wikipedia = Wikipedia(self.settings, self.publish)
@@ -622,6 +632,12 @@ class Engine:
             return
         agent = self.agents()[aid]
         thr = self.threshold(agent)
+        if conf < thr and self._busy_requests(aid) and conf >= thr * 0.5:
+            # called while it's talking: its own voice is in the microphone too, so the name scores lower
+            # and checking it with speech recognition only hears the agent's own words. Take it.
+            log.info("wake '%s' (%.2f) while %s is busy: interrupting", name, conf, aid)
+            self._start_listen(source, aid, name, after, threshold, words)
+            return
         if conf < thr:
             if conf >= thr * 0.5 and self.settings.get("wake_word.verify_near_misses", True):
                 # unsure: check with speech recognition whether the name was really said
@@ -753,7 +769,45 @@ class Engine:
         h = normalize(heard)
         with self._lock:
             ctxs = [c for c in self.active.values() if c.agent_id == agent_id]
-        return any(h and h.split()[0] in normalize(getattr(c, "saying", "") or "") for c in ctxs)
+        # only when it's saying the name itself right now (a whole word, not part of one)
+        return any(h and h.split()[0] in normalize(getattr(c, "saying", "") or "").split() for c in ctxs)
+
+    def video_quality(self, height: int, position: int = 0) -> bool:
+        """The player asked for another quality: fetch those streams and carry on from position."""
+        page = self.video_state.get("page")
+        if not page:
+            return False
+
+        def work() -> None:
+            from ..functions.partials import youtube as yt
+            try:
+                s = yt.streams(page, int(height))
+            except Exception as exc:  # noqa: BLE001
+                self.publish("notice", {"text": f"Couldn't switch the video quality: {exc}"})
+                return
+            self.publish("video", {"action": "play", "title": s["title"], "channel": s["channel"], "video": s["video"],
+                                   "audio": s["audio"], "page": s["page"], "duration": s["duration"],
+                                   "height": s.get("height"), "heights": s.get("heights"), "fps": s.get("fps"),
+                                   "chapters": s.get("chapters"), "start": int(position), "fullscreen": None})
+        self.run_async(work)
+        return True
+
+    def interrupt(self, request_id: str) -> bool:
+        """Right-click > Interrupt: pause what the agent is doing (speech stops mid-sentence) and listen
+        for you right away -- the same as calling it by name. "carry on" resumes, anything else is a new
+        request."""
+        with self._lock:
+            ctx = self.active.get(request_id)
+        if ctx is None:
+            raise KeyError(request_id)
+        if self._refuse_if_off():
+            return False
+        a = ctx.agent
+        source = f"device:{a['listen_device']}" if a.get("listen_to") == "device" and a.get("listen_device") else \
+            "desktop" if a.get("listen_to") == "desktop" else "microphone"
+        self._start_listen(source, ctx.agent_id, "", [], None, 0)
+        self.apply_settings()                    # make sure that source is being listened to
+        return True
 
     def _interrupt(self, agent_id: str) -> list[str]:
         """Called by name while busy: pause what it's doing (speech stops mid-sentence) and listen.

@@ -257,3 +257,60 @@ def web_search(ctx, query, count=5):
     for r in results:
         ctx.think(f"- {r['title']} ({r['url']})")
     return results
+
+
+# ---------------------------------------------------------------------------
+# Wikis (Fandom, wiki.gg, any MediaWiki): search inside the wiki, read an article cleanly
+# ---------------------------------------------------------------------------
+
+def wiki_base(url: str) -> str | None:
+    """The wiki a page belongs to ("https://parkour-reborn.fandom.com"), when it looks like a MediaWiki
+    (fandom.com, wiki.gg, or a /wiki/ path)."""
+    import urllib.parse
+    u = urllib.parse.urlparse(url)
+    if not u.scheme or not u.netloc:
+        return None
+    host = u.netloc.lower()
+    if host.endswith(".fandom.com") or host.endswith(".wiki.gg") or host.endswith("wikipedia.org") \
+            or "/wiki/" in u.path or host.startswith("wiki."):
+        if host in ("www.fandom.com", "fandom.com", "community.fandom.com"):
+            return None
+        lang = re.match(r"^/([a-z]{2}(?:-[a-z]+)?)/wiki/", u.path)        # fandom: /es/wiki/...
+        return f"{u.scheme}://{u.netloc}" + (f"/{lang.group(1)}" if lang else "")
+    return None
+
+
+def _wiki_api(base: str, params: dict[str, str]) -> dict:
+    import json
+    import urllib.parse
+    q = urllib.parse.urlencode(dict(params, format="json"))
+    last: Exception | None = None
+    for api in ("/api.php", "/w/api.php"):
+        try:
+            return json.loads(_fetch(base + api + "?" + q, timeout=12))
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+            last = exc
+    raise FunctionError(f"couldn't reach the wiki at {base}: {last}")
+
+
+def wiki_search(base: str, query: str, count: int = 5) -> list[dict[str, str]]:
+    """Articles in this wiki matching the query: [{title, url, snippet}]."""
+    import urllib.parse
+    data = _wiki_api(base, {"action": "query", "list": "search", "srsearch": query, "srlimit": str(count)})
+    out = []
+    for r in (data.get("query") or {}).get("search", []):
+        title = r.get("title", "")
+        out.append({"title": title, "url": f"{base}/wiki/{urllib.parse.quote(title.replace(' ', '_'))}",
+                    "snippet": html_to_text(r.get("snippet", ""))})
+    return out
+
+
+def wiki_article(base: str, title: str) -> str:
+    """An article's text without the site around it (menus, ads, other pages' links)."""
+    data = _wiki_api(base, {"action": "parse", "page": title, "prop": "text", "redirects": "1"})
+    html_text = ((data.get("parse") or {}).get("text") or {}).get("*", "")
+    if not html_text:
+        raise FunctionError(f"no article '{title}' in that wiki")
+    html_text = re.sub(r'(?is)<(table|div)[^>]*class="[^"]*\b(navbox|toc|mw-references-wrap|reflist)\b.*?</\1>', " ",
+                       html_text)
+    return html_to_text(html_text)

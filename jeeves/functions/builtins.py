@@ -215,15 +215,20 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
         except Exception:  # noqa: BLE001
             f = None
         frect = mp.rect_to_image((f.x, f.y, f.w, f.h)) if f and f.w and f.h else None
+        wins = _windows_in_image(dk, mp, f)
         for b in blocks:
             b["where"] = _describe_position(ctx, *mp.point(b["x"] + b["w"] / 2, b["y"] + b["h"] / 2), outs=outs)
             b["focused"] = bool(frect and sc._inside(b, frect))
+            b["app"] = next((w["name"] for w in wins if sc._inside(b, w["rect"])), "")
+            if b["app"]:
+                b["where"] += f", in {b['app']}"
         app = f"The window they're using: {f.app} -- {f.title}\n" if f else ""
+        app += _app_hints({b["app"] for b in blocks} | {f.app if f else ""} | {w["name"] for w in wins})
         vision = ctx.engine.models.vision_llm(ctx.agent)
         if not blocks and vision is None:
             return ctx.say("I can't read any text there." if region != "anywhere" else
                            "I can't read any text on the screen right now.")
-        picked = _pick_blocks(ctx, question, blocks, app) if blocks else []
+        picked = _with_neighbours(blocks, _pick_blocks(ctx, question, blocks, app)) if blocks else []
         ctx.state("thinking", "Reading it closely")
         pieces = []
         for b in picked:
@@ -244,7 +249,10 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
                 f"You looked at the user's screen, found the part that matters and read it closely (OCR of an "
                 f"enlarged crop -- small recognition mistakes are still possible: fix obvious ones silently and "
                 f"never repeat garbled fragments; if a bit is unreadable, just skip it).\n\n{app}{text[:6000]}\n\n"
-                f"The user said: {q}\n\nAnswer what they asked from this. If they asked you to read something, read "
+                f"Everything else on the screen at a glance (rough OCR, only to understand the layout -- which app "
+                f"is where, what's next to what):\n{_glance(blocks, picked)}\n\n"
+                f"The user said: {q}\n\nThink about what the screen shows -- the apps, what kind of list or view "
+                "each part is, what belongs to what -- then answer what they asked. If they asked you to read something, read "
                 "it naturally and in a sensible order -- skip usernames, timestamps, buttons and menus unless they "
                 "matter, and summarize instead of reading word for word when that serves them better. If what "
                 "they asked about isn't there, say so.",
@@ -262,6 +270,83 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
         shot.unlink(missing_ok=True)
 
 
+APP_HINTS = {
+    "discord": "In Discord: the server's channels are in the left sidebar; the people in a voice channel are listed "
+               "right under that voice channel's name (indented, with avatars); 'Voice Connected' near the bottom "
+               "left shows the call the user is in, and a call opened in the main area shows its participants as "
+               "tiles with names. The member list on the right groups people under role headers like "
+               "'Developer — 1' (role name — how many online), with each member's name listed right below its "
+               "header. Messages show the author's name, then the time, then the message.",
+    "steam": "In Steam: the library list is on the left; friends are in the Friends & Chat window, grouped as In-Game, "
+             "Online and Offline.",
+    "spotify": "In Spotify: what's playing is in the bar at the bottom (title, then artist).",
+    "firefox": "A web browser: the page's own content is in the middle; tabs are along the top.",
+    "chrom": "A web browser: the page's own content is in the middle; tabs are along the top.",
+}
+
+
+def _app_hints(apps: set[str]) -> str:
+    seen, out = set(), []
+    for a in apps:
+        for key, hint in APP_HINTS.items():
+            if a and key in a.lower() and hint not in seen:
+                seen.add(hint)
+                out.append(hint)
+    return ("How these apps are laid out:\n" + "\n".join(out) + "\n") if out else ""
+
+
+def _windows_in_image(dk, mp, focused) -> list[dict]:
+    """Visible windows as image rectangles with readable names, the focused one first, then smallest
+    first (a small window on top of a big one is more likely what's showing there)."""
+    try:
+        ws = [w for w in dk.windows() if w.w > 40 and w.h > 40]
+    except Exception:  # noqa: BLE001
+        ws = [focused] if focused else []
+    names = {"discord": "Discord", "vesktop": "Discord", "webcord": "Discord", "steam": "Steam",
+             "spotify": "Spotify", "firefox": "Firefox", "chromium": "Chromium", "google-chrome": "Chrome",
+             "brave-browser": "Brave", "code": "VS Code", "konsole": "the terminal", "alacritty": "the terminal",
+             "kitty": "the terminal", "org.kde.dolphin": "the file manager", "obs": "OBS"}
+    out = []
+    for w in sorted(ws, key=lambda w: (not w.focused, w.w * w.h)):
+        app = (w.app or "").lower()
+        name = next((v for k, v in names.items() if k in app), "") or (w.app or "").split(".")[-1]
+        if "discord" in (w.title or "").lower():
+            name = "Discord"
+        out.append({"rect": mp.rect_to_image((w.x, w.y, w.w, w.h)), "name": name or "a window"})
+    return out
+
+
+HEADER = re.compile(r"^[^\n]{1,40}\s[—–-]\s*\d+$|^[A-Z][A-Z0-9 &'-]{2,30}$")
+
+
+def _with_neighbours(blocks: list[dict], picked: list[dict], per_block: int = 6) -> list[dict]:
+    """The picked blocks plus what's listed right under them in the same column: picking a header
+    ("Developer — 1") brings the names under it; picking a list entry brings the rest of its group."""
+    out: list[dict] = []
+    for b in picked:
+        if b in out:
+            continue
+        out.append(b)
+        cur, added = b, 0
+        while added < per_block:
+            lh = max(8.0, cur["h"] / max(1, cur["lines"]))
+            below = [c for c in blocks if c not in out and c.get("app") == b.get("app") and
+                     0 <= c["y"] - (cur["y"] + cur["h"]) <= 2.6 * lh and abs(c["x"] - cur["x"]) <= 4 * lh]
+            if not below:
+                break
+            nxt = min(below, key=lambda c: c["y"])
+            if HEADER.match(nxt["text"].split("\n")[0].strip()):
+                break                                      # the next group starts
+            out.append(nxt)
+            cur, added = nxt, added + 1
+    return out[:MAX_PICKED_BLOCKS + 6]
+
+
+def _glance(blocks: list[dict], picked: list[dict]) -> str:
+    lines = [f"- ({b['where']}) {b['text'][:70].replace(chr(10), ' / ')}" for b in blocks[:70] if b not in picked]
+    return "\n".join(lines)[:3000] or "(nothing else)"
+
+
 def _pick_blocks(ctx, question: str, blocks: list[dict], app: str) -> list[dict]:
     """The blocks the question is about, in reading order -- chosen by the model from an outline."""
     import re as _re
@@ -273,7 +358,9 @@ def _pick_blocks(ctx, question: str, blocks: list[dict], app: str) -> list[dict]
         f"Text found on the user's screen, as numbered blocks (where each is; * = in the window they're using):\n"
         f"{outline}\n\n{app}The user asked: {question or 'read my screen'}\n\nWhich blocks are needed to answer? "
         "List their numbers in the order they should be read (a conversation oldest to newest, unless they asked "
-        "about the latest message). Leave out menus, sidebars and anything unrelated. Reply with the numbers only, "
+        "about the latest message). When the answer is a list under a header (people under a role, users in a voice "
+        "channel), pick the header AND the entries under it. Leave out anything unrelated -- menus and sidebars "
+        "too, unless the question is about what's in them. Reply with the numbers only, "
         "like: 4, 7, 2. Reply ALL to read everything in the window they're using, or NONE if nothing fits.",
         ctx=None, raw=True)
     if reply is not None:
@@ -398,7 +485,8 @@ def watch_screen(ctx, action="start", screen="all", talkativeness=None, focus=""
     return "stopped watching"
 
 
-VIDEO_ACTIONS = ["play", "pause", "resume", "stop", "forward", "back", "louder", "quieter", "fullscreen"]
+VIDEO_ACTIONS = ["play", "pause", "resume", "stop", "forward", "back", "louder", "quieter", "fullscreen", "faster",
+                 "slower", "next_chapter", "previous_chapter"]
 
 
 @full(
@@ -410,8 +498,9 @@ VIDEO_ACTIONS = ["play", "pause", "resume", "stop", "forward", "back", "louder",
           Arg("channel", "string", "Whose channel (for play), as said", required=False, default=""),
           Arg("newest", "boolean", "Their newest upload", required=False, default=False),
           Arg("seconds", "number", "For forward/back: how far", required=False, default=None)],
-    how="yt-dlp finds the channel or searches YouTube and gets the streams (up to 1080p); the player opens on "
-        "screen. Needs yt-dlp.",
+    how="yt-dlp finds the exact channel (its @handle, else YouTube's channel search) and its newest uploads, or "
+        "searches YouTube -- inside the channel when one is named -- and picks the video whose title best fits the "
+        "description. The player opens fullscreen with speed, quality, chapters and frame stepping. Needs yt-dlp.",
     keywords=["youtube", "pull up the video", "play the video", "newest video", "latest video", "pause the video",
               "resume the video", "close the video"],
     examples=["Jeeves, pull up the newest video from moist critikal.", "Jeeves, play lofi hip hop on YouTube.",
@@ -438,7 +527,8 @@ def youtube(ctx, action="play", query="", channel="", newest=False, seconds=None
     s = yt.streams(v["url"], int(ctx.settings.get("youtube.max_height", 1080)))
     eng.publish("video", {"action": "play", "title": s["title"] or v["title"], "channel": s["channel"] or v["channel"],
                           "video": s["video"], "audio": s["audio"], "page": s["page"], "duration": s["duration"],
-                          "agent": ctx.agent_id})
+                          "height": s.get("height"), "heights": s.get("heights"), "fps": s.get("fps"),
+                          "chapters": s.get("chapters"), "agent": ctx.agent_id})
     eng.video_state.update(playing=True, title=s["title"] or v["title"], page=s["page"])
     ctx.entry["sources"] = [{"n": 1, "title": s["title"] or v["title"], "url": s["page"], "text": v["channel"]}]
     return ctx.say(f"Here's {s['title'] or v['title']} from {s['channel'] or v['channel']}.")
@@ -581,14 +671,17 @@ def research(ctx, question, depth=""):
         return f"<researched answer to: {question}>"
     question = str(question)
     ctx.say(random.choice(ACKS))                 # looking things up takes a while: say so right away
+    original = ctx.engine.intent.strip_address(ctx.agent, ctx.entry.get("text") or "") or question
     try:
-        sources, results = run(ctx, question, depth or None)
+        sources, _, notes = run(ctx, question, depth or None)
     except FunctionError as exc:
         ctx.think(f"Research failed: {exc}")
-        sources, results = [], []
+        sources, _, notes = [], [], []
+    learned = ("What you learned along the way (context):\n" + "\n".join(f"- {n}" for n in notes) + "\n\n") \
+        if notes else ""
     if not sources:                              # nothing online: answer from what it knows, and say so
         reply = ctx.engine.models.respond(
-            ctx.agent, f"{question}\n\n(You couldn't look this up online just now. If you genuinely know the "
+            ctx.agent, f"{learned}{original}\n\n(You couldn't look this up online just now. If you genuinely know the "
             "answer, give it and say briefly that you couldn't check it. If it's about something specific you "
             "don't clearly know -- a particular game's moves or items, a small community, a recent event -- do NOT "
             "guess or make something up: say you couldn't look it up and don't know.)", ctx=ctx)
@@ -600,10 +693,10 @@ def research(ctx, question, depth=""):
     ctx.state("thinking", "Writing the answer")
     answer = ctx.engine.models.respond(
         ctx.agent,
-        f"Question: {question}\n\nSources:\n{material}\n\n"
-        "Using only these sources, answer exactly what was asked -- nothing more. First check that the sources "
+        f"The user asked: {original}\n(Put clearly: {question})\n\n{learned}Sources:\n{material}\n\n"
+        "Using only these sources (and the context above), answer exactly what the user asked -- nothing more. First check that the sources "
         "are about the same thing (the same game, item or person); ignore ones that aren't, and if none are, say "
-        f"you couldn't find it. {_answer_shape(question)} Leave out history, background, how it works and anything "
+        f"you couldn't find it. {_answer_shape(original + ' ' + question)} Leave out history, background, how it works and anything "
         "about the game or topic in general unless they asked for it. After each fact put the number of the "
         "source it came from in square brackets, like [2]. Don't add facts the sources don't give: if they only "
         "partly answer it, say what's missing in one sentence.",

@@ -123,6 +123,10 @@ DEFAULTS: dict[str, Any] = {
         # Minimum untouched: what the AIs must always leave for everything else. Limits what
         # gets loaded (and how) and what the Models page recommends.
         "keep_free": {"ram_gb": 4.0, "vram_gb": 1.0, "cpu_threads": 1, "gpu_percent": 0},
+        # Hybrid Models: a lighter set while other programs need the computer (jeeves.models.hybrid).
+        # Per kind: "auto" (a smaller downloaded model), "same", "off" (vision only) or a model id.
+        "hybrid": {"enabled": True, "stt": "auto", "intent": "auto", "local_response": "auto", "vision": "off",
+                   "cpu_percent": 60, "gpu_percent": 50, "ram_free_gb": 3.0, "switch_after": 8, "back_after": 45},
     },
     "audio": {
         "microphone": "",                 # PipeWire/Pulse source; "" = default
@@ -180,7 +184,7 @@ DEFAULTS: dict[str, Any] = {
     "research": {"engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000,
                  "depth": "normal",            # quick (1 round, 3 pages) | normal (2 rounds, 5) | deep (3, 8)
                  "auto_for_facts": True,       # factual questions (games, products, people...) get researched
-                 "max_seconds": 45},           # stop reading more pages after this long
+                 "max_seconds": 90},           # stop reading more pages after this long
     "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"]},
     # Watch the screen: seconds between looks (backs off while nothing changes), how chatty, time limit
     "watch": {"interval": 2.0, "talkativeness": 0.5, "max_minutes": 120},

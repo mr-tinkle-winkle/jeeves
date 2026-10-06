@@ -58,6 +58,9 @@ class ModelManager:
         self.gpu_offload: dict[str, dict[str, Any]] = {}     # model id -> last Auto GPU layers decision
         self._cancel: dict[str, threading.Event] = {}
         self.wake: VoskWake | None = None
+        from .hybrid import Hybrid
+        self.hybrid = Hybrid(settings)
+        self.busy: Callable[[], bool] = lambda: False      # the engine says when Jeeves itself is working
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._watch, daemon=True, name="jeeves-model-watch")
 
@@ -76,6 +79,12 @@ class ModelManager:
 
     # ---- choice ----------------------------------------------------------
     def model_id(self, kind: str, agent: dict[str, Any] | None = None) -> str | None:
+        """The model for this kind (and agent) right now -- the light one while Hybrid Models has
+        switched to it."""
+        return self.hybrid.model_for(kind, self.chosen_id(kind, agent), is_installed)
+
+    def chosen_id(self, kind: str, agent: dict[str, Any] | None = None) -> str | None:
+        """The model picked in settings (or by the agent), whatever Hybrid Models is doing."""
         if agent:
             override = (agent.get("models") or {}).get(kind)
             if override:
@@ -467,7 +476,7 @@ class ModelManager:
         for kind in KINDS:
             mid = self.model_id(kind)
             entry = catalog.get(mid)
-            kinds[kind] = {"model": mid, "installed": bool(entry and is_installed(entry)),
+            kinds[kind] = {"model": mid, "chosen": self.chosen_id(kind), "installed": bool(entry and is_installed(entry)),
                            "loaded": mid in loaded, "suspended_by": self.suspended.get(kind)}
         return {
             "kinds": kinds,
@@ -481,6 +490,8 @@ class ModelManager:
             "gpu_offload": self.gpu_offload,
             "downloads": self.downloads,
             "loaded": sorted(loaded),
+            "hybrid": {"enabled": self.hybrid.enabled(), "light": self.hybrid.light, "reason": self.hybrid.reason,
+                       "usage": self.hybrid.last},
         }
 
     # ---- app-based unloading ----------------------------------------------
@@ -490,6 +501,19 @@ class ModelManager:
                 self._apply_app_rules()
             except Exception:
                 log.exception("model watcher failed")
+            try:
+                self.check_hybrid()
+            except Exception:
+                log.exception("Hybrid Models check failed")
+
+    def check_hybrid(self) -> bool:
+        """Switch between the full and the light models when usage calls for it; the models that are
+        no longer wanted are unloaded straight away."""
+        if not self.hybrid.step(bool(self.busy())):
+            return False
+        self.prune()
+        self.publish("models", self.status())
+        return True
 
     def _apply_app_rules(self) -> None:
         rules = {k: self.settings.get(f"models.{k}.unload_when_open", []) or [] for k in KINDS}

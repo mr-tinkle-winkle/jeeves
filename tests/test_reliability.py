@@ -230,8 +230,9 @@ def test_screen_reading_picks_the_relevant_part_and_reads_it_closely(engine, mon
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
     ctx.call("screen_reading", question="what did dan say")
     answer_prompt = prompts[-1]
-    assert "build the bridge tonight" in answer_prompt and "iron plates" in answer_prompt
-    assert "Options" not in answer_prompt                       # only the part that matters
+    zoomed, glance = answer_prompt.split("Everything else on the screen")
+    assert "build the bridge tonight" in zoomed and "iron plates" in zoomed
+    assert "Options" not in zoomed and "Options" in glance       # read closely: only the part that matters
     assert said == ["Dan wants to build the bridge tonight and says to bring iron plates."]
 
 
@@ -433,3 +434,242 @@ def test_name_tail_alone_is_not_the_request(engine):
     quiet = b"\0" * audio.FRAME_BYTES
     engine._start_listen("microphone", "jeeves", "jeeves", [loud] * 8 + [quiet] * 6, None, 0)
     assert not engine.sessions["microphone"].got_speech
+
+
+def test_research_learns_the_context_then_reads_the_games_wiki(engine, monkeypatch):
+    """How do I do a wumpy in Parkour Reborn -> what is Parkour Reborn -> a movement game, with a wiki ->
+    the wiki's Wumpy article -> the steps, answering the original question."""
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    from jeeves.functions.partials import web
+    searched, wiki_queries = [], []
+
+    def search(settings, q, n, problems=None):
+        searched.append(q)
+        if q.lower().startswith("parkour reborn"):
+            return [{"title": "Parkour Reborn Wiki | Fandom", "url": "https://parkour-reborn.fandom.com/wiki/Parkour_Reborn_Wiki",
+                     "snippet": "Parkour Reborn is a Roblox parkour movement game."}]
+        return [{"title": "Abilities", "url": "https://other.example/abilities", "snippet": "combat abilities"}]
+    monkeypatch.setattr(web, "search", search)
+    monkeypatch.setattr(web, "request_website", lambda ctx, url, **kw:
+                        "Parkour Reborn is a Roblox parkour game about movement: wallruns, vaults and tricks. " * 5)
+
+    def wiki_search(base, q, count=5):
+        wiki_queries.append((base, q))
+        return [{"title": "Movement", "url": f"{base}/wiki/Movement", "snippet": ""},
+                {"title": "Wumpy", "url": f"{base}/wiki/Wumpy", "snippet": ""}]
+    articles = {"Movement": "Movement covers running, wallrunning and vaulting. " * 20,
+                "Wumpy": "A Wumpy is done by wallrunning, jumping off and wallrunning again within 0.5 s. " * 5}
+    monkeypatch.setattr(web, "wiki_search", wiki_search)
+    monkeypatch.setattr(web, "wiki_article", lambda base, title: articles[title])
+    prompts = []
+
+    def respond(agent, prompt, **kw):
+        prompts.append(prompt)
+        if "break this question down" in prompt:
+            return "GOAL: How do I perform a wumpy in Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy"
+        if "what Parkour Reborn is" in prompt:
+            return "Parkour Reborn is a Roblox parkour movement game."
+        if "web search queries" in prompt:
+            return "GUESS: a wumpy is probably a movement technique\nparkour reborn wumpy movement\nwumpy wallrun"
+        if "actually answer the question" in prompt:
+            return "ANSWERED: 1" if "within 0.5 s" in prompt else "MORE"
+        return "Wallrun, jump off, then wallrun again within half a second [1]."
+    monkeypatch.setattr(engine.models, "respond", respond)
+    said = []
+    engine.speak = lambda ctx, t: said.append(t)
+    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"],
+                          new_entry("how do I do a wumpy in parkour reborn", "jeeves", "text"))
+    ctx.call("research", question="Parkour Reborn Wiki movement section and explain Wumpy to me", depth="deep")
+    assert searched[0] == "Parkour Reborn"                               # the context first
+    assert wiki_queries and wiki_queries[0] == ("https://parkour-reborn.fandom.com", "wumpy")
+    assert [s["title"] for s in ctx.entry["sources"]] == ["Wumpy"]      # straight to the article that answers it
+    final = prompts[-1]
+    assert "how do I do a wumpy in parkour reborn" in final            # answers the ORIGINAL question
+    assert "Roblox parkour movement game" in final and "give the steps in order" in final
+    assert said[-1] == "Wallrun, jump off, then wallrun again within half a second."
+
+
+def test_wiki_base_detection():
+    from jeeves.functions.partials.web import wiki_base
+    assert wiki_base("https://parkour-reborn.fandom.com/wiki/Wumpy") == "https://parkour-reborn.fandom.com"
+    assert wiki_base("https://terraria.wiki.gg/wiki/Zenith") == "https://terraria.wiki.gg"
+    assert wiki_base("https://minecraft.fandom.com/es/wiki/Creeper") == "https://minecraft.fandom.com/es"
+    assert wiki_base("https://www.reddit.com/r/roblox/") is None
+
+
+# ---------------------------------------------------------------- interrupting
+def _busy_ctx(engine):
+    from jeeves.daemon.audio import Playback
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("tell me a story", "jeeves", "voice"))
+    ctx.playback = Playback(b"\0" * 32000, 16000, [""])
+    ctx.saying = "Once upon a time there was a knight."
+    engine.active[ctx.entry["id"]] = ctx
+    return ctx
+
+
+def test_calling_the_name_while_it_talks_interrupts_even_with_a_lower_score(engine):
+    ctx = _busy_ctx(engine)
+    engine.on_wake("microphone", "jeeves", 0.4, [])          # its own voice lowers the score (threshold 0.6)
+    s = engine.sessions.get("microphone")
+    assert s is not None and s.interrupting == [ctx.entry["id"]]
+    assert ctx.suspend_event.is_set() and ctx.playback.paused.is_set()      # speech paused mid-sentence
+
+
+def test_interrupt_from_the_menu_listens_right_away(engine):
+    ctx = _busy_ctx(engine)
+    assert engine.interrupt(ctx.entry["id"])
+    s = engine.sessions["microphone"]
+    assert s.agent_id == "jeeves" and s.interrupting == [ctx.entry["id"]] and ctx.suspend_event.is_set()
+    engine.end_session(s)                                     # nothing said: it carries on
+    assert not ctx.suspend_event.is_set()
+
+
+def test_hearing_itself_only_when_it_says_its_own_name(engine):
+    ctx = _busy_ctx(engine)
+    assert not engine._hears_itself("jeeves", "jeeves")
+    ctx.saying = "Jeeves at your service."
+    assert engine._hears_itself("jeeves", "jeeves")
+
+
+def _discord_screen(tmp_path):
+    from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter
+    app = QGuiApplication.instance() or QGuiApplication([])       # noqa: F841
+    img = QImage(1280, 600, QImage.Format_RGB32)
+    img.fill(QColor(49, 51, 56))
+    p = QPainter(img)
+    p.fillRect(0, 0, 240, 600, QColor(43, 45, 49))                # channels
+    p.fillRect(1040, 0, 240, 600, QColor(43, 45, 49))             # members
+    font = QFont("DejaVu Sans")
+    font.setPixelSize(15)
+    p.setFont(font)
+    p.setPen(QColor(220, 222, 225))
+    for i, t in enumerate(["# general", "# clips"]):
+        p.drawText(16, 40 + i * 30, t)
+    p.drawText(16, 160, "Lobby")
+    p.drawText(44, 188, "Blue")
+    p.drawText(44, 214, "Dan")
+    p.drawText(16, 300, "# memes")
+    p.drawText(1056, 40, "Developer — 1")
+    p.drawText(1070, 72, "mrtw")
+    p.drawText(1056, 160, "Online — 2")
+    p.drawText(1070, 192, "Lijun")
+    p.drawText(300, 60, "Blue")
+    p.drawText(300, 84, "anyone up for satisfactory later")
+    p.end()
+    path = tmp_path / "discord.png"
+    img.save(str(path))
+    return path
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None, reason="needs tesseract")
+@pytest.mark.parametrize("question,pick,want,not_want", [
+    ("who is a developer in the server", "Developer", "mrtw", "Lijun"),
+    ("who am I in a discord call with", "Lobby", "Dan", "satisfactory"),
+])
+def test_screen_reading_understands_lists_not_just_text(engine, monkeypatch, tmp_path, question, pick, want,
+                                                         not_want):
+    pytest.importorskip("PySide6")
+    from types import SimpleNamespace
+    from jeeves.daemon import desktop as dk
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    from jeeves.functions.partials import screen as sc
+    src = _discord_screen(tmp_path)
+    monkeypatch.setattr(sc, "screenshot", lambda: Path(shutil.copy(src, tmp_path / "shot.png")))
+    monkeypatch.setattr(dk, "outputs", lambda: [])
+    win = SimpleNamespace(app="discord", title="#general | My Server - Discord", x=0, y=0, w=1280, h=600,
+                          focused=True)
+    monkeypatch.setattr(dk, "focused", lambda: win)
+    monkeypatch.setattr(dk, "windows", lambda: [win])
+    monkeypatch.setattr(engine.models, "vision_llm", lambda agent=None: None)
+    prompts = []
+
+    def respond(agent, prompt, **kw):
+        prompts.append(prompt)
+        if "Which blocks" in prompt:            # a model that only picks the header / the channel name
+            line = next(ln for ln in prompt.splitlines() if pick in ln and ln.startswith("["))
+            return line[1:line.index("]")]
+        return "ok"
+    monkeypatch.setattr(engine.models, "respond", respond)
+    engine.speak = lambda ctx, t: None
+    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
+    ctx.call("screen_reading", question=question)
+    answer_prompt = prompts[-1]
+    zoomed = answer_prompt.split("Everything else on the screen")[0]
+    assert want in zoomed and not_want not in zoomed                 # the entries under it came along
+    assert "in Discord" in zoomed and "people in a voice channel are listed" in answer_prompt
+
+
+# ---------------------------------------------------------------- Hybrid Models
+def test_hybrid_switches_to_light_models_under_load_and_back(engine, monkeypatch):
+    from jeeves.models import hybrid, manager
+    usage = {"cpu_others": 10.0, "gpu": 5.0, "ram_free_mb": 20000}
+    h = hybrid.Hybrid(engine.settings, sampler=lambda busy: dict(usage))
+    engine.models.hybrid = h
+    installed = {"qwen3-8b", "qwen3-1.7b", "whisper-small-en", "whisper-base-en", "qwen2.5-vl-7b"}
+    monkeypatch.setattr(manager, "is_installed", lambda e: e.id in installed)
+    engine.settings.set_many({"models.local_response.model": "qwen3-8b", "models.intent.model": "qwen3-1.7b",
+                              "models.vision.model": "qwen2.5-vl-7b"})
+    assert engine.models.model_id("local_response") == "qwen3-8b"
+    t = 1000.0
+    assert not h.step(now=t)
+    usage["cpu_others"] = 85.0                               # a game starts
+    assert not h.step(now=t + 1)                             # a spike isn't enough
+    assert h.step(now=t + 10) and h.light and "CPU" in h.reason
+    assert engine.models.model_id("local_response") == "qwen3-1.7b"   # the smaller downloaded model
+    assert engine.models.model_id("intent") == "qwen3-1.7b"           # already small: stays
+    assert engine.models.model_id("vision") is None                   # off: OCR instead
+    assert engine.models.chosen_id("local_response") == "qwen3-8b"
+    usage["cpu_others"] = 5.0
+    assert not h.step(now=t + 20)
+    assert h.step(now=t + 70) and not h.light
+    assert engine.models.model_id("local_response") == "qwen3-8b"
+
+
+def test_hybrid_unloads_the_big_models_when_it_switches(engine, monkeypatch):
+    from jeeves.models import hybrid, manager
+    usage = {"cpu_others": 90.0, "gpu": None, "ram_free_mb": 20000}
+    engine.models.hybrid = hybrid.Hybrid(engine.settings, sampler=lambda busy: dict(usage))
+    monkeypatch.setattr(manager, "is_installed", lambda e: e.id in {"qwen3-8b", "qwen3-1.7b"})
+    engine.settings.set_many({"models.local_response.model": "qwen3-8b", "models.hybrid.switch_after": 0})
+    unloaded = []
+    big = type("Inst", (), {"loaded": lambda self: True, "unload": lambda self: unloaded.append("qwen3-8b")})()
+    engine.models.instances["qwen3-8b"] = big
+    assert engine.models.check_hybrid()
+    assert unloaded == ["qwen3-8b"] and "qwen3-8b" not in engine.models.instances
+
+
+def test_hybrid_off_keeps_the_chosen_models(engine):
+    from jeeves.models import hybrid
+    h = hybrid.Hybrid(engine.settings, sampler=lambda busy: {"cpu_others": 99.0, "gpu": 99.0, "ram_free_mb": 1})
+    engine.settings.set("models.hybrid.enabled", False)
+    assert not h.step(now=0) and not h.step(now=100) and not h.light
+
+
+def test_a_vision_model_is_recommended():
+    from jeeves.models import hardware
+    hw = {"ram_mb": 32000, "vram_mb": 12000, "cpu_threads": 16, "gpus": [{"name": "GPU", "vram_mb": 12000}],
+          "gpu_usable": True, "gpu_share": 1.0, "llama_gpu": ["vulkan"], "whisper_gpu": True}
+    picks = hardware.recommend(hw)["picks"]
+    assert "vision" in picks and picks["vision"]["id"] in {"qwen2.5-vl-7b", "gemma3-12b-vision", "gemma3-4b-vision",
+                                                           "qwen2.5-vl-3b"}
+
+
+# ---------------------------------------------------------------- routing
+@pytest.mark.parametrize("text,function", [
+    ("Jeeves, how do I do a wumpy in parkour reborn", "research"),
+    ("Jeeves, what is a wumpy in parkour reborn", "research"),
+    ("Jeeves, who am I in a discord call with", "screen_reading"),
+    ("Jeeves, who is a developer in the server on my left monitor", "screen_reading"),
+    ("Jeeves, how many people are in my discord call", "screen_reading"),
+    ("Jeeves, how are you doing", "local_response"),
+    ("Jeeves, what do you think about pineapple pizza", "local_response"),
+])
+def test_routing_without_a_model(engine, text, function):
+    d = engine.intent.decide(dict(engine.agents()["jeeves"], id="jeeves"), text)
+    assert d.function == function, d
+    if function == "screen_reading" and "left monitor" in text:
+        assert d.args["screen"] == "left"

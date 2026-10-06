@@ -222,6 +222,13 @@ class IntentProcessor:
             if m:
                 act = {"unpause": "resume", "close": "stop"}.get(m.group(1), m.group(1))
                 return Decision("youtube", {"action": act}, 0.95, "", "rules")
+            if getattr(self, "video_playing", lambda: False)():
+                m = re.match(r"^(?:go\s+to\s+the\s+|skip\s+to\s+the\s+)?(next|previous|last)\s+chapter$|"
+                             r"^(speed\s+(?:it\s+)?up|faster|slow\s+(?:it\s+)?down|slower)$", low.strip(" .!"))
+                if m:
+                    act = ("next_chapter" if m.group(1) == "next" else "previous_chapter") if m.group(1) else \
+                        ("faster" if re.search(r"up|faster", m.group(2)) else "slower")
+                    return Decision("youtube", {"action": act}, 0.9, "", "rules")
             m = re.match(r"^(skip|go|jump|fast forward|rewind|go back)\s*(ahead|forward|back(wards?)?)?\s*(\d+)?\s*"
                          r"(seconds?|secs?|minutes?|mins?)?$", low)
             if m and getattr(self, "video_playing", lambda: False)():
@@ -374,7 +381,10 @@ SCREEN_PATTERN = (r"\b(on|of|at|in)\s+(my|the|this|that)\s+(\w+\s+)?(screen|moni
                   r"\bwhat\s+(is|'s)\s+(this|that)\s+(error|message|popup|dialog|window)\b|"
                   r"\b(can|do)\s+you\s+see\s+(my|the)\s+screen\b|\blook\s+at\s+(my|the|this)\s+screen\b|"
                   r"\bwhat\s+am\s+i\s+looking\s+at\b|"
-                  r"\bwhere('s|\s+is)\s+the\s+.+\s+(button|icon|link|tab|error|message|window|menu|field|box|popup)\b")
+                  r"\bwhere('s|\s+is)\s+the\s+.+\s+(button|icon|link|tab|error|message|window|menu|field|box|popup)\b|"
+                  # what's going on in an app that's open: a call, a server's members, a chat
+                  r"\b(who|what|how many)\b.*\b(discord|voice (chat|channel)|(in|on) (a|the|my|this) (call|server|chat|lobby)|"
+                  r"call with|online right now|in my (call|server|chat|lobby))\b")
 
 
 def guess_screen(low: str) -> str:

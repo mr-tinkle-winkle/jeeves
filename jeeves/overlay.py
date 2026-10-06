@@ -379,9 +379,11 @@ def main(popups: bool = False) -> int:
                 self.menu = None
                 return
             st = self.states[m["rid"]]
-            items = [("suspend", "Resume" if st.get("suspended") else "Suspend"), ("close", "Close")]
+            items = [] if st.get("stage") == "listening" else [("thoughts", "Observe Thoughts"),
+                                                                ("interrupt", "Interrupt")]
+            items += [("suspend", "Resume" if st.get("suspended") else "Suspend"), ("close", "Close")]
             anchor: QRectF = m["anchor"]
-            w, ih = 150.0, 32.0
+            w, ih = 170.0, 32.0
             x = anchor.left() - w - 8 if right else anchor.right() + 8
             box = QRectF(x, anchor.top(), w, ih * len(items) + 8)
             p.setPen(Qt.NoPen)
@@ -572,8 +574,13 @@ def main(popups: bool = False) -> int:
             hit = self._hit(e.position())
             self.hold_timer.stop()
             if hit and hit[0].startswith("menu:"):
-                method = "request.suspend" if hit[0] == "menu:suspend" else "request.close"
-                daemon.call(method, None, lambda _e: None, request=hit[1])
+                action, rid = hit[0][5:], hit[1]
+                if action == "thoughts":
+                    open_popup("thoughts", request=rid, state=self.states.get(rid, {}))
+                else:
+                    method = {"suspend": "request.suspend", "close": "request.close",
+                              "interrupt": "request.interrupt"}[action]
+                    daemon.call(method, None, lambda _e: None, request=rid)
                 self.menu = None
                 self.update()
                 return
@@ -811,176 +818,6 @@ def main(popups: bool = False) -> int:
                 from PySide6.QtGui import QDesktopServices
                 QDesktopServices.openUrl(url)
 
-    class VideoPlayer(QWidget):
-        """The Jeeves video player: separate video + audio streams (up to 1080p) kept in sync, or one
-        combined stream. Space = pause, arrows = seek 10 s / volume, F = fullscreen, Esc = close.
-        Voice: "pause the video", "skip ahead 30 seconds", "louder", "close the video"."""
-        current: "VideoPlayer | None" = None
-
-        def __init__(self) -> None:
-            super().__init__(None, Qt.Window)
-            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-            from PySide6.QtMultimediaWidgets import QVideoWidget
-            from PySide6.QtWidgets import QPushButton, QSlider
-            self.setWindowTitle("Jeeves — video")
-            self.setStyleSheet("QWidget { background: #000; color: #eee; } QPushButton { background: #222; "
-                               "border: 1px solid #444; border-radius: 6px; padding: 4px 10px; } "
-                               "QPushButton:hover { background: #333; }")
-            lay = QVBoxLayout(self)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(0)
-            self.title = QLabel("")
-            self.title.setStyleSheet("QLabel { font-size: 15px; font-weight: bold; padding: 8px 12px; }")
-            lay.addWidget(self.title)
-            self.screen_w = QVideoWidget()
-            lay.addWidget(self.screen_w, 1)
-            bar = QHBoxLayout()
-            bar.setContentsMargins(10, 6, 10, 8)
-            bar.setSpacing(10)
-            self.play_btn = QPushButton("Pause")
-            self.play_btn.clicked.connect(self.toggle)
-            self.pos = QSlider(Qt.Horizontal)
-            self.pos.sliderMoved.connect(lambda v: self.seek_to(v))
-            self.time = QLabel("0:00 / 0:00")
-            self.vol = QSlider(Qt.Horizontal)
-            self.vol.setRange(0, 100)
-            self.vol.setValue(80)
-            self.vol.setFixedWidth(110)
-            self.vol.valueChanged.connect(self._volume)
-            open_btn = QPushButton("YouTube")
-            open_btn.clicked.connect(self._open_page)
-            full_btn = QPushButton("Fullscreen")
-            full_btn.clicked.connect(self.fullscreen)
-            close_btn = QPushButton("Close")
-            close_btn.clicked.connect(self.close)
-            for w in (self.play_btn, self.pos, self.time, QLabel("  Volume"), self.vol, open_btn, full_btn, close_btn):
-                bar.addWidget(w, 1 if w is self.pos else 0)
-            lay.addLayout(bar)
-            self.video = QMediaPlayer(self)
-            self.video_out = QAudioOutput(self)
-            self.video.setAudioOutput(self.video_out)
-            self.video.setVideoOutput(self.screen_w)
-            self.audio = QMediaPlayer(self)
-            self.audio_out = QAudioOutput(self)
-            self.audio.setAudioOutput(self.audio_out)
-            self.video.durationChanged.connect(lambda d: self.pos.setRange(0, int(d)))
-            self.video.positionChanged.connect(self._tick)
-            self.video.errorOccurred.connect(lambda _e, msg: self.title.setText(f"Couldn't play it: {msg}"))
-            self.sync = QTimer(self)
-            self.sync.setInterval(500)
-            self.sync.timeout.connect(self._sync)
-            self.page = ""
-            self.split = False
-            self.resize(1100, 680)
-
-        def play(self, d: dict[str, Any]) -> None:
-            from PySide6.QtCore import QUrl
-            self.page = d.get("page", "")
-            self.title.setText(f"{d.get('title', '')}  —  {d.get('channel', '')}")
-            self.split = bool(d.get("audio"))
-            self.video.setSource(QUrl(d["video"]))
-            if self.split:                       # separate audio: it leads, the picture follows
-                self.audio.setSource(QUrl(d["audio"]))
-                self.video_out.setMuted(True)
-                self.audio.play()
-                self.sync.start()
-            else:
-                self.audio.setSource(QUrl())
-                self.video_out.setMuted(False)
-                self.sync.stop()
-            self._volume(self.vol.value())
-            self.video.play()
-            self.play_btn.setText("Pause")
-            self.show()
-            self.raise_()
-
-        def _master(self) -> Any:
-            return self.audio if self.split else self.video
-
-        def _sync(self) -> None:
-            a, v = self.audio.position(), self.video.position()
-            if self.audio.playbackState() == self.audio.PlaybackState.PlayingState and abs(a - v) > 150:
-                self.video.setPosition(a)
-
-        def _tick(self, ms: int) -> None:
-            if not self.pos.isSliderDown():
-                self.pos.setValue(int(ms))
-            fmt = lambda t: f"{int(t // 60000)}:{int(t // 1000 % 60):02d}"  # noqa: E731
-            self.time.setText(f"{fmt(ms)} / {fmt(self.video.duration())}")
-
-        def _volume(self, v: int) -> None:
-            (self.audio_out if self.split else self.video_out).setVolume(v / 100)
-
-        def toggle(self) -> None:
-            playing = self.video.playbackState() == self.video.PlaybackState.PlayingState
-            self.pause() if playing else self.resume()
-
-        def pause(self) -> None:
-            self.video.pause()
-            self.audio.pause()
-            self.play_btn.setText("Play")
-
-        def resume(self) -> None:
-            if self.split:
-                self.audio.play()
-            self.video.play()
-            self.play_btn.setText("Pause")
-
-        def seek_to(self, ms: int) -> None:
-            ms = max(0, int(ms))
-            self.video.setPosition(ms)
-            if self.split:
-                self.audio.setPosition(ms)
-
-        def seek(self, seconds: float) -> None:
-            self.seek_to(self._master().position() + int(seconds * 1000))
-
-        def louder(self, step: int = 15) -> None:
-            self.vol.setValue(min(100, max(0, self.vol.value() + step)))
-
-        def fullscreen(self) -> None:
-            self.showNormal() if self.isFullScreen() else self.showFullScreen()
-
-        def _open_page(self) -> None:
-            from PySide6.QtCore import QUrl
-            from PySide6.QtGui import QDesktopServices
-            if self.page:
-                self.pause()
-                QDesktopServices.openUrl(QUrl(self.page))
-
-        def keyPressEvent(self, e: Any) -> None:
-            k = e.key()
-            if k == Qt.Key_Space:
-                self.toggle()
-            elif k == Qt.Key_Right:
-                self.seek(10)
-            elif k == Qt.Key_Left:
-                self.seek(-10)
-            elif k == Qt.Key_Up:
-                self.louder(5)
-            elif k == Qt.Key_Down:
-                self.louder(-5)
-            elif k == Qt.Key_F:
-                self.fullscreen()
-            elif k == Qt.Key_Escape:
-                self.showNormal() if self.isFullScreen() else self.close()
-            else:
-                super().keyPressEvent(e)
-
-        def closeEvent(self, e: Any) -> None:
-            self.video.stop()
-            self.audio.stop()
-            self.sync.stop()
-            daemon.call("video.closed", None, lambda _e: None)
-            super().closeEvent(e)
-
-        def control(self, d: dict[str, Any]) -> None:
-            act = d.get("action")
-            secs = float(d.get("seconds") or 10)
-            {"pause": self.pause, "resume": self.resume, "stop": self.close, "fullscreen": self.fullscreen,
-             "forward": lambda: self.seek(secs), "back": lambda: self.seek(-secs),
-             "louder": lambda: self.louder(15), "quieter": lambda: self.louder(-15)}.get(act, lambda: None)()
-
     class AnswerBox(Popup):
         def __init__(self, rid: str | None, question: str, choices: list[str] | None = None) -> None:
             super().__init__("Answer")
@@ -1197,9 +1034,11 @@ def main(popups: bool = False) -> int:
                 load_settings()
             return
         if topic == "video":
+            from .video_player import VideoPlayer
             if data.get("action") == "play":
                 if VideoPlayer.current is None:
-                    VideoPlayer.current = VideoPlayer()
+                    VideoPlayer.current = VideoPlayer(
+                        lambda method, **params: daemon.call(method, None, lambda _e: None, **params))
                 VideoPlayer.current.play(data)
             elif VideoPlayer.current is not None:
                 VideoPlayer.current.control(data)
