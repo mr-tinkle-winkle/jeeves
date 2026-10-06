@@ -362,6 +362,9 @@ class LlamaCppLLM(LLM):
         # gpu_layers: a number, or a function(model_path, ctx_size) -> number (Auto)
         ngl = self.gpu_layers(model, self.ctx_size) if callable(self.gpu_layers) else int(self.gpu_layers or 0)
         cmd += ["-ngl", str(ngl)]
+        mmproj = model_dir(self.entry) / "mmproj.gguf"
+        if mmproj.exists():                           # vision models: can be sent screenshots
+            cmd += ["--mmproj", str(mmproj)]
         # thinking models (Qwen3, gpt-oss): off = answer straight away (fast); auto = let them think
         cmd += ["--reasoning", self.reasoning if self.reasoning in ("on", "off", "auto") else "off"]
         self.server.start(cmd, "/health")

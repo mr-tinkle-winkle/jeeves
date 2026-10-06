@@ -35,6 +35,7 @@ BUILTIN_PARTIAL_MODULES = [
     "jeeves.functions.partials.files",
     "jeeves.functions.partials.memory",
     "jeeves.functions.partials.web",
+    "jeeves.functions.partials.youtube",
     "jeeves.functions.partials.flow",
 ]
 BUILTIN_FULL_MODULE = "jeeves.functions.builtins"

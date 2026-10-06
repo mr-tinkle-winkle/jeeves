@@ -34,6 +34,7 @@ class FunctionContext:
         self.looking_at: str = ""
         self.playback = None
         self.saying = ""                                # the sentence being spoken right now
+        self.background = False                         # long-running (watching): calling the agent doesn't pause it
         self.stage = "thinking"
 
     # ---- cancellation ------------------------------------------------------

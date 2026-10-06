@@ -112,11 +112,14 @@ class Engine:
         self.summary = SummaryLog(self.settings)
         self.models = ModelManager(self.settings, self.publish, on_available=self._model_back)
         self.intent = IntentProcessor(self.settings, self.registry, self.models, self.history)
+        self.intent.video_playing = lambda: bool(getattr(self, "video_state", {}).get("playing"))
         self.training = Training(self.settings, self.registry)
         self.intent.extra_examples = self.training.intent_examples
         self.control = Control(self.settings)
         self.on_exit: Callable[[], None] | None = None     # set by the server: stop the daemon
         self.interrupted: dict[str, list[str]] = {}       # agent -> requests paused by calling its name
+        self.watchers: dict[str, Any] = {}                # agent -> Watcher (watching the screen)
+        self.video_state: dict[str, Any] = {"playing": False}   # the Jeeves video player
         self.puppetry = Puppetry(self.settings)
         self.online = Online(self.settings)
         self.wikipedia = Wikipedia(self.settings, self.publish)
@@ -596,7 +599,8 @@ class Engine:
     def _busy_requests(self, agent_id: str) -> list[str]:
         with self._lock:
             return [rid for rid, c in self.active.items()
-                    if c.agent_id == agent_id and not c.dry_run and not c.suspend_event.is_set()]
+                    if c.agent_id == agent_id and not c.dry_run and not c.suspend_event.is_set()
+                    and not c.background]
 
     def _hears_itself(self, agent_id: str, heard: str) -> bool:
         """The mic picking up the agent saying its own name isn't the user calling it."""

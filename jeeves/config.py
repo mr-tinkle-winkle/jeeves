@@ -114,6 +114,7 @@ DEFAULTS: dict[str, Any] = {
         "tts": {"model": "espeak-ng", "unload_when_open": []},
         "tts_voice": "espeak-en",
         "local_response": {"model": None, "unload_when_open": [], "max_tokens": 512},
+        "vision": {"model": None, "unload_when_open": []},   # a model that can see (screen watching)
         "gpu_layers": "auto",             # llama.cpp -ngl: "auto" (fit free VRAM), 0 = CPU only, 99 = all
         "favorites": [],                  # starred models (shown first on the Models page)
         "reasoning": "off",               # thinking models: off (fast) | auto (think first, smarter)
@@ -179,6 +180,8 @@ DEFAULTS: dict[str, Any] = {
                  "depth": "normal",            # quick (1 round, 3 pages) | normal (2 rounds, 5) | deep (3, 8)
                  "auto_for_facts": True},      # factual questions (games, products, people...) get researched
     "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"]},
+    # Watch the screen: seconds between looks (backs off while nothing changes), how chatty, time limit
+    "watch": {"interval": 2.0, "talkativeness": 0.5, "max_minutes": 120},
     "control_mode": {"virtual_controller": False, "absolute_moves": True},
     "puppetry": {"config_dir": "~/.config/macro-daemon", "service": "macro-daemon.service"},
     "wikipedia": {"variant": "wikipedia_en_all_nopic", "mirror": "https://download.kiwix.org/zim/wikipedia/",

@@ -211,6 +211,32 @@ class IntentProcessor:
         core = self.strip_address(agent, text)
         low = core.lower()
         name = agent.get("name", "Jeeves")
+        if "youtube" in by_name:
+            m = re.match(r"^(pause|resume|unpause|stop|close)\s+(the\s+)?(video|youtube)\b", low)
+            if m:
+                act = {"unpause": "resume", "close": "stop"}.get(m.group(1), m.group(1))
+                return Decision("youtube", {"action": act}, 0.95, "", "rules")
+            m = re.match(r"^(skip|go|jump|fast forward|rewind|go back)\s*(ahead|forward|back(wards?)?)?\s*(\d+)?\s*"
+                         r"(seconds?|secs?|minutes?|mins?)?$", low)
+            if m and getattr(self, "video_playing", lambda: False)():
+                secs = float(m.group(4) or 10) * (60 if (m.group(5) or "").startswith("min") else 1)
+                back = "back" in low or "rewind" in low
+                return Decision("youtube", {"action": "back" if back else "forward", "seconds": secs}, 0.9, "", "rules")
+            if re.search(r"\byoutube\b", low) or re.search(
+                    r"\b(pull up|put on|play|show me|find)\b.*\b(video|vid|upload)s?\b", low) or re.search(
+                    r"\b(newest|latest|most recent)\s+(video|upload|vid)\b", low):
+                from ..functions.partials.youtube import parse_request
+                args = parse_request(core)
+                args.update(action="play")
+                return Decision("youtube", args, 0.95, "", "rules")
+        if "watch_screen" in by_name:
+            if re.search(r"\b(stop|quit|end|cancel|enough)\s+(the\s+)?(watching|commentary|commentating)\b", low):
+                return Decision("watch_screen", {"action": "stop"}, 0.95, "", "rules")
+            if re.match(r"^(watch|keep an eye on|start watching|commentate|(give|do)\s+(me\s+)?(some\s+)?(live\s+)?"
+                        r"commentary)\b", low) or re.search(r"\bwatch\s+(my|the)\s+(screen|game|stream|match)\b", low):
+                m = re.search(r"\b(?:and\s+)?(?:tell|let|warn|alert|notify)\s+me\s+(?:know\s+)?((?:when|if)\s+.+)$", low)
+                return Decision("watch_screen", {"action": "start", "screen": guess_screen(low) or "current",
+                                                 "focus": m.group(1) if m else ""}, 0.95, "", "rules")
         if re.match(CONTROL_PATTERN, low):
             if "control_mode" in by_name:
                 return Decision("control_mode", {"instruction": core}, 0.9, "", "rules")

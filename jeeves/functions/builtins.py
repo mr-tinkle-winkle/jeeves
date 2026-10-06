@@ -229,6 +229,100 @@ def _describe_position(ctx, x: int, y: int) -> str:
 
 
 @full(
+    "watch_screen",
+    "Watches the screen live (only when asked): comments on what happens and answers questions about it. "
+    "Also stops watching.",
+    args=[Arg("action", "string", "start or stop", required=False, default="start", choices=["start", "stop"]),
+          Arg("screen", "string", "Which monitor: current, left, right, primary, other or a name",
+              required=False, default="current"),
+          Arg("talkativeness", "number", "0 = silent (questions only) .. 1 = full commentary", required=False,
+              default=None),
+          Arg("focus", "string", "Something to watch for and mention, e.g. 'when the download finishes'",
+              required=False, default="")],
+    how="Captures the screen every couple of seconds, skips unchanged frames, and looks at changed ones with the "
+        "vision model (Models > Vision) or, without one, through OCR. Runs until 'stop watching', Close on its "
+        "indicator, or Abort.",
+    keywords=["watch my screen", "watch the screen", "watch my game", "commentate", "live commentary",
+              "stop watching"],
+    examples=["Jeeves, watch my screen and tell me when the render finishes.", "Jeeves, commentate my game.",
+              "Jeeves, stop watching."],
+    default_enabled=True, category="screen", uses=["read_screen_text", "speak"],
+)
+def watch_screen(ctx, action="start", screen="current", talkativeness=None, focus=""):
+    eng = ctx.engine
+    current = eng.watchers.get(ctx.agent_id)
+    if action == "stop":
+        if current is None:
+            return ctx.say("I wasn't watching.")
+        if ctx.dry_run:
+            return "<stop watching>"
+        eng.close_request(current.ctx.entry["id"])
+        return ctx.say("Stopped watching.")
+    if ctx.dry_run:
+        return f"<watch {screen} screen; focus: {focus or 'anything interesting'}>"
+    if current is not None:
+        eng.close_request(current.ctx.entry["id"])
+    from ..daemon.watcher import Watcher
+    w = Watcher(eng, ctx, screen, None if talkativeness is None else float(talkativeness), str(focus or ""))
+    ctx.background = True                       # calling the agent while it watches doesn't pause the watch
+    eng.watchers[ctx.agent_id] = w
+    ctx.state("watching", focus or "")
+    ctx.say(f"Watching{'' if not focus else ' for ' + str(focus)}.")
+    try:
+        w.run()
+    finally:
+        if eng.watchers.get(ctx.agent_id) is w:
+            del eng.watchers[ctx.agent_id]
+    return "stopped watching"
+
+
+VIDEO_ACTIONS = ["play", "pause", "resume", "stop", "forward", "back", "louder", "quieter", "fullscreen"]
+
+
+@full(
+    "youtube",
+    "Finds a YouTube video -- even vaguely described, like 'the newest video from moist critikal' -- and plays it "
+    "in the Jeeves video player. Also pauses, resumes, skips, changes volume or closes the video.",
+    args=[Arg("action", "string", "What to do", required=False, default="play", choices=VIDEO_ACTIONS),
+          Arg("query", "string", "What the video is about / its title (for play)", required=False, default=""),
+          Arg("channel", "string", "Whose channel (for play), as said", required=False, default=""),
+          Arg("newest", "boolean", "Their newest upload", required=False, default=False),
+          Arg("seconds", "number", "For forward/back: how far", required=False, default=None)],
+    how="yt-dlp finds the channel or searches YouTube and gets the streams (up to 1080p); the player opens on "
+        "screen. Needs yt-dlp.",
+    keywords=["youtube", "pull up the video", "play the video", "newest video", "latest video", "pause the video",
+              "resume the video", "close the video"],
+    examples=["Jeeves, pull up the newest video from moist critikal.", "Jeeves, play lofi hip hop on YouTube.",
+              "Jeeves, skip ahead 30 seconds.", "Jeeves, pause the video."],
+    default_enabled=True, category="media", uses=["youtube_search"],
+)
+def youtube(ctx, action="play", query="", channel="", newest=False, seconds=None):
+    from .partials import youtube as yt
+    eng = ctx.engine
+    if action != "play":
+        if ctx.dry_run:
+            return f"<video {action}>"
+        eng.publish("video", {"action": action, "seconds": seconds})
+        if action == "stop":
+            eng.video_state["playing"] = False
+        return ""                                   # the player reacts; nothing to say
+    if not query and not channel:
+        raise FunctionError("which video?")
+    if ctx.dry_run:
+        return f"<play {'newest ' if newest else ''}video {query!r} from {channel or 'search'}>"
+    ctx.state("researching", "Looking on YouTube")
+    v = yt.pick(str(query or ""), str(channel or ""), bool(newest))
+    ctx.think(f"Found: {v['title']} — {v['channel']} ({v['url']})", looking_at=v["url"])
+    s = yt.streams(v["url"], int(ctx.settings.get("youtube.max_height", 1080)))
+    eng.publish("video", {"action": "play", "title": s["title"] or v["title"], "channel": s["channel"] or v["channel"],
+                          "video": s["video"], "audio": s["audio"], "page": s["page"], "duration": s["duration"],
+                          "agent": ctx.agent_id})
+    eng.video_state.update(playing=True, title=s["title"] or v["title"], page=s["page"])
+    ctx.entry["sources"] = [{"n": 1, "title": s["title"] or v["title"], "url": s["page"], "text": v["channel"]}]
+    return ctx.say(f"Here's {s['title'] or v['title']} from {s['channel'] or v['channel']}.")
+
+
+@full(
     "local_response",
     "Answers with the local AI model. This is the default when no other function fits.",
     args=[Arg("prompt", "string", "The request, as said")],

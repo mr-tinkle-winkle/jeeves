@@ -31,6 +31,7 @@ class ModelFile:
     # HF API at download time (used when ``url`` is empty, or if it 404s)
     hf_repo: str | None = None
     hf_suffix: str = "Q4_K_M.gguf"
+    hf_prefix: str = ""          # and whose name starts with this (e.g. "mmproj" for a vision projector)
 
 
 @dataclass
@@ -54,6 +55,7 @@ class ModelEntry:
     speaker: str | None = None    # multi-speaker voices: which speaker (name in the model's speaker map)
     shares: str | None = None     # downloads into this entry's folder (presets of one multi-speaker model)
     speakers: int = 1             # how many speakers the model has (pick one per agent)
+    vision: bool = False          # LLMs that can look at images (they come with an mmproj projector file)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -73,6 +75,14 @@ def _hf(id_: str, repo: str, name: str, size: int, ram: int, desc: str, suffix: 
     """A GGUF model whose exact file name is resolved from the repo at download time."""
     return ModelEntry(id_, "llm", name, "llama.cpp", size, ram, desc,
                       [ModelFile("", "model.gguf", hf_repo=repo, hf_suffix=suffix)])
+
+
+def _vision(id_: str, repo: str, name: str, size: int, ram: int, desc: str) -> ModelEntry:
+    """A llama.cpp model that can see: the model plus its vision projector (mmproj)."""
+    return ModelEntry(id_, "llm", name, "llama.cpp", size, ram, desc,
+                      [ModelFile("", "model.gguf", hf_repo=repo, hf_suffix="Q4_K_M.gguf"),
+                       ModelFile("", "mmproj.gguf", hf_repo=repo, hf_suffix=".gguf", hf_prefix="mmproj")],
+                      vision=True)
 
 
 def _piper(lang: str, speaker: str, quality: str, name: str, desc: str, speakers: int = 1) -> ModelEntry:
@@ -290,6 +300,16 @@ CATALOG: list[ModelEntry] = [
     _hf("llama3.3-70b", "bartowski/Llama-3.3-70B-Instruct-GGUF", "Llama 3.3 70B", 42500, 46000,
         "Smartest option here; needs ~48 GB of VRAM (or lots of RAM and patience)."),
 
+    # ---- vision (screen watching, and questions about what's on screen) -----
+    _vision("qwen2.5-vl-3b", "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF", "Qwen2.5-VL 3B (vision)", 2600, 4500,
+            "Small model that can look at the screen. Good for watching on modest hardware."),
+    _vision("gemma3-4b-vision", "ggml-org/gemma-3-4b-it-GGUF", "Gemma 3 4B (vision)", 3200, 5500,
+            "Sees the screen and chats well; a solid default for watching."),
+    _vision("qwen2.5-vl-7b", "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF", "Qwen2.5-VL 7B (vision)", 5500, 8500,
+            "Reads small text and game UIs well; best with a GPU."),
+    _vision("gemma3-12b-vision", "ggml-org/gemma-3-12b-it-GGUF", "Gemma 3 12B (vision)", 8100, 12000,
+            "Sharpest commentary; needs a strong GPU."),
+
     # ---- tts engines -----------------------------------------------------
     ModelEntry("espeak-ng", "tts", "eSpeak NG", "espeak-ng", 0, 20,
                "Instant and tiny, robotic. Always available as a fallback.", builtin=True),
@@ -325,6 +345,8 @@ RATINGS: dict[str, tuple] = {
     "qwen3-14b": (2, 4, 14.8, 14.8), "gpt-oss-20b": (3, 4, 21.0, 3.6), "qwen3-30b-a3b": (3, 5, 30.5, 3.3),
     "mistral-small-3.2-24b": (1, 4, 24.0, 24.0), "gemma3-27b": (1, 5, 27.0, 27.0), "qwen3-32b": (1, 5, 32.8, 32.8),
     "llama3.3-70b": (1, 5, 70.0, 70.0),
+    "qwen2.5-vl-3b": (4, 3, 3.8, 3.8), "gemma3-4b-vision": (3, 3, 4.3, 4.3), "qwen2.5-vl-7b": (2, 4, 8.3, 8.3),
+    "gemma3-12b-vision": (2, 4, 12.2, 12.2),
     "espeak-ng": (5, 1), "piper": (4, 4), "kokoro": (3, 5), "espeak-en": (5, 1), "espeak-en-gb": (5, 1),
 }
 for _m in CATALOG:

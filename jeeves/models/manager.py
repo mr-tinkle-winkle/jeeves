@@ -23,7 +23,7 @@ from .download import install, is_installed, uninstall
 
 log = logging.getLogger("jeeves.models")
 
-KINDS = ("stt", "intent", "tts", "local_response")
+KINDS = ("stt", "intent", "tts", "local_response", "vision")
 
 
 def runtime_available(engine: str) -> bool:
@@ -245,8 +245,10 @@ class ModelManager:
     # ---- conveniences used by functions ------------------------------------
     def respond(self, agent: dict[str, Any], prompt: str, system: str = "", ctx: Any = None,
                 with_memory: bool = False, raw: bool = False) -> str | None:
+        watcher = self._watcher_for(ctx, raw)
+        llm = self.vision_llm(agent) if watcher is not None and watcher.latest_jpeg else None
         try:
-            llm = self.llm("local_response", agent)
+            llm = llm or self.llm("local_response", agent)
         except ModelUnavailable as exc:
             if ctx is not None:
                 ctx.think(f"Local response model unavailable: {exc.reason}")
@@ -254,6 +256,17 @@ class ModelManager:
                 raise
             return None
         messages = self.build_messages(agent, prompt, system, ctx, with_memory, raw)
+        if watcher is not None:
+            note = watcher.context_note()
+            if note:
+                messages[0]["content"] = (messages[0]["content"] + "\n\n" + note) if messages[0]["role"] == "system" \
+                    else note
+            if llm is self.vision_llm(agent) and watcher.latest_jpeg:     # it can look at the latest frame
+                import base64
+                b64 = base64.b64encode(watcher.latest_jpeg).decode()
+                messages[-1] = {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    {"type": "text", "text": messages[-1]["content"]}]}
         on_token = (lambda t: ctx.think(t, append=True)) if ctx is not None else None
         cancelled = ctx.is_cancelled if ctx is not None else None
         max_tokens = int(self.settings.get("models.local_response.max_tokens", 512))
@@ -266,6 +279,13 @@ class ModelManager:
             if ctx is not None:
                 ctx.think(f"Model error: {exc}")
             return None
+
+    def _watcher_for(self, ctx: Any, raw: bool) -> Any:
+        """The agent's screen watcher, when this is one of its other answers (not the watcher itself)."""
+        if raw or ctx is None or not hasattr(ctx, "engine"):
+            return None
+        w = getattr(ctx.engine, "watchers", {}).get(getattr(ctx, "agent_id", None))
+        return w if w is not None and w.ctx is not ctx else None
 
     def build_messages(self, agent: dict[str, Any], prompt: str, system: str = "", ctx: Any = None,
                        with_memory: bool = False, raw: bool = False) -> list[dict[str, str]]:
@@ -316,6 +336,18 @@ class ModelManager:
         if ctx is not None:
             ctx.trace("rewritten_in_character", before=reply, score=score, why=why)
         return fixed or reply
+
+    def vision_llm(self, agent: dict[str, Any] | None = None) -> LLM | None:
+        """A model that can look at images: the chosen vision model, or the local response model if it
+        can see. None = screen watching works from OCR text instead."""
+        for kind in ("vision", "local_response"):
+            entry = catalog.get(self.model_id(kind, agent))
+            if entry is not None and entry.vision and is_installed(entry):
+                try:
+                    return self.llm(kind, agent)
+                except ModelUnavailable:
+                    return None
+        return None
 
     def test_persona(self, agent: dict[str, Any]) -> dict[str, Any]:
         """Agents > Personality > Test personality."""

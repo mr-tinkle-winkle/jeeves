@@ -13,6 +13,7 @@ KIND_TITLES = {
     "intent": ("Intention processing", "llm", "models.intent.model"),
     "local_response": ("Local AI model for full responses", "llm", "models.local_response.model"),
     "tts": ("Text to speech", "tts", "models.tts.model"),
+    "vision": ("Vision (screen watching)", "vision", "models.vision.model"),
 }
 
 
@@ -197,7 +198,10 @@ class ModelsPage(Page):
         box.addItem("(none)", None)
         favs = self.favorites()
         rec_ids = {r["id"] for r in self.recs.values()}
-        items = [m for m in self.catalog if m["kind"] == kind]
+        if kind == "vision":
+            items = [m for m in self.catalog if m["kind"] == "llm" and m.get("vision")]
+        else:
+            items = [m for m in self.catalog if m["kind"] == kind]
         items.sort(key=lambda m: (m["id"] not in favs, -m.get("quality", 3)))
         for m in items:
             note = "" if m.get("runtime", True) else "  — engine not installed"
