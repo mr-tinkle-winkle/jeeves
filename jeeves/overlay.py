@@ -36,6 +36,9 @@ from typing import Any
 from .util import format_duration, graphical_env
 
 
+ALREADY_RUNNING = 3      # exit code: another overlay of this kind already runs (the daemon waits, doesn't respawn)
+
+
 def _single_instance(name: str) -> Any:
     """One overlay per session: a second copy exits (the first keeps working and
     reconnects to a restarted daemon by itself)."""
@@ -43,11 +46,21 @@ def _single_instance(name: str) -> Any:
 
     from . import paths
     paths.ensure(paths.runtime_dir())
-    f = open(paths.runtime_dir() / f"{name}.lock", "w")
+    path = paths.runtime_dir() / f"{name}.lock"
+    f = open(path, "a+")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        try:
+            holder = path.read_text().strip()
+        except OSError:
+            holder = "?"
+        print(f"jeeves {name}: another copy is already running (pid {holder}); exiting", file=sys.stderr)
         return None
+    f.seek(0)
+    f.truncate()
+    f.write(str(os.getpid()))
+    f.flush()
     return f
 
 
@@ -84,7 +97,7 @@ def sources_html(d: dict[str, Any], expanded: set[int] | None = None, link: str 
 def main(popups: bool = False) -> int:
     lock = _single_instance("popups" if popups else "overlay")
     if lock is None:
-        return 0
+        return ALREADY_RUNNING
     env = graphical_env()
     for k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP"):
         if k in env and k not in os.environ:

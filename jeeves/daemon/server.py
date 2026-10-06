@@ -214,7 +214,8 @@ class Server:
                                       "sox": voicefx.available()},
             "summary.text": lambda minutes=None: e.summary.text(minutes),
             "summary.clear": e.summary.clear,
-            "doctor": lambda move_test=True: doctor.run(e.control, bool(move_test), s, e.registry),
+            "doctor": lambda move_test=True: doctor.overlay_checks(e) + doctor.run(e.control, bool(move_test), s,
+                                                                                    e.registry),
         }
 
     # ---- connection handling --------------------------------------------

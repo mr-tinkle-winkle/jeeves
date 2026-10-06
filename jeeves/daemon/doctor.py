@@ -49,6 +49,23 @@ def audio_checks(settings: Any) -> list[dict[str, Any]]:
     return out
 
 
+def overlay_checks(engine: Any) -> list[dict[str, Any]]:
+    from .. import paths
+    out = []
+    for name, state in engine.overlay_status().items():
+        ok = state == "running"
+        detail = state
+        if not ok:
+            try:
+                tail = (paths.state_dir() / f"overlay-{name}.log").read_text(errors="replace").strip().splitlines()
+                detail += " -- last output: " + " | ".join(tail[-3:]) if tail else ""
+            except OSError:
+                pass
+        out.append(_check(f"On-screen overlay ({name})", ok, detail,
+                          "" if ok else "send this line (and the overlay log) when reporting the problem"))
+    return out
+
+
 def function_checks(settings: Any, registry: Any) -> list[dict[str, Any]]:
     out = []
     agents = (settings.get("agents", {}) or {}) if settings is not None else {}

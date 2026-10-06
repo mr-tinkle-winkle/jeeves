@@ -1499,28 +1499,64 @@ class Engine:
             if proc is not None and proc.poll() is None:
                 continue
             fails, retry_at = self._overlay_fails.get(name, (0, 0.0))
+            logfile = paths.state_dir() / f"overlay-{name}.log"
             if proc is not None:
-                if proc.returncode != 0:
+                lived = now - getattr(proc, "started_at", now)
+                if proc.returncode == 3:                    # another overlay already runs (e.g. an older one)
+                    if fails == 0:
+                        log.info("overlay (%s): another copy is already running; using that one", name)
+                    self._overlays.pop(name, None)
+                    self._overlay_fails[name] = (1, now + 60)
+                    continue
+                if proc.returncode != 0 or lived < 10:      # crashed, or quit straight away (even "cleanly")
                     fails += 1
-                    log.warning("overlay (%s) exited with %s; restarting in %ds", name, proc.returncode,
-                                min(60, 2 ** fails))
                     retry_at = now + min(60, 2 ** fails)
+                    try:
+                        tail = logfile.read_text(errors="replace").strip().splitlines()[-6:]
+                    except OSError:
+                        tail = []
+                    log.warning("overlay (%s) exited with %s after %.0fs; restarting in %ds. Last output:\n  %s\n"
+                                "  (full output: %s; command: %s)", name, proc.returncode, lived,
+                                min(60, 2 ** fails), "\n  ".join(tail) or "(nothing)", logfile,
+                                " ".join(self._overlay_argv(popups)))
+                else:
+                    fails = 0
                 self._overlays.pop(name, None)
                 self._overlay_fails[name] = (fails, retry_at)
             if now < retry_at:
                 continue
             try:
-                self._overlays[name] = subprocess.Popen(self._overlay_argv(popups), env=env, stdin=subprocess.DEVNULL)
+                logfile.parent.mkdir(parents=True, exist_ok=True)
+                out = open(logfile, "wb")
+                proc = subprocess.Popen(self._overlay_argv(popups), env=env, stdin=subprocess.DEVNULL,
+                                        stdout=out, stderr=subprocess.STDOUT)
+                out.close()
+                proc.started_at = now                       # type: ignore[attr-defined]
+                self._overlays[name] = proc
             except OSError as exc:
                 log.warning("couldn't start the overlay (%s): %s", name, exc)
                 self._overlay_fails[name] = (fails + 1, now + 30)
 
     # ------------------------------------------------------------------ status
+    def overlay_status(self) -> dict[str, str]:
+        out = {}
+        for name in ("indicators", "popups"):
+            proc = self._overlays.get(name)
+            fails, retry_at = self._overlay_fails.get(name, (0, 0.0))
+            if proc is not None and proc.poll() is None:
+                out[name] = "running"
+            elif fails:
+                out[name] = f"not running (failed {fails}x; see {paths.state_dir() / f'overlay-{name}.log'})"
+            else:
+                out[name] = "not started (no display?)" if proc is None else f"exited {proc.returncode}"
+        return out
+
     def status(self) -> dict[str, Any]:
         return {
             "enabled": self.is_on(),
             "agents": {aid: {"name": a.get("name"), "active": self.agent_active(a)} for aid, a in self.agents().items()},
             "listeners": {src: lst.status for src, lst in self.listeners.items()},
+            "overlays": self.overlay_status(),
             "keyboard": self.keyboard.status if self.keyboard else "off",
             "indicators": list(self.indicators.values()),
             "extended": list(self.extended),
