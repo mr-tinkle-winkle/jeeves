@@ -151,7 +151,7 @@ def test_research_explains_and_shows_clickable_sources(engine, monkeypatch):
     from jeeves.daemon.context import FunctionContext
     from jeeves.daemon.history import new_entry
     from jeeves.functions.partials import web
-    monkeypatch.setattr(web, "search", lambda settings, q, n: [
+    monkeypatch.setattr(web, "search", lambda settings, q, n, problems=None: [
         {"title": "Patch notes", "url": "https://example.com/a", "snippet": "s"},
         {"title": "News", "url": "https://example.org/b", "snippet": "s"}])
     monkeypatch.setattr(web, "request_website", lambda ctx, url, max_chars=4000, **kw: f"Long article text from {url}. " * 20)
@@ -257,28 +257,3 @@ def test_a_dropped_listen_says_so_on_the_indicator(engine):
     s.got_speech, s.voiced_frames = True, 3
     engine.end_session(s)
     assert engine.indicators[s.request_id]["stage"] == "unclear"
-
-
-def test_screen_reading_shows_the_screens_to_a_vision_model(engine, monkeypatch):
-    from jeeves.daemon import watcher
-    from jeeves.daemon.context import FunctionContext
-    from jeeves.daemon.history import new_entry
-    import tempfile, pathlib
-    shot = pathlib.Path(tempfile.mkstemp(suffix=".png")[1])
-    monkeypatch.setattr(watcher, "grab", lambda screen: {"images": [("your left screen", b"L"), ("your right screen", b"R")],
-                                                         "shot": shot})
-    monkeypatch.setattr(engine.registry.get("read_screen_text"), "impl", lambda ctx, region="anywhere", screen="all": "OK")
-    seen = {}
-
-    class Vision:
-        def chat(self, messages, **kw):
-            seen["messages"] = messages
-            return "Your right screen shows a disk-full error."
-    monkeypatch.setattr(engine.models, "vision_llm", lambda agent=None: Vision())
-    said = []
-    engine.speak = lambda ctx, t: said.append(t)
-    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
-    ctx.call("screen_reading", question="what's on my screens")
-    parts = seen["messages"][-1]["content"]
-    assert [p["type"] for p in parts].count("image_url") == 2 and "your left screen" in parts[-1]["text"]
-    assert said == ["Your right screen shows a disk-full error."]

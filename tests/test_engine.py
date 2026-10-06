@@ -487,7 +487,7 @@ def test_gguf_metadata_and_auto_gpu_layers(tmp_path):
 
 def test_research_reads_pages_and_answers(engine, monkeypatch):
     from jeeves.functions.partials import web
-    monkeypatch.setattr(web, "search", lambda settings, q, n: [
+    monkeypatch.setattr(web, "search", lambda settings, q, n, problems=None: [
         {"title": "Site A", "url": "https://a.example", "snippet": "A says 42."},
         {"title": "Site B", "url": "https://b.example", "snippet": "B says 42 too."}])
     read = []
@@ -678,7 +678,7 @@ def test_deep_research_digs_further_and_finds_buried_facts(engine, monkeypatch):
     from jeeves.functions.partials import web
     searched = []
 
-    def fake_search(settings, q, n):
+    def fake_search(settings, q, n, problems=None):
         searched.append(q)
         if "drop rate" in q:
             return [{"title": "Hornet drops - Silksong Wiki", "url": "https://silksong.fandom.com/drops", "snippet": ""}]
@@ -689,10 +689,15 @@ def test_deep_research_digs_further_and_finds_buried_facts(engine, monkeypatch):
              "https://silksong.fandom.com/drops": "The Silk Heart drop rate is 25 percent from Hornet."}
     monkeypatch.setattr(web, "search", fake_search)
     monkeypatch.setattr(web, "request_website", lambda ctx, url, max_chars=20000, **kw: pages.get(url, ""))
-    replies = iter(["silksong hornet needle damage wiki\nsilksong hornet reddit",    # planned queries
-                    "SEARCH: silksong silk heart drop rate",                         # round 1: not answered
-                    "Her needle deals 13 damage [1] and drops a Silk Heart 25% of the time [2]."])
-    engine.models.respond = lambda agent, prompt, **kw: next(replies)
+    def respond(agent, prompt, **kw):
+        if "web search queries" in prompt:
+            return "silksong hornet needle damage wiki\nsilksong hornet reddit"     # planned queries
+        if "actually answer the question" in prompt:
+            if "drop rate is 25" not in prompt:
+                return "SEARCH: silksong silk heart drop rate"               # not answered yet
+            return "ANSWERED: 1, 2"
+        return "Her needle deals 13 damage [1] and drops a Silk Heart 25% of the time [2]."
+    engine.models.respond = respond
     said = []
     engine.speak = lambda ctx, t: said.append(t)
     res = engine.handle_text("Jeeves, research how much damage Hornet's needle does in Silksong", wait=True)

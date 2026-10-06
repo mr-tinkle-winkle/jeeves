@@ -355,31 +355,62 @@ class LLM:
     def model_name(self) -> str:
         return "local"
 
+    REASONING_ALLOWANCE = 2048    # extra tokens a thinking model gets to think before it answers
+    thinks = False                # seen reasoning from this model: give it the allowance from now on
+
+    def extra_body(self) -> dict[str, Any]:
+        """Server-specific request fields (llama-server's chat template switches)."""
+        return {}
+
     def chat(self, messages: list[dict[str, str]], max_tokens: int = 512, temperature: float = 0.6,
              json_mode: bool = False, on_token: Callable[[str], None] | None = None,
              cancelled: Callable[[], bool] | None = None) -> str:
+        """The answer. max_tokens is for the answer itself: llama-server counts a thinking model's
+        reasoning against it too, so gpt-oss/Qwen3 could think through the whole budget and answer
+        nothing (the empty answers). Thinking models get an allowance on top, and an answer that
+        still comes back empty after thinking is asked for once more with plenty of room."""
         if not self.loaded():
             self.load()
+        budget = max_tokens + (self.REASONING_ALLOWANCE if self.thinks else 0)
+        content, thought = self._chat_once(messages, budget, temperature, json_mode, on_token, cancelled)
+        if thought:
+            self.thinks = True
+        if not content and thought and not (cancelled and cancelled()):
+            log.info("%s thought without answering (%d tokens allowed); asking again with more room",
+                     self.model_name, budget)
+            if on_token is not None:
+                on_token("\n[ran out of room while thinking -- trying again]\n")
+            content, _ = self._chat_once(messages, max_tokens + 3 * self.REASONING_ALLOWANCE, temperature,
+                                         json_mode, on_token, cancelled)
+        return content
+
+    def _chat_once(self, messages: list[dict[str, Any]], max_tokens: int, temperature: float, json_mode: bool,
+                   on_token: Callable[[str], None] | None,
+                   cancelled: Callable[[], bool] | None) -> tuple[str, str]:
+        """(answer, reasoning) for one request."""
         body: dict[str, Any] = {"model": self.model_name, "messages": messages, "max_tokens": max_tokens,
-                                "temperature": temperature}
+                                "temperature": temperature, **self.extra_body()}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         if on_token is None:
             try:
                 data = _post_json(self.base + "/v1/chat/completions", body)
-            except (OSError, ValueError, KeyError, http.client.HTTPException) as exc:
+                msg = data["choices"][0]["message"]
+            except (OSError, ValueError, KeyError, IndexError, http.client.HTTPException) as exc:
                 raise BackendError(f"model server failed: {exc}") from exc
-            return strip_thinking(data["choices"][0]["message"].get("content") or "")
+            raw = msg.get("content") or ""
+            return strip_thinking(raw), (msg.get("reasoning_content") or "") + thinking_part(raw)
         body["stream"] = True
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
-        out = []
+        out: list[str] = []
+        thoughts: list[str] = []
         try:
             with urllib.request.urlopen(req, timeout=300) as r:
-                for raw in r:
+                for raw_line in r:
                     if cancelled and cancelled():
                         break
-                    line = raw.decode(errors="replace").strip()
+                    line = raw_line.decode(errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
                     payload = line[5:].strip()
@@ -392,6 +423,7 @@ class LLM:
                     # a thinking model's reasoning: shown in the thoughts view, never spoken
                     thought = d.get("reasoning_content") or ""
                     if thought:
+                        thoughts.append(thought)
                         on_token(thought)
                     delta = d.get("content") or ""
                     if delta:
@@ -399,15 +431,30 @@ class LLM:
                         on_token(delta)
         except (OSError, http.client.HTTPException) as exc:     # incl. read timeouts and a crashed server
             raise BackendError(f"model server failed: {exc}") from exc
-        return strip_thinking("".join(out))
+        raw = "".join(out)
+        return strip_thinking(raw), "".join(thoughts) + thinking_part(raw)
+
+
+def thinking_part(text: str) -> str:
+    """Reasoning a model wrote into the answer itself (<think>, or gpt-oss's analysis channel)."""
+    import re
+    parts = re.findall(r"<think>(.*?)(?:</think>|$)", text, flags=re.S)
+    parts += re.findall(r"<\|channel\|>analysis<\|message\|>(.*?)(?:<\|end\|>|<\|start\|>|$)", text, flags=re.S)
+    return "".join(parts)
 
 
 def strip_thinking(text: str) -> str:
-    """Drop <think>...</think> blocks some models put in the answer itself."""
+    """Drop reasoning some models put in the answer itself: <think>...</think> blocks, an unfinished
+    <think> (it ran out of tokens mid-thought), and gpt-oss's harmony channels when the server
+    didn't separate them (only the final channel is the answer)."""
     import re
+    if "<|channel|>" in text:
+        m = re.search(r"<\|channel\|>final<\|message\|>(.*?)(?:<\|end\|>|<\|return\|>|$)", text, flags=re.S)
+        text = m.group(1) if m else ""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
     if "</think>" in text:                 # opening tag was in the prompt template
         text = text.split("</think>", 1)[1]
+    text = re.sub(r"<think>.*$", "", text, flags=re.S)
     return text.strip()
 
 
@@ -446,6 +493,13 @@ class LlamaCppLLM(LLM):
 
     def loaded(self) -> bool:
         return self.server.alive()
+
+    def extra_body(self) -> dict[str, Any]:
+        # gpt-oss can't stop thinking (--reasoning off doesn't apply to it); "off" means think as
+        # little as it can. Qwen3 reads enable_thinking. Other templates ignore both.
+        off = self.reasoning not in ("on", "auto")
+        return {"chat_template_kwargs": {"reasoning_effort": "low" if off else "medium",
+                                         "enable_thinking": not off}}
 
 
 class EndpointLLM(LLM):

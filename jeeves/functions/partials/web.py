@@ -32,7 +32,8 @@ def request_website(ctx, url, raw=False, max_chars=20000, timeout=20):
     if not re.match(r"^https?://", url):
         url = "https://" + url
     ctx.state("researching", f"Reading {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html,application/json,*/*"})
+    # a browser's User-Agent: wikis (Fandom) and forums often refuse unknown clients
+    req = urllib.request.Request(url, headers=dict(BROWSER_HEADERS, Accept="text/html,application/json,*/*"))
     try:
         with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
             body = resp.read(5_000_000)
@@ -101,20 +102,101 @@ def parse_ddg(page: str, count: int) -> list[dict[str, str]]:
     return out
 
 
-def _ddg(query: str, count: int) -> list[dict[str, str]]:
-    """DuckDuckGo (no account or API key): the HTML page, then the Lite page if the
-    first gave nothing (it sometimes serves a challenge page instead)."""
+BROWSER_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                   "Accept-Language": "en-US,en;q=0.8"}
+
+
+class SearchBlocked(Exception):
+    """The engine answered with a bot check instead of results."""
+
+
+def _fetch(url: str, data: dict[str, str] | None = None, timeout: float = 15) -> str:
     import urllib.parse
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
-               "Accept-Language": "en-US,en;q=0.8"}
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    headers = dict(BROWSER_HEADERS)
+    if body is not None:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(3_000_000).decode(resp.headers.get_content_charset() or "utf-8", "replace")
+
+
+def _ddg(query: str, count: int) -> list[dict[str, str]]:
+    """DuckDuckGo (no account or API key): the HTML page, then the Lite page. Both are asked with
+    a form POST like the pages themselves do -- a plain GET is what DuckDuckGo most often answers
+    with a bot check, which used to come back as "no results" without saying why."""
+    blocked = False
     for base in ("https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"):
-        req = urllib.request.Request(base + "?" + urllib.parse.urlencode({"q": query}), headers=headers)
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            page = resp.read().decode("utf-8", "replace")
+        page = _fetch(base, {"q": query, "kl": "us-en"})
         results = parse_ddg(page, count)
         if results:
             return results
+        if re.search(r"anomaly|challenge-form|bots use DuckDuckGo", page, re.I):
+            blocked = True
+    if blocked:
+        raise SearchBlocked("DuckDuckGo asked for a bot check")
     return []
+
+
+def _bing_url(href: str) -> str:
+    """Bing wraps result links (bing.com/ck/a?...&u=a1<base64 url>)."""
+    import base64
+    import urllib.parse
+    if "bing.com/ck/" not in href:
+        return href
+    u = urllib.parse.parse_qs(urllib.parse.urlparse(href).query).get("u", [""])[0]
+    if u.startswith("a1"):
+        try:
+            b = u[2:]
+            return base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)).decode("utf-8", "replace")
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return href
+
+
+def parse_blocks(page: str, block: str, count: int, title_link: str, snippet: str,
+                 fix_url=lambda u: u) -> list[dict[str, str]]:
+    """Results laid out as one element per result (regex `block` marks where each starts)."""
+    out: list[dict[str, str]] = []
+    starts = [m.start() for m in re.finditer(block, page)]
+    for i, st in enumerate(starts):
+        chunk = page[st: starts[i + 1] if i + 1 < len(starts) else st + 6000]
+        a = re.search(title_link, chunk, re.S)
+        if not a:
+            continue
+        url = fix_url(_attr(a.group(1), "href"))
+        if not url.startswith("http"):
+            continue
+        sn = re.search(snippet, chunk, re.S)
+        out.append({"title": html_to_text(a.group(2)), "url": url, "snippet": html_to_text(sn.group(1)) if sn else ""})
+        if len(out) >= count:
+            break
+    return out
+
+
+def parse_mojeek(page: str, count: int) -> list[dict[str, str]]:
+    return parse_blocks(page, r"<a\b[^>]*\bclass\s*=\s*[\"']title\b", count,
+                        r"<a\b([^>]*\bclass\s*=\s*[\"']title\b[^>]*)>(.*?)</a>",
+                        r"<p\b[^>]*\bclass\s*=\s*[\"']s\b[^>]*>(.*?)</p>")
+
+
+def parse_bing(page: str, count: int) -> list[dict[str, str]]:
+    return parse_blocks(page, r"<li\b[^>]*\bclass\s*=\s*[\"'][^\"']*\bb_algo\b", count,
+                        r"<h2\b[^>]*>\s*<a\b([^>]*)>(.*?)</a>",
+                        r"<p\b[^>]*>(.*?)</p>", _bing_url)
+
+
+def _mojeek(query: str, count: int) -> list[dict[str, str]]:
+    import urllib.parse
+    page = _fetch("https://www.mojeek.com/search?" + urllib.parse.urlencode({"q": query}))
+    return parse_mojeek(page, count)
+
+
+def _bing(query: str, count: int) -> list[dict[str, str]]:
+    import urllib.parse
+    page = _fetch("https://www.bing.com/search?" + urllib.parse.urlencode({"q": query, "setlang": "en"}))
+    return parse_bing(page, count)
 
 
 def _searxng(base: str, query: str, count: int) -> list[dict[str, str]]:
@@ -127,26 +209,51 @@ def _searxng(base: str, query: str, count: int) -> list[dict[str, str]]:
             for r in data.get("results", [])[:count]]
 
 
-def search(settings, query: str, count: int = 5) -> list[dict[str, str]]:
+ENGINES = {"duckduckgo": _ddg, "mojeek": _mojeek, "bing": _bing}
+
+
+def search(settings, query: str, count: int = 5, problems: list[str] | None = None) -> list[dict[str, str]]:
+    """Results from the first engine that gives any: your SearXNG if set, then DuckDuckGo, Mojeek
+    and Bing (any of them can refuse a script now and then). problems collects why engines failed."""
+    problems = problems if problems is not None else []
     base = settings.get("research.searxng_url") or ""
+    order = []
     if settings.get("research.engine", "duckduckgo") == "searxng" and base:
-        return _searxng(base, query, count)
-    return _ddg(query, count)
+        order.append(("SearXNG", lambda q, c: _searxng(base, q, c)))
+    first = settings.get("research.engine", "duckduckgo")
+    names = [first] + [n for n in ENGINES if n != first] if first in ENGINES else list(ENGINES)
+    order += [(n, ENGINES[n]) for n in names]
+    for name, fn in order:
+        try:
+            results = fn(query, count)
+        except SearchBlocked as exc:
+            problems.append(str(exc))
+            continue
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+            problems.append(f"{name}: {exc}")
+            continue
+        if results:
+            return results
+        problems.append(f"{name}: no results")
+    return []
 
 
 @partial("web_search", "Searches the web and returns the top results (title, address and a snippet).",
          args=[Arg("query", "string", "What to search for"),
                Arg("count", "integer", "How many results", required=False, default=5)],
-         how="DuckDuckGo by default (no account or key), or your own SearXNG instance (Settings > Listening "
-             "& Keys > Research).",
+         how="DuckDuckGo by default (no account or key), falling back to Mojeek and Bing when it refuses; or "
+             "your own SearXNG instance (Settings > Listening & Keys > Research).",
          returns="list of {title, url, snippet}", category="web")
 def web_search(ctx, query, count=5):
     ctx.state("researching", f"Searching: {query}")
     ctx.think(f"Searching the web for: {query}", looking_at=f"search: {query}")
-    try:
-        results = search(ctx.settings, str(query), int(count))
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        raise FunctionError(f"web search failed: {exc}") from exc
+    problems: list[str] = []
+    results = search(ctx.settings, str(query), int(count), problems)
+    if not results:
+        failed = [p for p in problems if not p.endswith("no results")]
+        if failed and len(failed) == len(problems):
+            raise FunctionError("web search failed: " + "; ".join(failed))
+        ctx.think("  no results (" + "; ".join(problems) + ")")
     for r in results:
         ctx.think(f"- {r['title']} ({r['url']})")
     return results

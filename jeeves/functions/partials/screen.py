@@ -9,6 +9,7 @@ model; otherwise Jeeves looks for the object's name as text.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -103,6 +104,13 @@ class Mapper:
 
 OCR_TILE = 24                 # px: areas this size are judged light- or dark-backgrounded on their own
 _INVERT = bytes(range(255, -1, -1))
+GAIN_STEP = 0.04
+BG_LIFT_BELOW = 215          # backgrounds darker than this (as dark-on-light) are lifted to white
+_GAINS = [1 + GAIN_STEP * i for i in range(11)]          # background lifted by up to 40%
+_IDENTITY = bytes(range(256))
+_LUTS = {(inv, gi): (_IDENTITY if (not inv and gi == 0) else
+                     bytes(min(255, int(((255 - v) if inv else v) * g)) for v in range(256)))
+         for inv in (False, True) for gi, g in enumerate(_GAINS)}
 
 
 def _ocr_scale(w: int, h: int) -> float:
@@ -125,13 +133,29 @@ def prepare_for_ocr(src: Path) -> tuple[Path, float] | None:
     a dark sidebar next to a light web page both come out right), then scaled up.
     None when Qt isn't available (the raw screenshot is used then)."""
     try:
-        from PySide6.QtCore import Qt
         from PySide6.QtGui import QImage
     except Exception:  # noqa: BLE001
         return None
     img = QImage(str(src))
     if img.isNull():
         return None
+    return _save_prepared(img, _ocr_scale(img.width(), img.height()))
+
+
+def _save_prepared(img, scale: float) -> tuple[Path, float] | None:
+    out = _prepared(img, scale)
+    fd, name = tempfile.mkstemp(prefix="jeeves-ocr-", suffix=".png")
+    os.close(fd)
+    if not out.save(name, "PNG"):
+        Path(name).unlink(missing_ok=True)
+        return None
+    return Path(name), scale
+
+
+def _prepared(img, scale: float):
+    """img (a QImage) as dark text on light, greyscale, scaled."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
     img = img.convertToFormat(QImage.Format_Grayscale8)
     w, h = img.width(), img.height()
     bpl = img.bytesPerLine()
@@ -141,31 +165,36 @@ def prepare_for_ocr(src: Path) -> tuple[Path, float] | None:
     small = img.scaled(tw, th, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
     sbpl = small.bytesPerLine()
     means = bytes(small.constBits())[: sbpl * th]
+    dark = [[means[ty * sbpl + tx] < 128 for tx in range(tw)] for ty in range(th)]
+    # each tile's background as dark-on-light: the lightest tile mean around it (a tile full of text
+    # averages darker than its background)
+    light = [[255 - means[ty * sbpl + tx] if dark[ty][tx] else means[ty * sbpl + tx] for tx in range(tw)]
+             for ty in range(th)]
     for ty in range(th):
-        row = means[ty * sbpl: ty * sbpl + tw]
-        # runs of dark tiles in this tile row, flipped one slice per pixel row
+        rows = light[max(0, ty - 1): ty + 2]
+        lut_row = []
+        for tx in range(tw):
+            bg = max(r[k] for r in rows for k in range(max(0, tx - 1), min(tw, tx + 2)))
+            # stretch so the background is white: Tesseract binarizes the whole page with one threshold,
+            # so a grey chat background beside a white page came out black and its text was lost
+            gain = 0 if bg >= BG_LIFT_BELOW else \
+                min(len(_GAINS) - 1, max(0, round((255 / max(1, bg) - 1) / GAIN_STEP)))
+            lut_row.append(_LUTS[(dark[ty][tx], gain)])
         tx = 0
-        while tx < tw:
-            if row[tx] >= 128:
+        while tx < tw:                       # runs of tiles needing the same mapping, one slice per pixel row
+            start, lut = tx, lut_row[tx]
+            while tx < tw and lut_row[tx] is lut:
                 tx += 1
+            if lut is _IDENTITY:
                 continue
-            start = tx
-            while tx < tw and row[tx] < 128:
-                tx += 1
             x0, x1 = start * OCR_TILE, min(w, tx * OCR_TILE)
             for y in range(ty * OCR_TILE, min(h, (ty + 1) * OCR_TILE)):
                 o = y * bpl
-                data[o + x0: o + x1] = data[o + x0: o + x1].translate(_INVERT)
+                data[o + x0: o + x1] = data[o + x0: o + x1].translate(lut)
     out = QImage(bytes(data), w, h, bpl, QImage.Format_Grayscale8).copy()
-    scale = _ocr_scale(w, h)
     if scale != 1.0:
         out = out.scaled(int(w * scale), int(h * scale), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    fd, name = tempfile.mkstemp(prefix="jeeves-ocr-", suffix=".png")
-    os.close(fd)
-    if not out.save(name, "PNG"):
-        Path(name).unlink(missing_ok=True)
-        return None
-    return Path(name), scale
+    return out
 
 
 def ocr_words(image: Path, prepare: bool = True) -> list[dict]:
@@ -337,7 +366,8 @@ def _per_monitor(words: list[dict], mp: Mapper, region, width: int, height: int)
         rect = _rect_for(region, width, height, mp, o.name)
         lines = _group_lines([w for w in words if _inside(w, rect)])
         if lines:
-            parts.append(f"[{describe_output(o, outs).removeprefix('your ')}]\n" + "\n".join(l["text"] for l in lines))
+            blocks = layout_blocks([w for w in words if _inside(w, rect)])
+            parts.append(f"[{describe_output(o, outs).removeprefix('your ')}]\n" + "\n\n".join(b["text"] for b in blocks))
     return "\n\n".join(parts)
 
 
@@ -369,6 +399,125 @@ def _group_lines(words: list[dict]) -> list[dict]:
         x1, y1 = max(w["x"] + w["w"] for w in ws), max(w["y"] + w["h"] for w in ws)
         out.append({"text": " ".join(w["text"] for w in ws), "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0, "line": key})
     return sorted(out, key=lambda l: (l["y"], l["x"]))
+
+
+# ---------------------------------------------------------------------------
+# Layout: the screen as blocks of text (a message, a paragraph, a dialog, a menu)
+# ---------------------------------------------------------------------------
+
+def _visual_lines(words: list[dict]) -> list[dict]:
+    """Tesseract's lines, with pieces of one visual line (split by wide gaps) joined back up."""
+    lines = _group_lines(words)
+    out: list[dict] = []
+    for ln in sorted(lines, key=lambda l: (l["x"], l["y"])):
+        h = max(1, ln["h"])
+        for o in out:
+            same_row = abs((o["y"] + o["h"] / 2) - (ln["y"] + h / 2)) < 0.45 * max(h, o["h"])
+            gap = ln["x"] - (o["x"] + o["w"])
+            if same_row and -h < gap < 1.6 * max(h, o["h"]):
+                x1, y1 = max(o["x"] + o["w"], ln["x"] + ln["w"]), max(o["y"] + o["h"], ln["y"] + ln["h"])
+                o["text"] += " " + ln["text"]
+                o["x"], o["y"] = min(o["x"], ln["x"]), min(o["y"], ln["y"])
+                o["w"], o["h"] = x1 - o["x"], y1 - o["y"]
+                break
+        else:
+            out.append(dict(ln))
+    return sorted(out, key=lambda l: (l["y"], l["x"]))
+
+
+def layout_blocks(words: list[dict]) -> list[dict]:
+    """Lines grouped into blocks: lines stacked closely, sharing a left edge or overlapping, are one
+    block. [{text (lines joined by newlines), x, y, w, h, lines}] in image pixels, top to bottom."""
+    blocks: list[dict] = []
+    for ln in _visual_lines(words):
+        h = max(1, ln["h"])
+        best = None
+        for b in blocks:
+            last = b["last"]
+            lh = max(h, last["h"])
+            gap = ln["y"] - (last["y"] + last["h"])
+            if not (-0.3 * lh < gap < 1.1 * lh):
+                continue
+            aligned = abs(ln["x"] - last["x"]) < 2.5 * lh or abs(ln["x"] - b["x"]) < 2.5 * lh
+            overlap = min(ln["x"] + ln["w"], b["x"] + b["w"]) - max(ln["x"], b["x"]) > 0.5 * min(ln["w"], b["w"])
+            if (aligned or overlap) and abs(h - last["h"]) < 0.8 * lh:
+                best = b
+                break
+        if best is None:
+            blocks.append({"text": ln["text"], "x": ln["x"], "y": ln["y"], "w": ln["w"], "h": ln["h"],
+                           "lines": 1, "last": ln})
+            continue
+        x1, y1 = max(best["x"] + best["w"], ln["x"] + ln["w"]), max(best["y"] + best["h"], ln["y"] + ln["h"])
+        best["x"], best["y"] = min(best["x"], ln["x"]), min(best["y"], ln["y"])
+        best["w"], best["h"] = x1 - best["x"], y1 - best["y"]
+        best["text"] += "\n" + ln["text"]
+        best["lines"] += 1
+        best["last"] = ln
+    for b in blocks:
+        b.pop("last")
+    return sorted(blocks, key=lambda b: (b["y"], b["x"]))
+
+
+def reread(image: Path, rect: tuple[int, int, int, int], line_h: float = 14, pad: int = 8) -> str:
+    """Zoom in on one part of a screenshot and read it again: cropped, cleaned up and scaled so its
+    text is ~30 px tall, read as one block of text (so lines come out in order, and Tesseract isn't
+    distracted by the rest of the screen). "" when it can't."""
+    if not which("tesseract"):
+        return ""
+    try:
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QImage
+    except Exception:  # noqa: BLE001
+        return ""
+    full = QImage(str(image))
+    if full.isNull():
+        return ""
+    x, y, w, h = rect
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(full.width(), x + w + pad), min(full.height(), y + h + pad)
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return ""
+    crop = full.copy(QRect(x0, y0, x1 - x0, y1 - y0))
+    scale = max(1.5, min(4.0, 30 / max(6.0, float(line_h))))
+    saved = _save_prepared(crop, scale)
+    if saved is None:
+        return ""
+    try:
+        out = run(["tesseract", str(saved[0]), "-", "--psm", "6", "--dpi", str(int(96 * scale)),
+                   "-c", "tessedit_do_invert=0", "-c", "preserve_interword_spaces=1"], timeout=30)
+    finally:
+        saved[0].unlink(missing_ok=True)
+    text = "\n".join(ln.rstrip() for ln in out.stdout.splitlines() if ln.strip()) if out.returncode == 0 else ""
+    return re.sub(r"[ ]{2,}", "  ", text).strip()
+
+
+def crop_jpeg(image: Path, rect: tuple[int, int, int, int], pad: int = 12, max_width: int = 1600) -> bytes | None:
+    """A crop of the screenshot at full resolution (a vision model can read small text in it,
+    unlike a whole desktop shrunk to 1280 px)."""
+    try:
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRect, Qt
+        from PySide6.QtGui import QImage
+    except Exception:  # noqa: BLE001
+        return None
+    full = QImage(str(image))
+    if full.isNull():
+        return None
+    x, y, w, h = rect
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    crop = full.copy(QRect(x0, y0, min(full.width(), x + w + pad) - x0, min(full.height(), y + h + pad) - y0))
+    if crop.width() > max_width:
+        crop = crop.scaledToWidth(max_width, Qt.SmoothTransformation)
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.WriteOnly)
+    crop.save(buf, "JPG", 90)
+    return bytes(ba)
+
+
+def union(rects: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+    x0, y0 = min(r[0] for r in rects), min(r[1] for r in rects)
+    x1, y1 = max(r[0] + r[2] for r in rects), max(r[1] + r[3] for r in rects)
+    return x0, y0, x1 - x0, y1 - y0
 
 
 @partial(
@@ -453,7 +602,7 @@ def read_screen_text(ctx, region="anywhere", screen="all"):
         for _ in range(8):
             inside = [w for w in words if _inside(w, rect)]
             if inside or rect == bound:
-                return "\n".join(l["text"] for l in _group_lines(inside))
+                return "\n\n".join(b["text"] for b in layout_blocks(inside))     # block by block
             if isinstance(region, dict):
                 break
             rect = _expand_within(rect, bound)

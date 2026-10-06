@@ -151,8 +151,9 @@ def control_mode(ctx, actions=None, instruction=""):
           Arg("screen", "string", "Which monitor: current (the one you're working on), all, primary, left, right, "
               "other, or a monitor name. Finding something searches all of them unless one is named.",
               required=False, default="")],
-    how="Takes a screenshot, reads it with OCR (Tesseract) and has the local response model answer from the text "
-        "it found. Without a local model it reads the text out. Read-only: it never clicks anything.",
+    how="Takes a screenshot and reads it with OCR (Tesseract), finds the part the question is about, zooms in "
+        "and reads just that again, then has the local response model (or the vision model, shown the zoomed-in "
+        "part) answer from it. Read-only: it never clicks anything.",
     keywords=["on my screen", "on the screen", "read the screen", "read my screen", "what does it say",
               "what does this say", "look at my screen", "can you see my screen", "what am i looking at"],
     examples=["Jeeves, what does this error say?", "Jeeves, read the top of the screen.",
@@ -177,61 +178,147 @@ def screen_reading(ctx, question="", region="anywhere", find="", screen=""):
         except FunctionError:
             pass
         return ctx.say(f"{hit.get('text') or find} is {where}.")
-    text = ctx.call("read_screen_text", region=region, screen=screen or "all")
-    ctx.think("Text on screen:\n" + text)
-    vision = ctx.engine.models.vision_llm(ctx.agent)
-    if vision is not None:                       # a model that can see: show it the screens themselves
-        answer = _look_with_vision(ctx, vision, q, text, screen or "all", region)
+    return _read_and_answer(ctx, q, region, screen or "all")
+
+
+MAX_PICKED_BLOCKS = 8
+
+
+def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
+    """Read the screen the way a person would: glance over it, find the part that matters, look
+    closely at just that, then answer.
+
+    1. One screenshot, OCR'd whole, grouped into blocks (a chat message, a paragraph, a dialog...).
+    2. The model gets an outline of the blocks -- where each is, whether it's in the window you're
+       using -- and picks the ones your question is about, in the order they should be read.
+    3. Each picked block is cropped, enlarged and read again on its own: far fewer OCR mistakes, and
+       its lines come out in order. A vision model gets that crop at full resolution as well.
+    4. The model answers from the clean text. The raw OCR is never read out."""
+    from ..daemon import desktop as dk
+    from .partials import screen as sc
+    shot = sc.screenshot()
+    try:
+        width, height = sc._image_size(shot)
+        mp = sc.Mapper((width, height))
+        rect = sc._rect_for(region, width, height, mp, screen)
+        blocks = sc.layout_blocks([w for w in sc.ocr_words(shot) if sc._inside(w, rect)])
+        try:
+            outs = dk.outputs()
+        except Exception:  # noqa: BLE001
+            outs = []
+        if not outs:                             # layout unknown: the screenshot is the one screen
+            from types import SimpleNamespace
+            bx, by, bw, bh = mp.box
+            outs = [SimpleNamespace(name="screen", x=bx, y=by, w=bw, h=bh, primary=True)]
+        try:
+            f = dk.focused()
+        except Exception:  # noqa: BLE001
+            f = None
+        frect = mp.rect_to_image((f.x, f.y, f.w, f.h)) if f and f.w and f.h else None
+        for b in blocks:
+            b["where"] = _describe_position(ctx, *mp.point(b["x"] + b["w"] / 2, b["y"] + b["h"] / 2), outs=outs)
+            b["focused"] = bool(frect and sc._inside(b, frect))
+        app = f"The window they're using: {f.app} -- {f.title}\n" if f else ""
+        vision = ctx.engine.models.vision_llm(ctx.agent)
+        if not blocks and vision is None:
+            return ctx.say("I can't read any text there." if region != "anywhere" else
+                           "I can't read any text on the screen right now.")
+        picked = _pick_blocks(ctx, question, blocks, app) if blocks else []
+        ctx.state("thinking", "Reading it closely")
+        pieces = []
+        for b in picked:
+            clean = sc.reread(shot, (b["x"], b["y"], b["w"], b["h"]), b["h"] / max(1, b["lines"]))
+            # keep the first reading if zooming in lost most of it
+            pieces.append((b, clean if len(clean) >= 0.6 * len(b["text"]) else b["text"]))
+        ctx.think("Read closely:\n" + "\n\n".join(f"[{b['where']}]\n{t}" for b, t in pieces))
+        text = "\n\n".join(f"[{b['where']}{', in the window they are using' if b['focused'] else ''}]\n{t}"
+                            for b, t in pieces)
+        q = question or "read what's on my screen"
+        answer = None
+        if vision is not None:
+            area = sc.union([(b["x"], b["y"], b["w"], b["h"]) for b in picked]) if picked else rect
+            answer = _look_with_vision(ctx, vision, q, text, sc.crop_jpeg(shot, area), app)
+        if answer is None and text:
+            answer = ctx.engine.models.respond(
+                ctx.agent,
+                f"You looked at the user's screen, found the part that matters and read it closely (OCR of an "
+                f"enlarged crop -- small recognition mistakes are still possible: fix obvious ones silently and "
+                f"never repeat garbled fragments; if a bit is unreadable, just skip it).\n\n{app}{text[:6000]}\n\n"
+                f"The user said: {q}\n\nAnswer what they asked from this. If they asked you to read something, read "
+                "it naturally and in a sensible order -- skip usernames, timestamps, buttons and menus unless they "
+                "matter, and summarize instead of reading word for word when that serves them better. If what "
+                "they asked about isn't there, say so.",
+                ctx=ctx)
         if answer:
             return ctx.say(answer)
-    if not text.strip():
-        return ctx.say("I can't read any text there." if region != "anywhere" else
-                       "I can't read any text on the screen right now.")
-    from ..daemon import desktop as dk
-    try:
-        f = dk.focused()
-        app = f"\nFocused window: {f.app} -- {f.title}" if f else ""
-    except Exception:
-        app = ""
-    answer = ctx.engine.models.respond(
+        if not text:
+            return ctx.say("I couldn't find anything about that on the screen.")
+        ctx.show(text)                           # the clean text is on screen; never read raw OCR aloud
+        if len(text) < 160 and len(pieces) == 1:
+            return ctx.say(pieces[0][1])
+        return ctx.say("I read it, but couldn't get an answer together from the model. I've put the text up "
+                       "for you.")
+    finally:
+        shot.unlink(missing_ok=True)
+
+
+def _pick_blocks(ctx, question: str, blocks: list[dict], app: str) -> list[dict]:
+    """The blocks the question is about, in reading order -- chosen by the model from an outline."""
+    import re as _re
+    from .research import keywords
+    outline = "\n".join(f"[{i + 1}] ({b['where']}{', *' if b['focused'] else ''}) "
+                         f"{b['text'][:160].replace(chr(10), ' / ')}" for i, b in enumerate(blocks[:80]))
+    reply = ctx.engine.models.respond(
         ctx.agent,
-        f"Text read from {_screen_words(screen)}{'' if region == 'anywhere' else f' ({region} of it)'} with OCR, top "
-        f"to bottom (it may contain recognition mistakes and menu clutter):\n{text[:6000]}{app}\n\n"
-        f"The user said: {q or 'read the screen'}\n\nAnswer from what's on the screen. If they asked you to read "
-        "something, read the relevant part out (skip menus and buttons). If it isn't on screen, say so.",
-        ctx=ctx)
-    if answer is None:
-        answer = text if len(text) < 600 else text[:600].rsplit(" ", 1)[0] + "…"
-    return ctx.say(answer)
+        f"Text found on the user's screen, as numbered blocks (where each is; * = in the window they're using):\n"
+        f"{outline}\n\n{app}The user asked: {question or 'read my screen'}\n\nWhich blocks are needed to answer? "
+        "List their numbers in the order they should be read (a conversation oldest to newest, unless they asked "
+        "about the latest message). Leave out menus, sidebars and anything unrelated. Reply with the numbers only, "
+        "like: 4, 7, 2. Reply ALL to read everything in the window they're using, or NONE if nothing fits.",
+        ctx=None, raw=True)
+    if reply is not None:
+        ctx.think(f"Looking at blocks: {reply.strip()[:80]}")
+        if _re.search(r"\bNONE\b", reply, _re.I) and not _re.search(r"\d", reply):
+            return []
+        if _re.search(r"\bALL\b", reply, _re.I) and not _re.search(r"\d", reply):
+            inside = [b for b in blocks if b["focused"]] or blocks
+            keep = sorted(inside, key=lambda b: -len(b["text"]))[:MAX_PICKED_BLOCKS]
+            return [b for b in inside if b in keep]
+        nums = [int(n) for n in _re.findall(r"\d+", reply)]
+        picked = []
+        for n in nums:
+            if 1 <= n <= len(blocks) and blocks[n - 1] not in picked:
+                picked.append(blocks[n - 1])
+        if picked:
+            return picked[:MAX_PICKED_BLOCKS]
+    # no model (or no usable reply): blocks sharing words with the question, else the window in use
+    kws = set(keywords(question))
+    scored = sorted(blocks, key=lambda b: (-len(kws & set(keywords(b["text"]))), not b["focused"], -len(b["text"])))
+    best = [b for b in scored if kws & set(keywords(b["text"]))] or [b for b in blocks if b["focused"]] or blocks
+    keep = best[:MAX_PICKED_BLOCKS]
+    return [b for b in blocks if b in keep]              # in screen order
 
 
-def _look_with_vision(ctx, vision, question: str, text: str, screen: str, region: str) -> str | None:
-    from ..daemon.watcher import grab, image_parts
+def _look_with_vision(ctx, vision, question: str, text: str, image: bytes | None, app: str) -> str | None:
+    """A model that can see: the enlarged crop of the part that matters, plus its clean text."""
+    from ..daemon.watcher import image_parts
     from ..models import persona
-    try:
-        frame = grab(screen)
-    except FunctionError as exc:
-        ctx.think(f"Couldn't capture the screen: {exc}")
+    if not image:
         return None
     try:
-        images = frame.get("images") or []
-        if not images:
-            return None
-        names = ", ".join(lbl for lbl, _ in images)
-        prompt = (f"These are the user's screens ({names}).{'' if region == 'anywhere' else f' Focus on the {region}.'}"
-                  f"\nText found on them by OCR (may have mistakes):\n{text[:3000] or '(none)'}\n\n"
-                  f"The user said: {question or 'what is on my screen?'}\n\nAnswer from what you see. Say which "
-                  "screen something is on when there's more than one. Plain spoken sentences.")
-        messages = [{"role": "user", "content": image_parts(images) + [{"type": "text", "text": prompt}]}]
+        prompt = (f"This is the part of the user's screen that matters, at full resolution.\n{app}"
+                  f"Text read from it (may have small mistakes):\n{text[:3000] or '(none)'}\n\n"
+                  f"The user said: {question}\n\nAnswer from what you see. If they asked you to read something, "
+                  "read it naturally, skipping usernames, timestamps and buttons unless they matter. Plain spoken "
+                  "sentences.")
+        messages = [{"role": "user", "content": image_parts([("crop", image)]) + [{"type": "text", "text": prompt}]}]
         if persona.has_persona(ctx.agent):
             messages.insert(0, {"role": "system", "content": persona.identity_block(ctx.agent)})
         return (vision.chat(messages, max_tokens=int(ctx.settings.get("models.local_response.max_tokens", 512)),
                             cancelled=ctx.is_cancelled) or "").strip() or None
-    except Exception as exc:  # noqa: BLE001 -- fall back to the OCR answer
+    except Exception as exc:  # noqa: BLE001 -- fall back to the text answer
         ctx.think(f"Vision model failed: {exc}")
         return None
-    finally:
-        frame["shot"].unlink(missing_ok=True)
 
 
 def _screen_words(screen: str) -> str:
@@ -243,12 +330,13 @@ def _screen_words(screen: str) -> str:
     return f"the user's {s} screen"
 
 
-def _describe_position(ctx, x: int, y: int) -> str:
+def _describe_position(ctx, x: int, y: int, outs: list | None = None) -> str:
     from ..daemon import desktop as dk
-    try:
-        outs = dk.outputs()
-    except Exception:
-        outs = []
+    if outs is None:
+        try:
+            outs = dk.outputs()
+        except Exception:
+            outs = []
     out = next((o for o in outs if o.x <= x < o.x + o.w and o.y <= y < o.y + o.h), None)
     if out is None:
         return f"at {x}, {y}"
@@ -500,10 +588,12 @@ def research(ctx, question, depth=""):
         sources, results = [], []
     if not sources:                              # nothing online: answer from what it knows, and say so
         reply = ctx.engine.models.respond(
-            ctx.agent, f"{question}\n\n(You couldn't look this up online just now. Answer from what you know, "
-            "and say briefly that you couldn't check it.)", ctx=ctx)
+            ctx.agent, f"{question}\n\n(You couldn't look this up online just now. If you genuinely know the "
+            "answer, give it and say briefly that you couldn't check it. If it's about something specific you "
+            "don't clearly know -- a particular game's moves or items, a small community, a recent event -- do NOT "
+            "guess or make something up: say you couldn't look it up and don't know.)", ctx=ctx)
         if reply is None:
-            raise FunctionError("I couldn't find anything about that")
+            raise FunctionError("I couldn't look that up online, and I don't know it myself")
         return ctx.say(reply)
     ctx.trace("sources", sources=[{"title": s["title"], "url": s["url"]} for s in sources])
     material = "\n\n".join(f"[{i + 1}] {s['title']} ({s['url']})\n{s['text']}" for i, s in enumerate(sources))
@@ -511,15 +601,19 @@ def research(ctx, question, depth=""):
     answer = ctx.engine.models.respond(
         ctx.agent,
         f"Question: {question}\n\nSources:\n{material}\n\n"
-        "Using only these sources, explain the answer properly -- not a one-line summary. Say what the answer "
-        "is, then explain the why or how and the key details a curious person would want (names, numbers, "
-        "dates, steps, what it means for them), in about 4 to 8 plain sentences. After each fact put the number "
-        "of the source it came from in square brackets, like [2]. Don't add facts the sources don't give: if "
-        "they disagree or only partly answer it, say what they do say and what they don't.",
+        "Using only these sources, answer exactly what was asked -- nothing more. First check that the sources "
+        "are about the same thing (the same game, item or person); ignore ones that aren't, and if none are, say "
+        f"you couldn't find it. {_answer_shape(question)} Leave out history, background, how it works and anything "
+        "about the game or topic in general unless they asked for it. After each fact put the number of the "
+        "source it came from in square brackets, like [2]. Don't add facts the sources don't give: if they only "
+        "partly answer it, say what's missing in one sentence.",
         ctx=ctx)
-    if answer is None:                           # no local model: read out the best snippet
-        best = next((r for r in results if r.get("snippet")), None)
-        answer = f"According to {best['title']}: {best['snippet']} [1]" if best else sources[0]["text"][:400]
+    if answer is None:
+        # no answer from the model: never read a raw snippet out as if it were one (that's how a line
+        # about something else entirely got said as the answer) -- point at the sources instead
+        show_sources(ctx, question, "", sources)
+        return ctx.say(f"I found {len(sources)} page{'s' if len(sources) != 1 else ''} about it but couldn't put "
+                       "an answer together. They're in the sources window.")
     spoken = re.sub(r"\s*\[\d+(?:\s*[,-]\s*\d+)*\]", "", answer).strip()
     show_sources(ctx, question, answer, sources)
     ctx.trace("say", text=spoken)
@@ -528,6 +622,14 @@ def research(ctx, question, depth=""):
     ctx.state("responding", spoken)
     ctx.engine.speak(ctx, spoken)
     return spoken
+
+
+def _answer_shape(question: str) -> str:
+    from .research import kind_of
+    if kind_of(question) == "howto":
+        return ("They want to know how to do it: give the steps in order, as short plain sentences (2 to 5), with "
+                "the exact keys, timings or requirements the sources give.")
+    return "Give the answer in the first sentence, then at most two sentences of the detail that matters most."
 
 
 def show_sources(ctx, question: str, answer: str, sources: list[dict]) -> None:

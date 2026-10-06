@@ -83,6 +83,9 @@ def looks_factual(text: str, agent: dict[str, Any] | None = None) -> bool:
     return bool(names or re.search(r"\d", t) or re.search(rf"\b({FACT_WORDS})\b", low))
 
 
+NAME_TAIL_FRAMES = 8          # 240 ms
+
+
 def is_noise_text(text: str) -> bool:
     t = re.sub(r"[\[\]()*♪.,!?'\"_-]", " ", text.lower())
     t = " ".join(t.split()).replace("amara org", "amaraorg")
@@ -553,6 +556,17 @@ class Engine:
         if s.mode == "request" and is_noise_text(text):
             log.info("ignored '%s' (what speech recognition hears in silence)", text)
             text = ""
+        if s.mode == "request" and not s.interrupting and self._no_request_in(text):
+            # only the name (or its tail, a breath, "um", another agent's name): the request hasn't been
+            # said yet -- answering this is the "instant reply about nothing". Listen once more for it.
+            if not s.retried:
+                log.info("  heard only '%s': still listening for the request", text)
+                again = self.open_session(s.source, s.agent_id, "request")
+                again.retried = True
+                self.apply_settings()
+                return
+            log.info("  heard only '%s' again; giving up", text)
+            text = ""
         if s.interrupting:
             if self._after_interruption(s.interrupting, text):
                 self.set_indicator(s.request_id, s.agent_id, "idle")
@@ -563,6 +577,16 @@ class Engine:
             return
         log.info("  heard: %s", text)
         self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id)
+
+    FILLER = set("um uh uhm erm er hm hmm mm hey hi oh ok okay so yeah yes no the a and you i like well right "
+                 "please thanks thank".split())
+
+    def _no_request_in(self, text: str) -> bool:
+        """Nothing in this transcript but call names and filler."""
+        names = {w for a in self.agents().values() for n in [a.get("name", "")] + list(a.get("call_names", []))
+                 for w in normalize(n).split()}
+        words = normalize(text).split()
+        return all(w in self.FILLER or any(similarity(w, n) >= 0.75 for n in names) for w in words)
 
     def transcribe(self, pcm: bytes, agent: dict[str, Any] | None = None) -> str:
         """Speech to text. A failed or timed-out speech server is restarted and tried once more;
@@ -641,7 +665,10 @@ class Engine:
             self.flash_unavailable(aid, f"speech recognition is unloaded while {self.models.suspended['stt']} is open")
         s = self.open_session(source, aid, "extended" if aid in self.extended else "request")
         s.interrupting = paused
-        spoke_at = self._speech_in(after, threshold, words)
+        # Vosk's end time for the name is often early, so the first ~quarter second after it is mostly
+        # the name's own tail ("-ves") -- which counted as the request starting, ended the listen a moment
+        # later and got an instant answer to nothing. Judge speech only after that.
+        spoke_at = self._speech_in(after[NAME_TAIL_FRAMES:], threshold, words)
         if spoke_at is not None:
             # words already followed the name ("Jeeves, open OBS" in one breath)
             s.frames = list(after)

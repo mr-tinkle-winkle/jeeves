@@ -52,6 +52,7 @@ class Session:
     voiced_frames: int = 0        # how much of it was actually speech
     suspended: bool = False       # right-click > Suspend: stop taking audio until resumed
     interrupting: list[str] = field(default_factory=list)   # requests paused because their agent was called
+    retried: bool = False         # reopened because only the name was heard the first time
 
     def feed(self, frame: bytes, voiced: bool, now: float) -> None:
         self.frames.append(frame)

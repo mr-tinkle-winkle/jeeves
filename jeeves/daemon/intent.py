@@ -144,9 +144,15 @@ class IntentProcessor:
             recent = self.history.recent(am["recent"], agent=agent_id_of(ctx) if am["own_only"] else None,
                                          exclude=ctx.request.get("id") if ctx else None) if am["recent"] else []
         if recent:
-            messages.append({"role": "system", "content": "Recent requests (for 'that', 'it', 'the one I just "
-                             "made'):\n" + "\n".join(f"- \"{r['text']}\" -> {r['function']} {json.dumps(r['args'])}"
-                                                     for r in recent)})
+            me = ctx.agent_id if ctx is not None else None
+            names = {k: v.get("name", k) for k, v in (self.settings.get("agents", {}) or {}).items()}
+
+            def line(r: dict[str, Any]) -> str:
+                to = "" if r.get("agent") in (None, me) else f" (said to {names.get(r['agent'], 'another assistant')})"
+                return f"- \"{r['text']}\"{to} -> {r['function']} {json.dumps(r['args'])}"
+            messages.append({"role": "system", "content": "Recent requests (only to resolve 'that', 'it', 'the one "
+                             "I just made' -- the new request is the one that counts; never act on these again):\n"
+                             + "\n".join(line(r) for r in recent)})
         messages.append({"role": "user", "content": text})
         by_name = {f.name: f for f in functions}
         notes: list[str] = []

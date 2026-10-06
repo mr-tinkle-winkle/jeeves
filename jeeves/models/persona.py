@@ -51,7 +51,8 @@ def reminder(agent: dict[str, Any]) -> str:
 def others_note(turns: list[dict[str, Any]], names: dict[str, str]) -> str:
     lines = [f"- The user asked {names.get(t.get('agent') or '', 'another assistant')}: \"{t['text']}\""
              + (f" -- it answered: \"{str(t['result'])[:300]}\"" if t.get("result") else "") for t in turns]
-    return ("Earlier, the user also talked to other assistants (not you; don't copy their style):\n"
+    return ("Earlier, the user also talked to other assistants (not you; don't copy their style). This is "
+            "background only: don't bring them or those conversations up unless the user asks about them.\n"
             + "\n".join(lines)) if lines else ""
 
 

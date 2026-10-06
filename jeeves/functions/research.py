@@ -9,10 +9,12 @@ follow-up searches until the question is answered (or the rounds run out).
 3. Each page is read in full and only its relevant passages are kept -- the fact you
    want is often in the middle of a long wiki page, past the first few thousand
    characters.
-4. The model checks whether the sources answer the question; if not, it names what's
-   missing as a new search, and another round runs (Settings: research depth).
-5. The answer explains what was found, cites sources [n], and says plainly when the
-   sources don't confirm something instead of guessing.
+4. After each page the model checks whether the question is now actually answered (for
+   "how do I..." that means the steps, not a description of the thing). As soon as it is,
+   reading stops and only the pages that answer it are used. If something is missing, it
+   names it as a new search and another round runs (Settings: research depth).
+5. The answer gives just what was asked -- steps for a how-to, the fact for a question --
+   cites sources [n], and says plainly when the sources don't confirm something.
 """
 from __future__ import annotations
 
@@ -34,13 +36,19 @@ GAME_HINT = re.compile(r"\b(boss|build|item|weapon|armou?r|quest|level|map|patch
                        r"walkthrough|spawn|drop|location|lore|ending|skill|perk|class|mod|speedrun|game)\b", re.I)
 
 
+HOWTO = re.compile(r"\b(how (?:do|can|to|would|should|does one)|how'?s it done|steps? (?:to|for)|way to|"
+                   r"guide (?:to|for)|tutorial|perform|pull off|execute)\b", re.I)
+
+
 def keywords(text: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9][a-z0-9'+-]*", text.lower()) if w not in STOP and len(w) > 1]
 
 
 def plan_queries(ctx: Any, question: str) -> list[str]:
     fallback = [question]
-    if GAME_HINT.search(question):
+    if HOWTO.search(question):
+        fallback += [f"{question} guide"]
+    elif GAME_HINT.search(question):
         fallback += [f"{question} wiki", f"{question} reddit"]
     else:
         fallback += [f"{question} explained"]
@@ -48,7 +56,8 @@ def plan_queries(ctx: Any, question: str) -> list[str]:
         ctx.agent,
         f"Question: {question}\n\nWrite 3 different web search queries that would find the answer. Keep exact "
         "names (games, items, people, products). For game questions make one aimed at the game's wiki and one "
-        "at Reddit or a guide. One query per line, nothing else.",
+        "at Reddit or a guide. For 'how do I...' questions aim them at guides and tutorials. One query per line, "
+        "nothing else.",
         ctx=None, raw=True)
     lines = [re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", ln).strip().strip('"') for ln in (reply or "").splitlines()]
     queries = [q for q in lines if 3 <= len(q) <= 150][:3]
@@ -59,14 +68,20 @@ def plan_queries(ctx: Any, question: str) -> list[str]:
     return out[:4]
 
 
+GUIDE_WORDS = re.compile(r"\b(how to|guide|tutorial|tips|walkthrough|steps|technique|tech)\b", re.I)
+
+
 def rank(results: list[dict[str, str]], question: str) -> list[dict[str, str]]:
     kws = set(keywords(question))
+    howto = HOWTO.search(question) is not None
 
     def score(r: dict[str, str]) -> float:
         host = urlparse(r.get("url", "")).netloc.lower()
         s = 2.0 if any(g in host or g in r.get("url", "") for g in GOOD_SITES) else 0.0
         words = set(keywords(r.get("title", "") + " " + r.get("snippet", "")))
         s += len(kws & words) / max(1, len(kws)) * 3
+        if howto and GUIDE_WORDS.search(r.get("title", "") + " " + r.get("snippet", "") + " " + r.get("url", "")):
+            s += 1.5                                 # a how-to question: guides first
         return s
     useful = [r for r in results if not any(b in urlparse(r.get("url", "")).netloc.lower() for b in BAD_SITES)]
     return sorted(useful, key=score, reverse=True)
@@ -105,23 +120,46 @@ def relevant_passages(text: str, question: str, extra: str = "", limit: int = 40
     return "\n".join(out)[:limit]
 
 
-def assess(ctx: Any, question: str, sources: list[dict[str, Any]]) -> str | None:
-    """None when the sources answer the question; otherwise a follow-up search query."""
+def kind_of(question: str) -> str:
+    """'howto' (wants steps), or 'fact' (wants the thing itself)."""
+    return "howto" if HOWTO.search(question) else "fact"
+
+
+def what_counts(question: str) -> str:
+    if kind_of(question) == "howto":
+        return ("the actual steps or inputs to do it. A page that only says what it is, why it's useful or its "
+                "history does NOT answer a how-to question")
+    return "a direct, specific answer to exactly what was asked -- not just general information about the topic"
+
+
+def assess(ctx: Any, question: str, sources: list[dict[str, Any]]) -> tuple[str, Any]:
+    """After each page: ("answered", [source numbers that answer it]) to stop reading,
+    ("search", query) for something missing, or ("more", None) to keep reading."""
     material = "\n\n".join(f"[{i + 1}] {s['title']}\n{s['text'][:1500]}" for i, s in enumerate(sources))
     reply = ctx.engine.models.respond(
         ctx.agent,
-        f"Question: {question}\n\nWhat was found so far:\n{material}\n\nDo these sources contain a specific, "
-        "confident answer? Reply ANSWERED if they do. If not, reply SEARCH: followed by one web search query for "
-        "exactly what's missing (keep the exact names).",
+        f"Question: {question}\n\nWhat was found so far:\n{material}\n\nDoes this material actually answer the "
+        f"question? That means {what_counts(question)}. Reply ANSWERED: followed by the numbers of the sources "
+        "that answer it (e.g. ANSWERED: 2). If not, reply SEARCH: followed by one web search query for exactly "
+        "what's missing (keep the exact names), or MORE if the next pages might have it.",
         ctx=None, raw=True) or ""
+    head = reply.upper().split("SEARCH")[0]
+    if "ANSWERED" in head:
+        after = reply[reply.upper().index("ANSWERED") + 8:]
+        nums = [int(n) for n in re.findall(r"\d+", after.split("\n")[0])]
+        return "answered", [n for n in nums if 1 <= n <= len(sources)]
     m = re.search(r"SEARCH:\s*(.+)", reply)
-    if m and "ANSWERED" not in reply.upper().split("SEARCH")[0]:
-        return m.group(1).strip().strip('"')[:150]
-    return None
+    if m:
+        return "search", m.group(1).strip().strip('"')[:150]
+    return "more", None
 
 
 def run(ctx: Any, question: str, depth: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """(sources read, all search results). Stops reading new pages once the time budget is spent."""
+    """(sources that answer it -- or everything read, if nothing clearly did --, all search results).
+
+    Pages are read best first, and after each one the model checks whether the question is now
+    actually answered (for "how do I..." that means the steps, not a description). As soon as it is,
+    reading stops and only the pages that answer it are kept. Also stops at the time budget."""
     import time as _time
     from .partials.web import request_website
     started = _time.time()
@@ -132,6 +170,7 @@ def run(ctx: Any, question: str, depth: str | None = None) -> tuple[list[dict[st
     sources: list[dict[str, Any]] = []
     seen: set[str] = set()
     results_all: list[dict[str, str]] = []
+    kws = set(keywords(question))
     if ctx.engine.wikipedia is not None and ctx.engine.wikipedia.available():
         try:
             hit = ctx.call("wikipedia", query=question, max_chars=40000)
@@ -156,6 +195,7 @@ def run(ctx: Any, question: str, depth: str | None = None) -> tuple[list[dict[st
                 fresh.append(r)
         results_all += fresh
         read = 0
+        follow = None
         for r in fresh:
             if read >= per_round or (_time.time() - started > budget and sources):
                 break
@@ -169,15 +209,29 @@ def run(ctx: Any, question: str, depth: str | None = None) -> tuple[list[dict[st
                 text = ""
             if len(text.strip()) < 200:            # JavaScript-only or blocked page: use the snippet
                 text = r.get("snippet", "")
-            if text.strip():
-                sources.append({"title": r["title"], "url": r["url"],
-                                "text": relevant_passages(text, question, " ".join(queries), per_page)})
-                read += 1
+            if not text.strip():
+                continue
+            passages = relevant_passages(text, question, " ".join(queries), per_page)
+            sources.append({"title": r["title"], "url": r["url"], "text": passages})
+            read += 1
+            if kws and not kws & set(keywords(passages)):
+                continue                           # nothing on this page about it: no need to ask
+            verdict, detail = assess(ctx, question, sources)
+            if verdict == "answered":
+                keep = [sources[n - 1] for n in detail] if detail else sources
+                ctx.think(f"That answers it ({', '.join(s['title'] for s in keep)}); done reading.")
+                return keep, results_all
+            if verdict == "search":
+                follow = detail
+                break                              # what's missing needs a new search, not more of these
         if rnd == rounds - 1 or not sources or _time.time() - started > budget:
             break
-        follow = assess(ctx, question, sources)
-        if follow is None:
-            ctx.think("The sources answer it.")
+        if follow is None:                         # these pages ran out without an answer: what's missing?
+            verdict, detail = assess(ctx, question, sources)
+            if verdict == "answered":
+                return ([sources[n - 1] for n in detail] if detail else sources), results_all
+            follow = detail if verdict == "search" else None
+        if not follow:
             break
         ctx.think(f"Not answered yet -- digging deeper: {follow}")
         queries = [follow]

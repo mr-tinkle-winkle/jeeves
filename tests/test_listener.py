@@ -59,7 +59,7 @@ class FakeSTT:
 def test_wake_then_request_flow(engine, monkeypatch):
     monkeypatch.setattr(engine.models, "stt", lambda agent=None: FakeSTT("set a timer for 7 minutes"))
     engine.models.wake_spotter = lambda: None
-    engine.on_wake("microphone", "jeeves", 0.9, [LOUD] * 10)
+    engine.on_wake("microphone", "jeeves", 0.9, [LOUD] * 20)          # the name's tail, then the request
     s = engine.sessions["microphone"]
     assert s.agent_id == "jeeves" and s.got_speech
     engine.end_session(s)
