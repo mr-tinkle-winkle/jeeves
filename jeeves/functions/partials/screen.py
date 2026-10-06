@@ -347,13 +347,13 @@ def find_on_screen(ctx, target, region="anywhere", bounds="none", screen="all"):
     "Reads the text shown on screen, optionally only in part of the screen.",
     args=[Arg("region", "region", "Where to read: anywhere, top, middle, bottom-left, ... or {x,y,w,h}",
               required=False, default="anywhere"),
-          Arg("screen", "string", f"Which monitor: {SCREENS}", required=False, default="current")],
+          Arg("screen", "string", f"Which monitor: {SCREENS}", required=False, default="all")],
     how="OCR on a screenshot. With a vague region (e.g. 'middle'), if no text is there the area grows until "
         "text is found.",
     returns="the text, line by line",
     category="screen",
 )
-def read_screen_text(ctx, region="anywhere", screen="current"):
+def read_screen_text(ctx, region="anywhere", screen="all"):
     shot = screenshot()
     try:
         width, height = _image_size(shot)

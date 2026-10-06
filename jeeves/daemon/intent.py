@@ -235,7 +235,7 @@ class IntentProcessor:
             if re.match(r"^(watch|keep an eye on|start watching|commentate|(give|do)\s+(me\s+)?(some\s+)?(live\s+)?"
                         r"commentary)\b", low) or re.search(r"\bwatch\s+(my|the)\s+(screen|game|stream|match)\b", low):
                 m = re.search(r"\b(?:and\s+)?(?:tell|let|warn|alert|notify)\s+me\s+(?:know\s+)?((?:when|if)\s+.+)$", low)
-                return Decision("watch_screen", {"action": "start", "screen": guess_screen(low) or "current",
+                return Decision("watch_screen", {"action": "start", "screen": guess_screen(low) or "all",
                                                  "focus": m.group(1) if m else ""}, 0.95, "", "rules")
         if re.match(CONTROL_PATTERN, low):
             if "control_mode" in by_name:
@@ -255,8 +255,8 @@ class IntentProcessor:
                     "Functions."))
         if "research" in by_name and self.settings.get("research.auto_for_facts", True):
             from .engine import looks_factual
-            if looks_factual(core):        # specific facts get looked up, not guessed
-                return Decision("research", {"question": core}, 0.85, "", "rules")
+            if looks_factual(core, agent):  # specific facts get looked up, not guessed
+                return Decision("research", {"question": core, "depth": "quick"}, 0.85, "", "rules")
         if re.match(r"^at\s+\d{1,2}(:\d{2})?\s*(am|pm|a\.m\.|p\.m\.)?\b", low) and "timers" in by_name:
             args, problems = self.validate(by_name["timers"], self._guess_args(by_name["timers"], core, agent))
             if not problems:

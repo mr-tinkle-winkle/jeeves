@@ -185,11 +185,13 @@ def speech_text(data: dict[str, Any]) -> str:
         return (data.get("text") or "").strip()
     keep = []
     for s in segs:
+        text = (s.get("text") or "").strip()
         nsp = float(s.get("no_speech_prob", 0) or 0)
         lp = float(s.get("avg_logprob", 0) or 0)
-        if nsp > 0.6 and lp < -0.5 or nsp > 0.85:
+        # only short, low-confidence bits flagged as silence -- never real sentences
+        if nsp > 0.6 and lp < -0.5 and len(text.split()) <= 3:
             continue
-        keep.append((s.get("text") or "").strip())
+        keep.append(text)
     return " ".join(t for t in keep if t).strip()
 
 

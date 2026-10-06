@@ -120,10 +120,13 @@ def assess(ctx: Any, question: str, sources: list[dict[str, Any]]) -> str | None
     return None
 
 
-def run(ctx: Any, question: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """(sources read, all search results)."""
+def run(ctx: Any, question: str, depth: str | None = None) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """(sources read, all search results). Stops reading new pages once the time budget is spent."""
+    import time as _time
     from .partials.web import request_website
-    depth = str(ctx.settings.get("research.depth", "normal"))
+    started = _time.time()
+    budget = float(ctx.settings.get("research.max_seconds", 45))
+    depth = str(depth or ctx.settings.get("research.depth", "normal"))
     rounds, per_round = DEPTHS.get(depth, DEPTHS["normal"])
     per_page = int(ctx.settings.get("research.max_chars_per_page", 4000))
     sources: list[dict[str, Any]] = []
@@ -154,13 +157,13 @@ def run(ctx: Any, question: str) -> tuple[list[dict[str, Any]], list[dict[str, s
         results_all += fresh
         read = 0
         for r in fresh:
-            if read >= per_round:
+            if read >= per_round or (_time.time() - started > budget and sources):
                 break
             ctx.check_cancelled()
             seen.add(r["url"])
             ctx.think(f"Reading {r['url']}", looking_at=r["url"])
             try:
-                text = request_website(ctx, r["url"], max_chars=80000)
+                text = request_website(ctx, r["url"], max_chars=80000, timeout=8)
             except FunctionError as exc:
                 ctx.think(f"  couldn't read it: {exc}")
                 text = ""
@@ -170,7 +173,7 @@ def run(ctx: Any, question: str) -> tuple[list[dict[str, Any]], list[dict[str, s
                 sources.append({"title": r["title"], "url": r["url"],
                                 "text": relevant_passages(text, question, " ".join(queries), per_page)})
                 read += 1
-        if rnd == rounds - 1 or not sources:
+        if rnd == rounds - 1 or not sources or _time.time() - started > budget:
             break
         follow = assess(ctx, question, sources)
         if follow is None:

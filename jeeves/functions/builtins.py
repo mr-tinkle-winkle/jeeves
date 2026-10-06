@@ -177,8 +177,13 @@ def screen_reading(ctx, question="", region="anywhere", find="", screen=""):
         except FunctionError:
             pass
         return ctx.say(f"{hit.get('text') or find} is {where}.")
-    text = ctx.call("read_screen_text", region=region, screen=screen or "current")
+    text = ctx.call("read_screen_text", region=region, screen=screen or "all")
     ctx.think("Text on screen:\n" + text)
+    vision = ctx.engine.models.vision_llm(ctx.agent)
+    if vision is not None:                       # a model that can see: show it the screens themselves
+        answer = _look_with_vision(ctx, vision, q, text, screen or "all", region)
+        if answer:
+            return ctx.say(answer)
     if not text.strip():
         return ctx.say("I can't read any text there." if region != "anywhere" else
                        "I can't read any text on the screen right now.")
@@ -200,8 +205,37 @@ def screen_reading(ctx, question="", region="anywhere", find="", screen=""):
     return ctx.say(answer)
 
 
+def _look_with_vision(ctx, vision, question: str, text: str, screen: str, region: str) -> str | None:
+    from ..daemon.watcher import grab, image_parts
+    from ..models import persona
+    try:
+        frame = grab(screen)
+    except FunctionError as exc:
+        ctx.think(f"Couldn't capture the screen: {exc}")
+        return None
+    try:
+        images = frame.get("images") or []
+        if not images:
+            return None
+        names = ", ".join(lbl for lbl, _ in images)
+        prompt = (f"These are the user's screens ({names}).{'' if region == 'anywhere' else f' Focus on the {region}.'}"
+                  f"\nText found on them by OCR (may have mistakes):\n{text[:3000] or '(none)'}\n\n"
+                  f"The user said: {question or 'what is on my screen?'}\n\nAnswer from what you see. Say which "
+                  "screen something is on when there's more than one. Plain spoken sentences.")
+        messages = [{"role": "user", "content": image_parts(images) + [{"type": "text", "text": prompt}]}]
+        if persona.has_persona(ctx.agent):
+            messages.insert(0, {"role": "system", "content": persona.identity_block(ctx.agent)})
+        return (vision.chat(messages, max_tokens=int(ctx.settings.get("models.local_response.max_tokens", 512)),
+                            cancelled=ctx.is_cancelled) or "").strip() or None
+    except Exception as exc:  # noqa: BLE001 -- fall back to the OCR answer
+        ctx.think(f"Vision model failed: {exc}")
+        return None
+    finally:
+        frame["shot"].unlink(missing_ok=True)
+
+
 def _screen_words(screen: str) -> str:
-    s = (screen or "current").lower()
+    s = (screen or "all").lower()
     if s in ("current", "this", "focused", ""):
         return "the screen the user is working on"
     if s in ("all", "every", "both", "anywhere"):
@@ -233,8 +267,8 @@ def _describe_position(ctx, x: int, y: int) -> str:
     "Watches the screen live (only when asked): comments on what happens and answers questions about it. "
     "Also stops watching.",
     args=[Arg("action", "string", "start or stop", required=False, default="start", choices=["start", "stop"]),
-          Arg("screen", "string", "Which monitor: current, left, right, primary, other or a name",
-              required=False, default="current"),
+          Arg("screen", "string", "Which monitor: all (default), current, left, right, primary, other or a name",
+              required=False, default="all"),
           Arg("talkativeness", "number", "0 = silent (questions only) .. 1 = full commentary", required=False,
               default=None),
           Arg("focus", "string", "Something to watch for and mention, e.g. 'when the download finishes'",
@@ -248,7 +282,7 @@ def _describe_position(ctx, x: int, y: int) -> str:
               "Jeeves, stop watching."],
     default_enabled=True, category="screen", uses=["read_screen_text", "speak"],
 )
-def watch_screen(ctx, action="start", screen="current", talkativeness=None, focus=""):
+def watch_screen(ctx, action="start", screen="all", talkativeness=None, focus=""):
     eng = ctx.engine
     current = eng.watchers.get(ctx.agent_id)
     if action == "stop":
@@ -433,12 +467,17 @@ def timers(ctx, action, duration="", time="", label="", request=""):
     raise FunctionError(f"unknown timer action '{action}'")
 
 
+ACKS = ["Let me look that up.", "One moment, I'll check.", "Looking into it.", "Let me find out."]
+
+
 @full(
     "research",
     "Looks things up: searches the web (and the offline Wikipedia, if downloaded), reads the best pages and "
     "answers from them, saying where the answer came from. Use for current events, facts you're unsure of, "
     "prices, releases, scores, anything that needs looking up.",
-    args=[Arg("question", "string", "What to find out, as a full question")],
+    args=[Arg("question", "string", "What to find out, as a full question"),
+          Arg("depth", "string", "How hard to dig: quick, normal or deep (default: the Research setting)",
+              required=False, default="", choices=["", "quick", "normal", "deep"])],
     how="The indicator turns blue (researching); click it to see the pages being read. The local response "
         "model writes the answer from what it read.",
     keywords=["look up", "search for", "research", "google", "find out", "search the web", "what's the latest"],
@@ -446,14 +485,25 @@ def timers(ctx, action, duration="", time="", label="", request=""):
               "Jeeves, research the best budget mechanical keyboards."],
     default_enabled=True, category="web", uses=["web_search", "request_website", "wikipedia", "generate_text"],
 )
-def research(ctx, question):
+def research(ctx, question, depth=""):
+    import random
     from .research import run
     if ctx.dry_run:
         return f"<researched answer to: {question}>"
     question = str(question)
-    sources, results = run(ctx, question)
-    if not sources:
-        raise FunctionError("I couldn't find anything about that")
+    ctx.say(random.choice(ACKS))                 # looking things up takes a while: say so right away
+    try:
+        sources, results = run(ctx, question, depth or None)
+    except FunctionError as exc:
+        ctx.think(f"Research failed: {exc}")
+        sources, results = [], []
+    if not sources:                              # nothing online: answer from what it knows, and say so
+        reply = ctx.engine.models.respond(
+            ctx.agent, f"{question}\n\n(You couldn't look this up online just now. Answer from what you know, "
+            "and say briefly that you couldn't check it.)", ctx=ctx)
+        if reply is None:
+            raise FunctionError("I couldn't find anything about that")
+        return ctx.say(reply)
     ctx.trace("sources", sources=[{"title": s["title"], "url": s["url"]} for s in sources])
     material = "\n\n".join(f"[{i + 1}] {s['title']} ({s['url']})\n{s['text']}" for i, s in enumerate(sources))
     ctx.state("thinking", "Writing the answer")

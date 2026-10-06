@@ -66,7 +66,7 @@ FACT_WORDS = (r"boss|build|item|weapon|armou?r|quest|mission|level|map|patch|upd
               r"population|capital|founded|invented")
 
 
-def looks_factual(text: str) -> bool:
+def looks_factual(text: str, agent: dict[str, Any] | None = None) -> bool:
     """A question that needs facts (better looked up than guessed): a wh-/how question naming
     something specific (a capitalised name, a number) or using game/product/fact words."""
     t = text.strip()
@@ -75,7 +75,10 @@ def looks_factual(text: str) -> bool:
                     r"explain)\b", low):
         return False
     words = t.split()
-    names = [w for w in words[1:] if w[:1].isupper() and w.lower() not in ("i", "i'm", "i've")]
+    own = {"i", "i'm", "i've", "i'd", "i'll"}
+    if agent:                                  # "how are you, Jeeves" isn't a fact to look up
+        own |= {normalize(n) for n in list(agent.get("call_names", [])) + [agent.get("name", "")] if n}
+    names = [w for w in words[1:] if w[:1].isupper() and normalize(w) not in own]
     return bool(names or re.search(r"\d", t) or re.search(rf"\b({FACT_WORDS})\b", low))
 
 
@@ -494,6 +497,11 @@ class Engine:
         if s.got_speech and (s.mode == "request" and speech < 0.29 or s.mode == "answer" and speech < 0.15):
             log.info("  too little speech to be a request; ignored")
             s.got_speech = False
+            if s.interrupting:
+                self._resume(s.interrupting)
+            else:
+                self._didnt_catch(s)
+            return
         if not s.got_speech:
             self.set_indicator(s.request_id, s.agent_id, "idle")
             if s.interrupting:                   # called by name, then nothing said: carry on
@@ -530,8 +538,10 @@ class Engine:
                 self.set_indicator(s.request_id, s.agent_id, "idle")
                 return
         if not text.strip():
-            self.set_indicator(s.request_id, s.agent_id, "idle")
+            log.info("  nothing understandable in it")
+            self._didnt_catch(s)
             return
+        log.info("  heard: %s", text)
         self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id)
 
     def transcribe(self, pcm: bytes, agent: dict[str, Any] | None = None) -> str:
@@ -553,9 +563,43 @@ class Engine:
         if aid is None:
             return
         agent = self.agents()[aid]
-        if conf < self.threshold(agent):
-            log.debug("wake '%s' below threshold (%.2f)", name, conf)
+        thr = self.threshold(agent)
+        if conf < thr:
+            if conf >= thr * 0.5 and self.settings.get("wake_word.verify_near_misses", True):
+                # unsure: check with speech recognition whether the name was really said
+                lst = self.listeners.get(source)
+                n0 = lst.frame_no if lst is not None else 0
+                phrase = list(lst.ring)[-100:] if lst is not None else []
+                log.info("wake '%s' unsure (%.2f < %.2f): checking with speech recognition", name, conf, thr)
+                self.run_async(self._verify_wake, source, aid, name, conf, phrase, after, threshold, words, n0)
+            else:
+                log.info("wake '%s' ignored (confidence %.2f < %.2f)", name, conf, thr)
             return
+        log.info("wake '%s' (%.2f) on %s", name, conf, source)
+        self._start_listen(source, aid, name, after, threshold, words)
+
+    def _verify_wake(self, source: str, aid: str, name: str, conf: float, phrase: list[bytes],
+                     after: list[bytes], threshold: float | None, words: int, n0: int) -> None:
+        try:
+            text = self.transcribe(b"".join(phrase), self.agents().get(aid))
+        except Exception as exc:  # noqa: BLE001 -- can't check: stay on the safe side
+            log.info("  couldn't check (%s); ignored", exc)
+            return
+        agent = self.agents().get(aid, {})
+        names = [normalize(n) for n in agent.get("call_names", []) + [agent.get("name", "")] if n]
+        words_heard = normalize(text).split()
+        found = any(similarity(" ".join(words_heard[i:i + len(n.split())]), n) >= 0.75
+                    for n in names for i in range(len(words_heard)))
+        log.info("  heard '%s' -> %s", text, "the name: waking" if found else "not the name: ignored")
+        if not found or self.sessions.get(source) is not None:
+            return
+        lst = self.listeners.get(source)
+        if lst is not None and lst.frame_no > n0:      # what was said while checking belongs to the request
+            after = list(after) + list(lst.ring)[-min(len(lst.ring), lst.frame_no - n0):]
+        self._start_listen(source, aid, name, after, threshold, words)
+
+    def _start_listen(self, source: str, aid: str, name: str, after: list[bytes], threshold: float | None,
+                      words: int) -> None:
         if self._hears_itself(aid, name):
             return
         paused = self._interrupt(aid)
@@ -572,6 +616,11 @@ class Engine:
             s.voiced_frames = getattr(self, "_last_voiced", 0)
         # otherwise just the pause after the name (or breathing, keys, the name's tail): wait for the
         # request -- the session waits up to NO_SPEECH_TIMEOUT for you to start talking
+
+    def _didnt_catch(self, s: Session) -> None:
+        """A listen that heard nothing usable: say so on the indicator instead of silently doing nothing."""
+        self.set_indicator(s.request_id, s.agent_id, "unclear", "Didn't catch that -- say it again?")
+        threading.Timer(3.0, lambda: self.set_indicator(s.request_id, s.agent_id, "idle")).start()
 
     def _speech_in(self, frames: list[bytes], threshold: float | None = None, words: int = 0) -> float | None:
         """When the last real speech in these frames was (a timestamp), or None if they hold no
@@ -1104,8 +1153,8 @@ class Engine:
         """No clear function: research it if it's a factual question, otherwise just answer."""
         enabled = {f.name for f in self.registry.enabled_for(ctx.agent)} - skip
         core = self.intent.strip_address(ctx.agent, text)
-        if "research" in enabled and looks_factual(core):
-            return Decision("research", {"question": core}, 0.6, "", "fallback")
+        if "research" in enabled and looks_factual(core, ctx.agent):
+            return Decision("research", {"question": core, "depth": "quick"}, 0.6, "", "fallback")
         if "local_response" in enabled:
             return Decision("local_response", {"prompt": text}, 0.5, "", "fallback")
         return Decision(None, {}, 0.0, "", "fallback")

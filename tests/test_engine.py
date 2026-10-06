@@ -492,7 +492,7 @@ def test_research_reads_pages_and_answers(engine, monkeypatch):
         {"title": "Site B", "url": "https://b.example", "snippet": "B says 42 too."}])
     read = []
 
-    def fake_site(ctx, url, raw=False, max_chars=20000):
+    def fake_site(ctx, url, raw=False, max_chars=20000, **kw):
         read.append(url)
         return f"The answer at {url} is 42. " * 20
     monkeypatch.setattr(web, "request_website", fake_site)
@@ -688,21 +688,24 @@ def test_deep_research_digs_further_and_finds_buried_facts(engine, monkeypatch):
              ("More filler text here. " * 400),
              "https://silksong.fandom.com/drops": "The Silk Heart drop rate is 25 percent from Hornet."}
     monkeypatch.setattr(web, "search", fake_search)
-    monkeypatch.setattr(web, "request_website", lambda ctx, url, max_chars=20000: pages.get(url, ""))
+    monkeypatch.setattr(web, "request_website", lambda ctx, url, max_chars=20000, **kw: pages.get(url, ""))
     replies = iter(["silksong hornet needle damage wiki\nsilksong hornet reddit",    # planned queries
                     "SEARCH: silksong silk heart drop rate",                         # round 1: not answered
                     "Her needle deals 13 damage [1] and drops a Silk Heart 25% of the time [2]."])
     engine.models.respond = lambda agent, prompt, **kw: next(replies)
     said = []
     engine.speak = lambda ctx, t: said.append(t)
-    res = engine.handle_text("Jeeves, how much damage does Hornet's needle do in Silksong", wait=True)
+    res = engine.handle_text("Jeeves, research how much damage Hornet's needle does in Silksong", wait=True)
     entry = engine.history.get(res["id"])
-    assert entry["function"] == "research"                       # a game fact: researched, not guessed
+    assert entry["function"] == "research"
+    assert engine.intent.decide(dict(engine.agents()["jeeves"], id="jeeves"),     # asked plainly: quick research
+                                "Jeeves, how much damage does Hornet's needle do in Silksong").args["depth"] == "quick"
     assert any("drop rate" in q for q in searched)               # a second round followed up
     urls = [s["url"] for s in entry["sources"]]
     assert urls[0] == "https://silksong.fandom.com/hornet" and "https://pinterest.com/x" not in urls
     assert "13 damage" in entry["sources"][0]["text"]            # buried mid-page, still found
-    assert said == ["Her needle deals 13 damage and drops a Silk Heart 25% of the time."]
+    assert said[-1] == "Her needle deals 13 damage and drops a Silk Heart 25% of the time."
+    assert said[0] in ("Let me look that up.", "One moment, I'll check.", "Looking into it.", "Let me find out.")
 
 
 def test_fewer_pointless_questions(engine):

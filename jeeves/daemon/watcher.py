@@ -29,14 +29,17 @@ from typing import Any
 from ..functions.base import Cancelled, FunctionError
 
 log = logging.getLogger("jeeves.watcher")
-MAX_WIDTH = 1024
+MAX_WIDTH = 1280
 THUMB_W, THUMB_H = 192, 108
 CHANGED = 0.0007          # ~15 of 20736 thumbnail pixels: even two changed digits, a popup, a new scene
 
 
 def grab(screen: str) -> dict[str, Any]:
-    """One frame of the chosen monitor: {jpeg, thumb (32x18 grey), text (OCR, lazily), size}."""
-    from ..functions.partials.screen import Mapper, _image_size, _rect_for, screenshot
+    """One frame: {images: [(which screen, jpeg)] -- one per monitor, each a readable size --,
+    thumb (grey, for change detection), rect, shot (the screenshot file)}."""
+    from ..functions.partials.screen import (Mapper, _image_size, _rect_for, describe_output, pick_outputs,
+                                             screenshot)
+    from . import desktop as dk
     shot = screenshot()
     try:
         w, h = _image_size(shot)
@@ -46,16 +49,33 @@ def grab(screen: str) -> dict[str, Any]:
         try:
             from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRect, Qt
             from PySide6.QtGui import QImage
-            img = QImage(str(shot))
-            if not img.isNull():
-                img = img.copy(QRect(x, y, rw, rh))
-                if img.width() > MAX_WIDTH:
-                    img = img.scaledToWidth(MAX_WIDTH, Qt.SmoothTransformation)
-                ba = QByteArray()
-                buf = QBuffer(ba)
-                buf.open(QIODevice.WriteOnly)
-                img.save(buf, "JPG", 70)
-                frame["jpeg"] = bytes(ba)
+            full = QImage(str(shot))
+            if not full.isNull():
+                def jpeg(im: Any) -> bytes:
+                    if im.width() > MAX_WIDTH:
+                        im = im.scaledToWidth(MAX_WIDTH, Qt.SmoothTransformation)
+                    ba = QByteArray()
+                    buf = QBuffer(ba)
+                    buf.open(QIODevice.WriteOnly)
+                    im.save(buf, "JPG", 75)
+                    return bytes(ba)
+                try:
+                    every = dk.outputs()
+                except Exception:  # noqa: BLE001
+                    every = []
+                known = len(every) > 1 or (every and every[0].name != "default")
+                chosen = sorted(pick_outputs(screen, every) or (every if known else []), key=lambda o: (o.x, o.y))
+                images = []
+                for o in chosen:
+                    ox, oy, ow, oh = mp.rect_to_image((o.x, o.y, o.w, o.h))
+                    ox, oy = max(0, ox), max(0, oy)
+                    images.append((describe_output(o, every), jpeg(full.copy(QRect(ox, oy, min(ow, w - ox),
+                                                                                     min(oh, h - oy))))))
+                if not images:
+                    images = [("your screen", jpeg(full.copy(QRect(x, y, rw, rh))))]
+                frame["images"] = images
+                frame["jpeg"] = images[0][1]
+                img = full.copy(QRect(x, y, rw, rh))
                 g = img.scaled(THUMB_W, THUMB_H, Qt.IgnoreAspectRatio, Qt.SmoothTransformation) \
                     .convertToFormat(QImage.Format_Grayscale8)
                 bpl = g.bytesPerLine()
@@ -68,6 +88,17 @@ def grab(screen: str) -> dict[str, Any]:
     except Exception:
         shot.unlink(missing_ok=True)
         raise
+
+
+def image_parts(images: list[tuple[str, bytes]]) -> list[dict[str, Any]]:
+    """Chat message parts: each monitor's picture, labelled ("your left screen")."""
+    parts: list[dict[str, Any]] = []
+    for label, data in images:
+        if len(images) > 1:
+            parts.append({"type": "text", "text": f"{label[:1].upper()}{label[1:]}:"})
+        parts.append({"type": "image_url",
+                      "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(data).decode()}})
+    return parts
 
 
 def difference(a: bytes | None, b: bytes | None) -> float:
@@ -91,7 +122,7 @@ class Watcher:
     def __init__(self, engine: Any, ctx: Any, screen: str = "current", talkativeness: float | None = None,
                  focus: str = "") -> None:
         self.engine, self.ctx = engine, ctx
-        self.screen = screen or "current"
+        self.screen = screen or "all"
         s = engine.settings
         self.talk = float(s.get("watch.talkativeness", 0.5) if talkativeness is None else talkativeness)
         self.focus = focus.strip()
@@ -99,6 +130,7 @@ class Watcher:
         self.timeline: deque[tuple[float, str]] = deque(maxlen=20)
         self.said: deque[tuple[float, str]] = deque(maxlen=8)
         self.latest_jpeg: bytes | None = None
+        self.latest_images: list[tuple[str, bytes]] = []
         self.latest_text = ""
         self.last_spoke = 0.0
         self.started = time.time()
@@ -151,6 +183,7 @@ class Watcher:
     def _look(self, frame: dict[str, Any], vision: Any, change: float) -> None:
         ctx, eng = self.ctx, self.engine
         self.latest_jpeg = frame.get("jpeg")
+        self.latest_images = frame.get("images") or []
         if vision is None or not self.latest_jpeg:
             self.latest_text = ocr_text(frame)
         name = ctx.agent.get("name", "the assistant")
@@ -166,10 +199,8 @@ class Watcher:
                 + ("" if may_speak else "\n(Say PASS this time unless it's what you were asked to watch for.)"))
         try:
             if vision is not None and self.latest_jpeg:
-                b64 = base64.b64encode(self.latest_jpeg).decode()
                 messages = [{"role": "system", "content": style(self.talk)},
-                            {"role": "user", "content": [
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                            {"role": "user", "content": image_parts(self.latest_images) + [
                                 {"type": "text", "text": task}]}]
                 if ctx.agent.get("prompt"):
                     from ..models import persona

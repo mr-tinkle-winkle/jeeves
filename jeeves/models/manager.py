@@ -261,11 +261,9 @@ class ModelManager:
             if note:
                 messages[0]["content"] = (messages[0]["content"] + "\n\n" + note) if messages[0]["role"] == "system" \
                     else note
-            if llm is self.vision_llm(agent) and watcher.latest_jpeg:     # it can look at the latest frame
-                import base64
-                b64 = base64.b64encode(watcher.latest_jpeg).decode()
-                messages[-1] = {"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            if llm is self.vision_llm(agent) and watcher.latest_images:   # it can look at the latest frame
+                from ..daemon.watcher import image_parts
+                messages[-1] = {"role": "user", "content": image_parts(watcher.latest_images) + [
                     {"type": "text", "text": messages[-1]["content"]}]}
         on_token = (lambda t: ctx.think(t, append=True)) if ctx is not None else None
         cancelled = ctx.is_cancelled if ctx is not None else None

@@ -27,14 +27,14 @@ def html_to_text(raw: str) -> str:
          how="A plain HTTP request in the background -- no window opens, so pages that need JavaScript may "
              "come back mostly empty.",
          returns="page text", category="web")
-def request_website(ctx, url, raw=False, max_chars=20000):
+def request_website(ctx, url, raw=False, max_chars=20000, timeout=20):
     url = str(url)
     if not re.match(r"^https?://", url):
         url = "https://" + url
     ctx.state("researching", f"Reading {url}")
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html,application/json,*/*"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
             body = resp.read(5_000_000)
             charset = resp.headers.get_content_charset() or "utf-8"
             ctype = resp.headers.get_content_type()

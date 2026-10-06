@@ -106,6 +106,7 @@ DEFAULTS: dict[str, Any] = {
         "model": None,                    # catalog id; None until downloaded
         "global_threshold_enabled": True,
         "global_threshold": 0.6,
+        "verify_near_misses": True,       # unsure detections (half the threshold or more) are checked by STT
     },
     "models": {
         # all "model" values are catalog ids from jeeves.models.catalog
@@ -178,7 +179,8 @@ DEFAULTS: dict[str, Any] = {
     "memory": {"recent_count": 3, "long_term_limit": 200},
     "research": {"engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000,
                  "depth": "normal",            # quick (1 round, 3 pages) | normal (2 rounds, 5) | deep (3, 8)
-                 "auto_for_facts": True},      # factual questions (games, products, people...) get researched
+                 "auto_for_facts": True,       # factual questions (games, products, people...) get researched
+                 "max_seconds": 45},           # stop reading more pages after this long
     "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"]},
     # Watch the screen: seconds between looks (backs off while nothing changes), how chatty, time limit
     "watch": {"interval": 2.0, "talkativeness": 0.5, "max_minutes": 120},
