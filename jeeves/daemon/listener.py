@@ -48,6 +48,7 @@ class Session:
     max_seconds: float = 60.0
     ended: bool = False
     text: str = ""                # training: the phrase being read
+    voiced_frames: int = 0        # how much of it was actually speech
     suspended: bool = False       # right-click > Suspend: stop taking audio until resumed
     interrupting: list[str] = field(default_factory=list)   # requests paused because their agent was called
 
@@ -56,6 +57,7 @@ class Session:
         if voiced:
             self.last_voice = now
             self.got_speech = True
+            self.voiced_frames += 1
 
     def pcm(self) -> bytes:
         return b"".join(self.frames)
@@ -102,6 +104,15 @@ class Segmenter:
         return None
 
 
+def speech_threshold(floor: float, configured: float) -> float:
+    """What counts as speech over this background: on a quiet source 3x the background (at least
+    0.003, at most the configured level); over a loud steady background (music, a game) just enough
+    above it to stand out."""
+    if floor * 3 <= configured:
+        return max(0.003, floor * 3)
+    return max(configured, floor * 1.6)
+
+
 class Listener(threading.Thread):
     def __init__(self, engine: Any, source: str) -> None:
         super().__init__(daemon=True, name=f"jeeves-listen-{source}")
@@ -116,7 +127,8 @@ class Listener(threading.Thread):
         self.segmenter = Segmenter()
         self.answer_streak = 0
         self.capture: Capture | None = None
-        self.floor = 0.002            # this source's background level (adapts; quiet mics get a lower bar)
+        self.floor = 0.002            # this source's background level (from the last few seconds of audio)
+        self.levels: deque[float] = deque(maxlen=170)      # ~5 s of frame levels
         self.trailing = 0             # words the wake model heard after the name
         self._stop = threading.Event()
         self.status = "starting"
@@ -162,9 +174,12 @@ class Listener(threading.Thread):
         if self.source != "microphone" and (eng.speaking or now < eng.speaking_until):
             frame = b"\0" * len(frame)      # Jeeves' own voice is on the desktop audio: don't hear it
         level = rms(frame)
+        self.levels.append(level)
+        if self.frame_no % 15 == 0 and len(self.levels) >= 30:
+            # background = a low percentile of the last ~5 s, every frame counted -- so a steady sound
+            # (fan, music, game) can never be mistaken for endless speech
+            self.floor = sorted(self.levels)[len(self.levels) // 5]
         voiced = level > self.threshold()
-        if not voiced:                           # follow the background level, slowly
-            self.floor = self.floor * 0.995 + level * 0.005
         self.ring.append(frame)
         self.frame_no += 1
         eos = float(eng.settings.get("general.end_of_speech_seconds", 1.2))
@@ -217,6 +232,7 @@ class Listener(threading.Thread):
                 s = eng.open_session(self.source, agent_id, "answer")
                 s.frames = list(self.ring)[-PREROLL_FRAMES:]
                 s.got_speech, s.last_voice = True, now
+                s.voiced_frames = START_FRAMES
             return
 
         if hits:
@@ -225,10 +241,7 @@ class Listener(threading.Thread):
             eng.on_wake(self.source, best[0], best[1], after, threshold=self.threshold(), words=self.trailing)
 
     def threshold(self) -> float:
-        """What counts as speech here: the configured level, or less on a quiet microphone (3x its
-        background noise, at least 0.003) -- never more than the configured level."""
-        cfg = float(self.engine.settings.get("audio.vad_threshold", 0.012))
-        return min(cfg, max(0.003, self.floor * 3))
+        return speech_threshold(self.floor, float(self.engine.settings.get("audio.vad_threshold", 0.012)))
 
     def _audio_after_name(self, spotter: Any, name: str) -> list[bytes]:
         """Frames recorded after the call name in the phrase just recognised."""

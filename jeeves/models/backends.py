@@ -162,7 +162,7 @@ class WhisperCppSTT(STT):
     def transcribe(self, pcm: bytes, prompt: str = "", language: str = "en") -> str:
         if not self.loaded():
             self.load()
-        fields = {"response_format": "json", "temperature": "0.0"}
+        fields = {"response_format": "verbose_json", "temperature": "0.0"}
         if prompt:
             fields["prompt"] = prompt
         if language and not self.entry.id.endswith("-en"):
@@ -174,7 +174,23 @@ class WhisperCppSTT(STT):
                 data = json.loads(r.read().decode())
         except (urllib.error.URLError, ValueError) as exc:
             raise BackendError(f"whisper-server failed: {exc}") from exc
+        return speech_text(data)
+
+
+def speech_text(data: dict[str, Any]) -> str:
+    """Whisper's text without the segments it thinks were silence or noise (where it invents
+    "Thank you." and the like): high no-speech probability with low confidence."""
+    segs = data.get("segments")
+    if not isinstance(segs, list) or not segs:
         return (data.get("text") or "").strip()
+    keep = []
+    for s in segs:
+        nsp = float(s.get("no_speech_prob", 0) or 0)
+        lp = float(s.get("avg_logprob", 0) or 0)
+        if nsp > 0.6 and lp < -0.5 or nsp > 0.85:
+            continue
+        keep.append((s.get("text") or "").strip())
+    return " ".join(t for t in keep if t).strip()
 
 
 def _vosk():

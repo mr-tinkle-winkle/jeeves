@@ -91,7 +91,7 @@ DEFAULTS: dict[str, Any] = {
         "end_of_speech_seconds": 1.2,     # silence before listening stops
         "mic_click_extend_seconds": 5.0,  # clicking the onscreen mic adds this
         "mic_hold_release_seconds": 1.0,  # after letting go of a held mic
-        "max_request_seconds": 60.0,
+        "max_request_seconds": 30.0,
         "abort_key": "KEY_PAUSE",
         "watch_keyboard_for_keybinds": True,  # evdev, read-only, for keybinds + abort
         "history_limit": 500,

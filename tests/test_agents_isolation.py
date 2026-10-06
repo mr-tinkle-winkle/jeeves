@@ -181,7 +181,8 @@ def test_quiet_microphone_still_counts_as_speech(engine):
     after = _tone(0.0005, 10) + _tone(0.008, 25) + _tone(0.0005, 15)
     assert engine._speech_in(after) is not None
     assert engine._speech_in(_tone(0.0005, 40)) is None             # just the quiet background: not speech
-    assert engine._speech_in(_tone(0.0005, 40), words=2) is not None    # the wake model heard words
+    assert engine._speech_in(_tone(0.0005, 40), words=2) is None        # "words" over pure noise: not speech
+    assert engine._speech_in(_tone(0.0005, 20) + _tone(0.008, 5), words=2) is not None   # words + a little speech
 
 
 def test_listener_threshold_adapts_but_never_exceeds_the_setting(engine):
@@ -189,5 +190,48 @@ def test_listener_threshold_adapts_but_never_exceeds_the_setting(engine):
     lst = Listener(engine, "microphone")
     lst.floor = 0.0004
     assert lst.threshold() == 0.003                                # quiet mic: lower bar
+    lst.floor = 0.003
+    assert lst.threshold() == pytest.approx(0.009)                 # 3x the background, under the setting
     lst.floor = 0.02
-    assert lst.threshold() == 0.012                                # noisy mic: the configured level
+    assert lst.threshold() == pytest.approx(0.032)                 # loud steady background: just above it
+
+
+def test_whisper_segments_it_thinks_are_silence_are_dropped():
+    from jeeves.models.backends import speech_text
+    data = {"text": "What time is it? Thank you.", "segments": [
+        {"text": " What time is it?", "no_speech_prob": 0.02, "avg_logprob": -0.2},
+        {"text": " Thank you.", "no_speech_prob": 0.9, "avg_logprob": -1.1}]}
+    assert speech_text(data) == "What time is it?"
+    assert speech_text({"text": " hello "}) == "hello"
+
+
+def test_steady_background_never_counts_as_endless_speech(engine):
+    from jeeves.daemon.listener import Listener
+    lst = Listener(engine, "microphone")
+    fan = _tone(0.009, 1)[0]                         # a fan just under the default level
+    voiced = 0
+    for _ in range(300):
+        lst.process(fan)
+        voiced += lst.levels[-1] > lst.threshold()
+    assert lst.floor == pytest.approx(0.009, rel=0.1) and lst.threshold() > 0.012
+    assert voiced < 60                               # only while it was still learning the background
+
+
+def test_a_stuck_listen_restarts_on_the_wake_word(engine):
+    import time
+    engine.on_wake("microphone", "jeeves", 0.99, [])
+    old = engine.sessions["microphone"]
+    old.started -= 20                                # open for 20 s already (stuck on noise)
+    engine.on_wake("microphone", "jeeves", 0.99, [])
+    assert engine.sessions["microphone"] is not old and old.ended
+    fresh = engine.sessions["microphone"]
+    engine.on_wake("microphone", "jeeves", 0.99, [])  # a young listen isn't interrupted
+    assert engine.sessions["microphone"] is fresh
+
+
+def test_too_little_speech_is_not_a_request(engine):
+    from jeeves.daemon.listener import Session
+    s = engine.open_session("microphone", "jeeves", "request")
+    s.got_speech, s.voiced_frames = True, 4          # 0.12 s: a click or a cough
+    engine.end_session(s)
+    assert not s.got_speech

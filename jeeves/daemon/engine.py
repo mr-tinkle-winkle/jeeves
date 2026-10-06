@@ -481,11 +481,19 @@ class Engine:
         return s
 
     def end_session(self, s: Session) -> None:
+        from .audio import FRAME_MS
         with self._lock:
             if self.sessions.get(s.source) is s:
                 del self.sessions[s.source]
         s.ended = True
         self.run_async(self.apply_settings)      # the mic may not be needed any more
+        took = time.time() - s.started
+        speech = s.voiced_frames * FRAME_MS / 1000
+        log.info("listen ended (%s, %s): %.1fs long, %.2fs of speech%s", s.agent_id, s.mode, took, speech,
+                 " -- hit the time limit" if took >= s.max_seconds - 0.5 else "")
+        if s.got_speech and (s.mode == "request" and speech < 0.29 or s.mode == "answer" and speech < 0.15):
+            log.info("  too little speech to be a request; ignored")
+            s.got_speech = False
         if not s.got_speech:
             self.set_indicator(s.request_id, s.agent_id, "idle")
             if s.interrupting:                   # called by name, then nothing said: carry on
@@ -533,8 +541,14 @@ class Engine:
 
     def on_wake(self, source: str, name: str, conf: float, after: list[bytes], threshold: float | None = None,
                 words: int = 0) -> None:
-        if self.sessions.get(source) is not None or not self.is_on():
+        if not self.is_on():
             return
+        cur = self.sessions.get(source)
+        if cur is not None:
+            if cur.mode != "request" or time.time() - cur.started < 8:
+                return
+            log.info("wake word during a %.0fs-old listen: starting over", time.time() - cur.started)
+            cur.ended = True                     # a listen that long is stuck on noise: start over
         aid = self.agent_by_name(name, source)
         if aid is None:
             return
@@ -555,6 +569,7 @@ class Engine:
             s.frames = list(after)
             s.got_speech = True
             s.last_voice = spoke_at
+            s.voiced_frames = getattr(self, "_last_voiced", 0)
         # otherwise just the pause after the name (or breathing, keys, the name's tail): wait for the
         # request -- the session waits up to NO_SPEECH_TIMEOUT for you to start talking
 
@@ -566,13 +581,17 @@ class Engine:
         from .audio import FRAME_MS, rms
         if not frames:
             return None
+        from .listener import speech_threshold
         levels = [rms(f) for f in frames]
-        floor = sorted(levels)[len(levels) // 4]
-        cfg = float(self.settings.get("audio.vad_threshold", 0.012)) if threshold is None else threshold
-        thr = min(cfg, max(0.003, floor * 3))
+        cfg = float(self.settings.get("audio.vad_threshold", 0.012))
+        # the listener knows the background from the seconds before the name; else the clip's quietest part
+        thr = threshold if threshold is not None else \
+            min(cfg, speech_threshold(sorted(levels)[len(levels) // 10], cfg))
         voiced = [i for i, lv in enumerate(levels) if lv > thr]
-        if len(voiced) < 250 // FRAME_MS and words < 2:
+        # ~0.25 s clearly above the background; or words the wake model heard, if there's some speech too
+        if len(voiced) < 250 // FRAME_MS and not (words >= 2 and len(voiced) >= 120 // FRAME_MS):
             return None
+        self._last_voiced = len(voiced)
         last = voiced[-1] if voiced else len(frames) - 1
         return time.time() - (len(frames) - 1 - last) * FRAME_MS / 1000
 

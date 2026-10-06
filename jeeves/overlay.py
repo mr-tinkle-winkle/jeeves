@@ -222,6 +222,7 @@ def main(popups: bool = False) -> int:
             self.transcript_until = 0.0
             self.response = ""
             self.response_until = 0.0
+            self.sources: dict[str, Any] | None = None     # researched answer's sources, under the answer
             self.phase = 0.0
             self.press_at = 0.0
             self.holding = False
@@ -252,6 +253,10 @@ def main(popups: bool = False) -> int:
             w = max(420, size * 8)
             rows = max(1, len(self.visible_states()))
             h = size * rows + 140
+            if self.response:
+                h += 240                                   # room for the answer bubble
+            if self.sources:
+                h += 30 * (len(self.sources.get("sources", [])) + 1) + 30
             corner = self.cfg("corner", "top-right")
             pad = 16
             if use_layer:
@@ -295,7 +300,18 @@ def main(popups: bool = False) -> int:
                 return
             self.response = text
             self.response_until = time.time() + min(20, 4 + len(text) / 18)
+            self.sources = None
             self.relayout()
+            self.update()
+
+        def show_sources(self, d: dict[str, Any]) -> None:
+            """A researched answer: the answer, then its sources as clickable lines (open in the browser)
+            and "Show what it read" (the full view). Stays up longer so there's time to click."""
+            self.response = d.get("answer", "")
+            self.sources = d
+            self.response_until = time.time() + max(30, min(60, 10 + len(self.response) / 12))
+            self.relayout()
+            self.show()
             self.update()
 
         def _tick(self) -> None:
@@ -332,7 +348,9 @@ def main(popups: bool = False) -> int:
                 self._bubble(p, y, f"“{self.transcript}”", right, QColor(30, 30, 30, 220))
                 y += 40
             if time.time() < self.response_until and self.response:
-                self._bubble(p, y, self.response, right, QColor(0, 0, 0, 230))
+                y = self._bubble(p, y, self.response, right, QColor(0, 0, 0, 230)) + 6
+                if self.sources:
+                    self._sources(p, y, right)
             self._paint_menu(p, right)
             p.end()
             set_input(self, [r for r, _k, _i in self.hits])
@@ -467,6 +485,39 @@ def main(popups: bool = False) -> int:
             p.drawRoundedRect(box, 12, 12)
             p.setPen(QColor("#ffffff"))
             p.drawText(box.adjusted(10, 7, -10, -7), Qt.TextWordWrap, text)
+            return int(box.bottom())
+
+        def _sources(self, p: QPainter, y: int, right: bool) -> None:
+            from urllib.parse import urlparse
+            f = QFont()
+            f.setPointSize(10)
+            p.setFont(f)
+            fm = p.fontMetrics()
+            line_h = fm.height() + 6
+            items = (self.sources or {}).get("sources", [])
+            rows = [(f"[{s['n']}] {s.get('title', '')}", (urlparse(s.get("url", "")).netloc or s.get("url", "")),
+                     "source", s.get("url", "")) for s in items]
+            rows.append(("Show what it read…", "", "sourcetext", (self.sources or {}).get("request", "")))
+            w = self.width() - 12
+            box = QRectF(6, y, w, line_h * len(rows) + 10)
+            if right:
+                box.moveRight(self.width() - 6)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(20, 20, 30, 225))
+            p.drawRoundedRect(box, 12, 12)
+            yy = box.top() + 5
+            for title, host, kind, target in rows:
+                r = QRectF(box.left() + 10, yy, box.width() - 20, line_h)
+                clickable = kind == "sourcetext" or str(target).startswith("http")
+                p.setPen(QColor("#8ab4ff") if clickable else QColor("#cccccc"))
+                text = fm.elidedText(title, Qt.ElideRight, int(r.width() * (0.62 if host else 1.0)))
+                p.drawText(r, Qt.AlignVCenter | Qt.AlignLeft, text)
+                if host:
+                    p.setPen(QColor("#9a9a9a"))
+                    p.drawText(r, Qt.AlignVCenter | Qt.AlignRight, fm.elidedText(host, Qt.ElideLeft, int(r.width() * 0.36)))
+                if clickable:
+                    self.hits.append((r, kind, target))
+                yy += line_h
 
         # -------------------------------------------------------------- input
         def _hit(self, pos: Any) -> tuple[str, str] | None:
@@ -525,6 +576,15 @@ def main(popups: bool = False) -> int:
             kind, rid = hit
             if kind == "mic":
                 daemon.call("mic", None, lambda _e: None, action="click")
+                return
+            if kind == "source":
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(QUrl(rid))
+                self.response_until = max(self.response_until, time.time() + 20)
+                return
+            if kind == "sourcetext":
+                daemon.call("ui.popup", None, lambda _e: None, kind="sources", data={"request": rid})
                 return
             st = self.states.get(rid, {})
             if st.get("waiting") == "answer":
@@ -1112,6 +1172,8 @@ def main(popups: bool = False) -> int:
                 indicator.update_state(data)
             elif topic == "response":
                 indicator.show_response(data.get("text", ""))
+            elif topic == "sources":
+                indicator.show_sources(data)
             elif topic == "timers":
                 timers_w.set_items(data)
             elif topic == "mark":
@@ -1130,11 +1192,13 @@ def main(popups: bool = False) -> int:
                 VideoPlayer.current.control(data)
             return
         if topic == "sources":
+            if not data.get("open"):              # shown on the on-screen overlay; the full view only on request
+                return
             if SourcesBox.current is not None:
                 SourcesBox.current.close()
             SourcesBox.current = SourcesBox(data)
             keep.append(SourcesBox.current)
-            SourcesBox.current.show()             # without taking focus from what you're doing
+            SourcesBox.current.show()
             return
         if topic == "popup":
             d = data.get("data") or {}
@@ -1143,7 +1207,7 @@ def main(popups: bool = False) -> int:
             elif data.get("kind") == "sources":
                 def got(e: Any) -> None:
                     if isinstance(e, dict) and e.get("sources"):
-                        on_event("sources", {"request": e["id"], "agent_name": e.get("agent") or "Jeeves",
+                        on_event("sources", {"open": True, "request": e["id"], "agent_name": e.get("agent") or "Jeeves",
                                              "question": e.get("text", ""), "answer": e.get("response", ""),
                                              "sources": e["sources"]})
                 daemon.call("history.get", got, lambda _e: None, id=d.get("request"))
