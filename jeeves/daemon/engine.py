@@ -226,12 +226,19 @@ class Engine:
         self._apply_power()
         if self.is_on():
             # "Jeeves-Microphone" always exists while Jeeves is on, so Discord/OBS can list it before an
-            # agent first speaks into it (it carries your own mic in the meantime)
-            from .audio import ensure_virtual_mic
-            ensure_virtual_mic(self.settings.get("audio.virtual_mic_sink", "jeeves-mic"),
-                               bool(self.settings.get("audio.virtual_mic_include_mic", True)),
-                               self.settings.get("audio.microphone", ""))
-        self.models.prune()
+            # agent first speaks into it (it carries your own mic in the meantime). Nothing here may stop
+            # the listeners below from starting.
+            try:
+                from .audio import ensure_virtual_mic
+                ensure_virtual_mic(self.settings.get("audio.virtual_mic_sink", "jeeves-mic"),
+                                   bool(self.settings.get("audio.virtual_mic_include_mic", True)),
+                                   self.settings.get("audio.microphone", ""))
+            except Exception:
+                log.exception("couldn't set up Jeeves-Microphone")
+        try:
+            self.models.prune()
+        except Exception:
+            log.exception("model cleanup failed")
         wanted = set()
         if self._needs_source("microphone"):
             wanted.add("microphone")
@@ -524,7 +531,8 @@ class Engine:
         lang = self.settings.get("models.stt.language", "en")
         return stt.transcribe(pcm, prompt=self.training.initial_prompt(), language=lang)
 
-    def on_wake(self, source: str, name: str, conf: float, after: list[bytes]) -> None:
+    def on_wake(self, source: str, name: str, conf: float, after: list[bytes], threshold: float | None = None,
+                words: int = 0) -> None:
         if self.sessions.get(source) is not None or not self.is_on():
             return
         aid = self.agent_by_name(name, source)
@@ -541,7 +549,7 @@ class Engine:
             self.flash_unavailable(aid, f"speech recognition is unloaded while {self.models.suspended['stt']} is open")
         s = self.open_session(source, aid, "extended" if aid in self.extended else "request")
         s.interrupting = paused
-        spoke_at = self._speech_in(after)
+        spoke_at = self._speech_in(after, threshold, words)
         if spoke_at is not None:
             # words already followed the name ("Jeeves, open OBS" in one breath)
             s.frames = list(after)
@@ -550,17 +558,23 @@ class Engine:
         # otherwise just the pause after the name (or breathing, keys, the name's tail): wait for the
         # request -- the session waits up to NO_SPEECH_TIMEOUT for you to start talking
 
-    def _speech_in(self, frames: list[bytes]) -> float | None:
+    def _speech_in(self, frames: list[bytes], threshold: float | None = None, words: int = 0) -> float | None:
         """When the last real speech in these frames was (a timestamp), or None if they hold no
-        more than noise: at least ~0.3 s of voiced audio counts as words."""
+        more than noise. Speech is judged against this audio's own background (a quiet mic's words
+        are quiet too): ~0.25 s clearly above it counts, and so do two or more words the wake word
+        model heard after the name."""
         from .audio import FRAME_MS, rms
         if not frames:
             return None
-        thr = float(self.settings.get("audio.vad_threshold", 0.012))
-        voiced = [i for i, f in enumerate(frames) if rms(f) > thr]
-        if len(voiced) < 300 // FRAME_MS:
+        levels = [rms(f) for f in frames]
+        floor = sorted(levels)[len(levels) // 4]
+        cfg = float(self.settings.get("audio.vad_threshold", 0.012)) if threshold is None else threshold
+        thr = min(cfg, max(0.003, floor * 3))
+        voiced = [i for i, lv in enumerate(levels) if lv > thr]
+        if len(voiced) < 250 // FRAME_MS and words < 2:
             return None
-        return time.time() - (len(frames) - 1 - voiced[-1]) * FRAME_MS / 1000
+        last = voiced[-1] if voiced else len(frames) - 1
+        return time.time() - (len(frames) - 1 - last) * FRAME_MS / 1000
 
     def on_utterance(self, source: str, pcm: bytes) -> None:
         """Transcribe-everything path: Summary log, audio keyword triggers, and

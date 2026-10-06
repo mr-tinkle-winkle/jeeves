@@ -169,3 +169,25 @@ def test_research_explains_and_shows_clickable_sources(engine, monkeypatch):
     from jeeves.overlay import sources_html
     html = sources_html(src)
     assert 'href="#s2"' in html and 'href="https://example.com/a"' in html and "show all the text read" in html
+
+
+def _tone(level: float, n: int):
+    import math, struct
+    return [b"".join(struct.pack("<h", int(level * 32767 * 1.414 * math.sin(i / 3))) for i in range(480))] * n
+
+
+def test_quiet_microphone_still_counts_as_speech(engine):
+    # words at ~0.008 RMS (under the 0.012 default) after the name, over a quiet background
+    after = _tone(0.0005, 10) + _tone(0.008, 25) + _tone(0.0005, 15)
+    assert engine._speech_in(after) is not None
+    assert engine._speech_in(_tone(0.0005, 40)) is None             # just the quiet background: not speech
+    assert engine._speech_in(_tone(0.0005, 40), words=2) is not None    # the wake model heard words
+
+
+def test_listener_threshold_adapts_but_never_exceeds_the_setting(engine):
+    from jeeves.daemon.listener import Listener
+    lst = Listener(engine, "microphone")
+    lst.floor = 0.0004
+    assert lst.threshold() == 0.003                                # quiet mic: lower bar
+    lst.floor = 0.02
+    assert lst.threshold() == 0.012                                # noisy mic: the configured level

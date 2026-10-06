@@ -283,6 +283,7 @@ def ensure_virtual_mic(sink: str, include_mic: bool = True, mic: str = "") -> bo
     if not which("pactl"):
         return False
     source_name = VIRTUAL_MIC_SOURCE.format(sink=sink)
+    default_before = _pactl("get-default-source").strip()
     modules = _pactl("list", "short", "modules")
     if f"sink_name={sink}" not in modules:
         _pactl("load-module", "module-null-sink", f"sink_name={sink}",
@@ -301,6 +302,10 @@ def ensure_virtual_mic(sink: str, include_mic: bool = True, mic: str = "") -> bo
         for ln in modules.splitlines():
             if "module-loopback" in ln and loop_tag in ln + " ":
                 _pactl("unload-module", ln.split("\t")[0])
+    # never let the desktop switch your default microphone to Jeeves' virtual one
+    if default_before and not default_before.startswith(sink) and \
+            _pactl("get-default-source").strip().startswith(sink):
+        _pactl("set-default-source", default_before)
     return True
 
 

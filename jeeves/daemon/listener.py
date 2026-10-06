@@ -116,6 +116,8 @@ class Listener(threading.Thread):
         self.segmenter = Segmenter()
         self.answer_streak = 0
         self.capture: Capture | None = None
+        self.floor = 0.002            # this source's background level (adapts; quiet mics get a lower bar)
+        self.trailing = 0             # words the wake model heard after the name
         self._stop = threading.Event()
         self.status = "starting"
 
@@ -159,7 +161,10 @@ class Listener(threading.Thread):
         now = time.time()
         if self.source != "microphone" and (eng.speaking or now < eng.speaking_until):
             frame = b"\0" * len(frame)      # Jeeves' own voice is on the desktop audio: don't hear it
-        voiced = rms(frame) > float(eng.settings.get("audio.vad_threshold", 0.012))
+        level = rms(frame)
+        voiced = level > self.threshold()
+        if not voiced:                           # follow the background level, slowly
+            self.floor = self.floor * 0.995 + level * 0.005
         self.ring.append(frame)
         self.frame_no += 1
         eos = float(eng.settings.get("general.end_of_speech_seconds", 1.2))
@@ -216,17 +221,26 @@ class Listener(threading.Thread):
 
         if hits:
             best = max(hits, key=lambda h: h[1])
-            eng.on_wake(self.source, best[0], best[1], self._audio_after_name(self.wake_rec, best[0]))
+            after = self._audio_after_name(self.wake_rec, best[0])
+            eng.on_wake(self.source, best[0], best[1], after, threshold=self.threshold(), words=self.trailing)
+
+    def threshold(self) -> float:
+        """What counts as speech here: the configured level, or less on a quiet microphone (3x its
+        background noise, at least 0.003) -- never more than the configured level."""
+        cfg = float(self.engine.settings.get("audio.vad_threshold", 0.012))
+        return min(cfg, max(0.003, self.floor * 3))
 
     def _audio_after_name(self, spotter: Any, name: str) -> list[bytes]:
         """Frames recorded after the call name in the phrase just recognised."""
         words = getattr(spotter, "last_result", []) or []
+        self.trailing = 0
         end_s = None
         parts = name.split()
         for i in range(len(words) - len(parts) + 1):
             if [w.get("word") for w in words[i:i + len(parts)]] == parts:
                 end_s = float(words[i + len(parts) - 1].get("end", 0))
                 trailing = [w for w in words[i + len(parts):] if w.get("word") != name]
+                self.trailing = len(trailing)
                 if not trailing:
                     return []          # nothing said after the name yet: listen for it
         if end_s is None:
