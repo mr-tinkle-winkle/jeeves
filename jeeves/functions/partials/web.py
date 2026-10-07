@@ -296,7 +296,11 @@ def _wiki_api(base: str, params: dict[str, str]) -> dict:
 def wiki_search(base: str, query: str, count: int = 5) -> list[dict[str, str]]:
     """Articles in this wiki matching the query: [{title, url, snippet}]."""
     import urllib.parse
-    data = _wiki_api(base, {"action": "query", "list": "search", "srsearch": query, "srlimit": str(count)})
+    params = {"action": "query", "list": "search", "srsearch": query, "srlimit": str(count), "srwhat": "text"}
+    data = _wiki_api(base, params)
+    if "error" in data:                              # a wiki whose search doesn't take srwhat
+        params.pop("srwhat")
+        data = _wiki_api(base, params)
     out = []
     for r in (data.get("query") or {}).get("search", []):
         title = r.get("title", "")
@@ -305,12 +309,100 @@ def wiki_search(base: str, query: str, count: int = 5) -> list[dict[str, str]]:
     return out
 
 
+def _article_html(base: str, title: str) -> str:
+    """The article's own HTML: through the API, or (when a wiki refuses the API) its page's content area."""
+    import urllib.parse
+    try:
+        data = _wiki_api(base, {"action": "parse", "page": title, "prop": "text", "redirects": "1"})
+        html_text = ((data.get("parse") or {}).get("text") or {}).get("*", "")
+        if html_text:
+            return html_text
+    except FunctionError:
+        pass
+    try:
+        page = _fetch(f"{base}/wiki/{urllib.parse.quote(title.replace(' ', '_'))}", timeout=12)
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+        raise FunctionError(f"couldn't read '{title}' on {base}: {exc}") from exc
+    m = re.search(r'(?is)<div[^>]+class="[^"]*\bmw-parser-output\b[^"]*"[^>]*>(.*)', page)
+    if not m:
+        raise FunctionError(f"no article '{title}' in that wiki")
+    return m.group(1)
+
+
 def wiki_article(base: str, title: str) -> str:
     """An article's text without the site around it (menus, ads, other pages' links)."""
-    data = _wiki_api(base, {"action": "parse", "page": title, "prop": "text", "redirects": "1"})
-    html_text = ((data.get("parse") or {}).get("text") or {}).get("*", "")
-    if not html_text:
-        raise FunctionError(f"no article '{title}' in that wiki")
+    html_text = _article_html(base, title)
     html_text = re.sub(r'(?is)<(table|div)[^>]*class="[^"]*\b(navbox|toc|mw-references-wrap|reflist)\b.*?</\1>', " ",
                        html_text)
+    html_text = re.sub(r"(?i)</t[dh]>", " | ", html_text)          # table cells stay apart ("Wumpy | Jump off...")
     return html_to_text(html_text)
+
+
+def _slugs(subject: str) -> list[str]:
+    words = re.findall(r"[a-z0-9]+", subject.lower())
+    words2 = [w for w in words if w not in ("the", "a", "an", "game")] or words
+    out: list[str] = []
+    for ws in (words, words2):
+        for joined in ("-".join(ws), "".join(ws)):
+            if joined and joined not in out:
+                out.append(joined)
+    return out
+
+
+def find_wiki(subject: str) -> str | None:
+    """The subject's own wiki when search engines don't show it: Fandom and wiki.gg wikis live at
+    predictable addresses (parkour-reborn.fandom.com), so they're asked directly."""
+    want = re.sub(r"[^a-z0-9]", "", subject.lower())
+    for slug in _slugs(subject)[:4]:
+        for base in (f"https://{slug}.fandom.com", f"https://{slug}.wiki.gg"):
+            try:
+                data = _wiki_api(base, {"action": "query", "meta": "siteinfo"})
+            except FunctionError:
+                continue
+            name = re.sub(r"[^a-z0-9]", "", str(((data.get("query") or {}).get("general") or {}).get("sitename", "")
+                                                  ).lower())
+            if want and (want[:8] in name or name.removesuffix("wiki")[:8] in want):
+                return base
+    return None
+
+
+def wiki_titles(base: str, limit: int = 500) -> list[str]:
+    """The wiki's articles (for a small game wiki: all of them) -- what a person would see browsing it."""
+    data = _wiki_api(base, {"action": "query", "list": "allpages", "aplimit": str(min(500, limit)),
+                            "apfilterredir": "nonredirects", "apnamespace": "0"})
+    return [p.get("title", "") for p in (data.get("query") or {}).get("allpages", []) if p.get("title")]
+
+
+def wiki_links(base: str, title: str) -> list[str]:
+    """Articles linked from a page (its navigation, "Movement", "Items"...)."""
+    try:
+        data = _wiki_api(base, {"action": "parse", "page": title, "prop": "links", "redirects": "1"})
+        return [ln.get("*", "") for ln in (data.get("parse") or {}).get("links", [])
+                if ln.get("ns") == 0 and "exists" in ln and ln.get("*")]
+    except FunctionError:
+        return []
+
+
+def wiki_main_page(base: str) -> str:
+    try:
+        data = _wiki_api(base, {"action": "query", "meta": "siteinfo"})
+        return str(((data.get("query") or {}).get("general") or {}).get("mainpage", "")) or "Main Page"
+    except FunctionError:
+        return "Main Page"
+
+
+def page_links(page_html: str, url: str) -> list[dict[str, str]]:
+    """The links on a web page: [{text, url}] (same site first), for following one like a person would."""
+    import urllib.parse
+    host = urllib.parse.urlparse(url).netloc
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for m in re.finditer(r'(?is)<a\s[^>]*href="([^"#]+)"[^>]*>(.*?)</a>', page_html):
+        href = urllib.parse.urljoin(url, html.unescape(m.group(1)))
+        text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", m.group(2)))).strip()
+        if not text or not href.startswith("http") or href in seen or len(text) > 80:
+            continue
+        seen.add(href)
+        out.append({"text": text, "url": href})
+    out.sort(key=lambda link: urllib.parse.urlparse(link["url"]).netloc != host)
+    return out

@@ -255,45 +255,149 @@ def learn_context(ctx: Any, subject: str, notes: list[str], results_all: list[di
         if summary and "UNKNOWN" not in summary.upper():
             notes.append(f"{subject}: {summary.strip()}")
             ctx.think(f"  {summary.strip()}")
+    if not wiki:                                       # search engines didn't show it: ask where it would be
+        from .partials.web import find_wiki
+        wiki = find_wiki(subject)
     if wiki:
         ctx.think(f"  its wiki: {wiki}")
     return wiki
 
 
+def term_in(text: str, term: str) -> int:
+    """Where the term is in the text (-1: not there), allowing for a plural or spelling ending
+    ("wumpy" finds "Wumpies", "Wumpy:")."""
+    t = term.lower().strip()
+    if not t:
+        return -1
+    m = re.search(rf"\b{re.escape(t[:-1] if len(t) > 4 else t)}\w{{0,3}}\b", text.lower())
+    return m.start() if m else -1
+
+
+def term_passages(text: str, terms: list[str], limit: int) -> str:
+    """The parts of a page around each mention of the terms (a wiki page about all the movement tech
+    has the one move in a paragraph or table row somewhere in the middle)."""
+    spans: list[tuple[int, int]] = []
+    low = text.lower()
+    for term in terms:
+        t = term.lower().strip()
+        if not t:
+            continue
+        for m in re.finditer(rf"\b{re.escape(t[:-1] if len(t) > 4 else t)}\w{{0,3}}\b", low):
+            a = text.rfind("\n\n", 0, max(0, m.start() - 150))
+            b = text.find("\n\n", m.end() + 900)
+            spans.append((a + 2 if a >= 0 else 0, b if b >= 0 else len(text)))
+    if not spans:
+        return ""
+    spans.sort()
+    merged = [list(spans[0])]
+    for a, b in spans[1:]:
+        if a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return "\n…\n".join(text[a:b].strip() for a, b in merged)[:limit]
+
+
+def pick_pages(ctx, goal: str, terms: list[str], guess: str, titles: list[str], seen_titles: set[str],
+               n: int = 3) -> list[str]:
+    """Which pages a person browsing this wiki would open to find the term ("wumpy" in a movement
+    game: the Movement page). The model picks from the wiki's own page list."""
+    titles = [t for t in titles if t not in seen_titles]
+    if not titles:
+        return []
+    listing = ", ".join(titles[:400])
+    reply = ctx.engine.models.respond(
+        ctx.agent,
+        f"Pages of the wiki: {listing}\n\nQuestion: {goal}\n"
+        + (f"What it probably is: {guess}\n" if guess else "")
+        + f"\nWhich of these pages would most likely explain {', '.join(terms) or 'the answer'}? A specific "
+          "technique, item or term is usually on the page for its category (a move on 'Movement' or "
+          "'Techniques', an item on 'Items'). Reply with up to three page titles exactly as listed, one per line.",
+        ctx=None, raw=True, temperature=0.0, max_tokens=60) or ""
+    lower = {t.lower(): t for t in titles}
+    out: list[str] = []
+    for ln in reply.splitlines():
+        name = re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", ln).strip().strip('"').lower()
+        if name in lower and lower[name] not in out:
+            out.append(lower[name])
+    if not out:                                      # no model answer: titles that share words with the question
+        words = set(keywords(" ".join(terms) + " " + guess + " " + goal))
+        out = [t for t in titles if words & set(keywords(t))]
+    return out[:n]
+
+
 def read_wiki(ctx: Any, wiki: str, goal: str, terms: list[str], guess: str, queries: list[str],
               sources: list[dict[str, Any]], seen: set[str], per_page: int) -> list[dict[str, Any]] | None:
-    """Search the subject's own wiki and read the best articles; the answering sources if they answer it."""
-    from .partials.web import wiki_article, wiki_search
-    tries = [t for t in terms] + ([f"{terms[0]} {w}" for w in keywords(guess)[:2]] if terms and guess else []) + \
-        [goal]
-    titles: list[dict[str, str]] = []
+    """Look in the subject's own wiki the way a person would: its search first, then browse to the
+    page the thing would be on (main page -> "Movement") and find it there. Returns the answering
+    sources if they answer it."""
+    import urllib.parse
+    from .partials.web import wiki_article, wiki_links, wiki_main_page, wiki_search, wiki_titles
+    read_titles: set[str] = set()
+
+    def read(title: str, why: str) -> list[dict[str, Any]] | None:
+        url = f"{wiki}/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
+        if title in read_titles or url in seen:
+            return None
+        ctx.check_cancelled()
+        read_titles.add(title)
+        seen.add(url)
+        ctx.think(f"{why}: {title}", looking_at=url)
+        try:
+            text = wiki_article(wiki, title)
+        except FunctionError as exc:
+            ctx.think(f"  couldn't read it: {exc}")
+            return None
+        found = [t for t in terms if term_in(text, t) >= 0]
+        if terms and not found:
+            ctx.think(f"  no mention of {', '.join(terms)} here")
+            return None
+        passages = term_passages(text, found, per_page) if found else \
+            relevant_passages(text, goal, " ".join(terms + queries), per_page)
+        if found:
+            ctx.think(f"  found {', '.join(found)} on this page")
+        sources.append({"title": title, "url": url, "text": passages})
+        verdict, detail = assess(ctx, goal, sources)
+        if verdict == "answered":
+            return [sources[n - 1] for n in detail] if detail else sources[-1:]
+        return None
+
+    # 1. the wiki's own search
+    tries = list(terms) + ([f"{terms[0]} {w}" for w in keywords(guess)[:2]] if terms and guess else []) + [goal]
+    titles: list[str] = []
     for q in tries[:4]:
         try:
             hits = wiki_search(wiki, q, 4)
         except FunctionError as exc:
             ctx.think(f"  wiki search failed: {exc}")
-            return None
-        for h in hits:
-            if h["url"] not in seen and h["url"] not in (t["url"] for t in titles):
-                titles.append(h)
+            break
+        titles += [h["title"] for h in hits if h["title"] not in titles]
         if len(titles) >= 3:
             break
     want = set(keywords(" ".join(terms) or goal))
-    titles.sort(key=lambda t: -len(want & set(keywords(t["title"]))))      # "Wumpy" before "Movement"
+    titles.sort(key=lambda t: -len(want & set(keywords(t))))      # "Wumpy" before "Movement"
     for t in titles[:3]:
-        ctx.check_cancelled()
-        seen.add(t["url"])
-        ctx.think(f"Reading the wiki: {t['title']}", looking_at=t["url"])
-        try:
-            text = wiki_article(wiki, t["title"])
-        except FunctionError as exc:
-            ctx.think(f"  couldn't read it: {exc}")
-            continue
-        sources.append({"title": t["title"], "url": t["url"],
-                        "text": relevant_passages(text, goal, " ".join(terms + queries), per_page)})
-        verdict, detail = assess(ctx, goal, sources)
-        if verdict == "answered":
-            return [sources[n - 1] for n in detail] if detail else sources[-1:]
+        done = read(t, "Reading the wiki")
+        if done:
+            return done
+    # 2. browse: the pages a person would click through to (the main page's links, or the page list)
+    try:
+        pages = wiki_titles(wiki)
+    except FunctionError:
+        pages = []
+    if not pages:
+        pages = wiki_links(wiki, wiki_main_page(wiki))
+    if pages:
+        ctx.think(f"Browsing the wiki ({len(pages)} pages)")
+        for t in pick_pages(ctx, goal, terms, guess, pages, read_titles):
+            done = read(t, "Opening")
+            if done:
+                return done
+            for sub in pick_pages(ctx, goal, terms, guess, wiki_links(wiki, t), read_titles, n=1) if \
+                    not any(s["title"] == t for s in sources) else []:
+                done = read(sub, "Following a link")
+                if done:
+                    return done
     return None
 
 
@@ -302,7 +406,7 @@ def run(ctx: Any, question: str, depth: str | None = None
     """(sources that answer it -- or everything read, if nothing clearly did --, all search results,
     notes on the context learned along the way)."""
     import time as _time
-    from .partials.web import request_website
+    from .partials.web import html_to_text, page_links, request_website
     started = _time.time()
     budget = float(ctx.settings.get("research.max_seconds", 90))
     depth = str(depth or ctx.settings.get("research.depth", "normal"))
@@ -363,15 +467,30 @@ def run(ctx: Any, question: str, depth: str | None = None
             seen.add(r["url"])
             ctx.think(f"Reading {r['url']}", looking_at=r["url"])
             try:
-                text = request_website(ctx, r["url"], max_chars=80000, timeout=8)
+                page_html = request_website(ctx, r["url"], raw=True, max_chars=600000, timeout=8)
+                text = html_to_text(page_html)[:80000] if "<" in page_html[:2000] else page_html[:80000]
             except FunctionError as exc:
                 ctx.think(f"  couldn't read it: {exc}")
-                text = ""
+                page_html = text = ""
+            if terms and page_html and not any(term_in(text, t) >= 0 for t in terms):
+                # not on this page: follow a link to it, like clicking "Movement" on a game's site
+                link = next((ln for ln in page_links(page_html, r["url"])
+                             if any(term_in(ln["text"], t) >= 0 for t in terms) and ln["url"] not in seen), None)
+                if link is not None:
+                    seen.add(link["url"])
+                    ctx.think(f"  following the link '{link['text']}'", looking_at=link["url"])
+                    try:
+                        text = request_website(ctx, link["url"], max_chars=80000, timeout=8)
+                        r = {"title": f"{r['title']} > {link['text']}", "url": link["url"]}
+                    except FunctionError as exc:
+                        ctx.think(f"  couldn't read it: {exc}")
             if len(text.strip()) < 200:            # JavaScript-only or blocked page: use the snippet
                 text = r.get("snippet", "")
             if not text.strip():
                 continue
-            passages = relevant_passages(text, goal, " ".join(queries + terms), per_page)
+            found = [t for t in terms if term_in(text, t) >= 0]
+            passages = term_passages(text, found, per_page) if found else \
+                relevant_passages(text, goal, " ".join(queries + terms), per_page)
             sources.append({"title": r["title"], "url": r["url"], "text": passages})
             read += 1
             if kws and not kws & set(keywords(passages)):

@@ -23,6 +23,9 @@
 , kdotool
 , sox
 , yt-dlp
+  # yt-dlp needs a JavaScript runtime to solve YouTube's player challenges (otherwise: missing formats,
+  # "sign in to confirm you're not a bot")
+, deno ? null
 , kdePackages ? null
 , callPackage
 , extraRuntimePackages ? [ ]
@@ -77,7 +80,8 @@ py.buildPythonApplication {
     "--prefix" "PATH" ":" (lib.makeBinPath ([
       whisper llama piper-tts espeak-ng tesseract wl-clipboard xclip libnotify
       pipewire pulseaudio grim kdotool sox yt-dlp
-    ] ++ lib.optional (kdePackages != null && kdePackages ? spectacle) kdePackages.spectacle
+    ] ++ lib.optional (deno != null) deno
+      ++ lib.optional (kdePackages != null && kdePackages ? spectacle) kdePackages.spectacle
       ++ lib.optional (kdePackages != null && kdePackages ? libkscreen) kdePackages.libkscreen
       ++ extraRuntimePackages))
   ];

@@ -145,11 +145,29 @@ def test_no_wake_reply_unless_the_agent_has_one(engine):
     assert not engine.sessions["microphone"].reply_at
 
 
-def test_words_after_the_name_mean_no_reply(engine):
+def test_going_straight_on_with_the_request_means_no_reply(engine):
     engine.settings.set("agents.jeeves.wake_reply", "Yes?")
+    lst = Listener(engine, "microphone")
+    engine.listeners["microphone"] = lst
     engine.on_wake("microphone", "jeeves", 0.99, [LOUD] * 20, words=2, after_voiced=[True] * 20)
     s = engine.sessions["microphone"]
-    assert s.got_speech and not s.reply_at
+    for _ in range(30):                       # "Jeeves open the mixer": speech runs on from the name
+        lst.process(LOUD)
+    s.reply_at = s.reply_at and time.time() - 0.01
+    lst.process(LOUD)
+    assert s.got_speech and not s.replied
+
+
+def test_a_breath_after_the_name_still_gets_a_reply(engine):
+    # the wake model hearing "words" after the name (a breath, room noise) used to cancel the reply
+    engine.settings.set("agents.jeeves.wake_reply", "Yes?")
+    lst = Listener(engine, "microphone")
+    engine.listeners["microphone"] = lst
+    engine.on_wake("microphone", "jeeves", 0.99, [QUIET] * 5, words=1, after_voiced=[False] * 5)
+    s = engine.sessions["microphone"]
+    s.reply_at = time.time() - 0.01
+    lst.process(QUIET)
+    assert s.replied
 
 
 def test_name_still_sounding_when_the_listen_opens(engine):

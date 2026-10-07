@@ -72,6 +72,17 @@ class GeneralPage(Page):
                           "key that turns it back on too, add a shortcut for the command “jeeves --toggle” in "
                           "System Settings > Keyboard > Shortcuts."))
 
+        y = self.section("YouTube")
+        self.b.choice(y, "Sign in with", "youtube.cookies_from_browser",
+                      [("Automatic (a browser's YouTube login, only when YouTube asks)", "auto"),
+                       ("Firefox", "firefox"), ("Chrome", "chrome"), ("Chromium", "chromium"), ("Brave", "brave"),
+                       ("Vivaldi", "vivaldi"), ("Edge", "edge"), ("LibreWolf", "librewolf"), ("Don't sign in", "off")],
+                      hint="When YouTube says \"sign in to confirm you're not a bot\", Jeeves uses the YouTube login "
+                           "of a browser on this computer (signed in to YouTube there). Nothing leaves your computer "
+                           "except to YouTube.")
+        self.b.text(y, "Or a cookies.txt file", "youtube.cookies_file", placeholder="~/cookies-youtube.txt",
+                    hint="Exported from your browser (e.g. with a 'Get cookies.txt' extension); used instead.")
+
         a = self.section("Audio devices")
         self.mic = self.b.choice(a, "Microphone", "audio.microphone", [("Default", "")])
         self.desk = self.b.choice(a, "Desktop audio", "audio.desktop", [("Default output's monitor", "@DEFAULT_MONITOR@")])

@@ -194,6 +194,10 @@ DEFAULTS: dict[str, Any] = {
                  "depth": "normal",            # quick (1 round, 3 pages) | normal (2 rounds, 5) | deep (3, 8)
                  "auto_for_facts": True,       # factual questions (games, products, people...) get researched
                  "max_seconds": 90},           # stop reading more pages after this long
+    # YouTube asks some connections to sign in; yt-dlp can use a browser's YouTube login on this computer:
+    # "auto" (only when asked, trying each installed browser), "off", or a browser: firefox, chrome, chromium,
+    # brave, vivaldi, edge, librewolf (optionally "firefox:PROFILE"); cookies_file = an exported cookies.txt
+    "youtube": {"max_height": 1080, "cookies_from_browser": "auto", "cookies_file": ""},
     "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"]},
     # Watch the screen: seconds between looks (backs off while nothing changes), how chatty, time limit
     "watch": {"interval": 2.0, "talkativeness": 0.5, "max_minutes": 120},

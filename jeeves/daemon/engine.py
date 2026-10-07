@@ -249,6 +249,9 @@ class Engine:
 
     def _apply_settings_locked(self) -> None:
         self._apply_power()
+        from ..functions.partials import youtube as yt
+        yt.configure(str(self.settings.get("youtube.cookies_from_browser", "auto") or "auto"),
+                     str(self.settings.get("youtube.cookies_file", "") or ""))
         if self.is_on():
             # "Jeeves-Microphone" always exists while Jeeves is on, so Discord/OBS can list it before an
             # agent first speaks into it (it carries your own mic in the meantime). Nothing here may stop
@@ -780,8 +783,10 @@ class Engine:
         if name_audio:
             s.preroll = list(name_audio)
         s.wake_conf = conf
-        if spoke_at is None and not words and self._wake_reply_phrases(self.agents().get(aid, {})):
-            s.reply_at = time.time() + REPLY_WAIT   # still quiet by then: "Yes?" (Listener.process)
+        if spoke_at is None and self._wake_reply_phrases(self.agents().get(aid, {})):
+            # still quiet by then: "Yes?" (Listener.process decides, by whether you've started talking --
+            # not by the wake model's "words after the name", which a breath or room noise also gives)
+            s.reply_at = time.time() + REPLY_WAIT
 
     def _speech_after_name(self, after: list[bytes], after_voiced: list[bool] | None, threshold: float | None,
                            words: int) -> tuple[float | None, int, bool]:
@@ -794,13 +799,10 @@ class Engine:
             spoke_at, count = self._speech_frames(after[NAME_TAIL_FRAMES:], threshold, words)
             return spoke_at, count, False
         v = list(after_voiced)
-        if words:
-            start = min(NAME_TAIL_FRAMES, len(v))
-        else:
-            start = 0
-            while start < len(v) and v[start]:       # the name's own end, still sounding
-                start += 1
-        ongoing = bool(v) and not words and start >= len(v)
+        start = 0
+        while start < len(v) and v[start]:           # the name's own end, still sounding
+            start += 1
+        ongoing = bool(v) and start >= len(v)         # (if it's really the request going on, the listen sees)
         idx = [i for i in range(start, len(v)) if v[i]]
         if len(idx) < 250 // FRAME_MS and not (words >= 1 and len(idx) >= 120 // FRAME_MS):
             return None, 0, ongoing
@@ -828,7 +830,11 @@ class Engine:
     def _play_wake_reply(self, s: Session, agent: dict[str, Any], phrase: str) -> None:
         try:
             pcm, rate = self._wake_reply_audio(agent, phrase)
-            pb = Playback(pcm, rate, self.voice_targets(agent))
+            # it's for you: where you hear it, even if the agent's answers go into the call (Jeeves-Microphone)
+            mine = agent if agent.get("output_to", "speakers") in ("speakers", "both", "device") else \
+                dict(agent, output_to="speakers")
+            pb = Playback(pcm, rate, self.voice_targets(mine))
+            log.info("  wake-up reply: %s", phrase)
         except Exception:  # noqa: BLE001 -- never let the reply break listening
             log.exception("wake-up reply failed")
             s.deaf_until = 0.0
@@ -838,6 +844,8 @@ class Engine:
         try:
             if not s.ended:
                 pb.play()
+                if pb.error:
+                    log.warning("  couldn't play the wake-up reply: %s", pb.error)
         finally:
             with self._lock:
                 self.speaking -= 1

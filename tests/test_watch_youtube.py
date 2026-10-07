@@ -202,3 +202,34 @@ def test_player_controls(monkeypatch):
     p.hide_controls()
     p.close()
     assert calls[-1] == ("video.closed", {})
+
+
+def test_youtube_signs_in_with_a_browser_login_when_asked(monkeypatch, tmp_path):
+    """YouTube's "sign in to confirm you're not a bot": try again with the YouTube login of a browser."""
+    import json
+    import os
+    import stat
+    from jeeves.functions.partials import youtube as yt
+    log = tmp_path / "calls"
+    fake = tmp_path / "yt-dlp"
+    fake.write_text("#!/bin/sh\necho \"$@\" >> " + str(log) + "\n"
+                    "case \"$*\" in *cookies-from-browser*) echo '" + json.dumps({"entries": []}) + "'; exit 0;; esac\n"
+                    "echo \"ERROR: [youtube] abc: Sign in to confirm you're not a bot\" >&2; exit 1\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(yt, "which", lambda name: str(fake))
+    monkeypatch.setattr(yt, "installed_browsers", lambda: ["firefox"])
+    yt._working.clear()
+    yt.configure("auto")
+    assert yt.search("lofi") == []
+    calls = log.read_text().splitlines()
+    assert len(calls) == 2 and "--cookies-from-browser firefox" in calls[1]
+    yt.search("lofi")                                     # the login that worked is used first from now on
+    assert "--cookies-from-browser firefox" in log.read_text().splitlines()[2]
+    yt.configure("off")
+    import pytest
+    from jeeves.functions.base import FunctionError
+    with pytest.raises(FunctionError, match="signed-in"):
+        yt.search("lofi")
+    yt.configure("auto")
+    yt._working.clear()
+    assert os.path.exists(fake)

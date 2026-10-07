@@ -25,21 +25,81 @@ FORMAT = ("bv*[height<=?{h}][vcodec~='^(avc1|h264)']+ba[ext=m4a]/bv*[height<=?{h
           "b[height<=?{h}]/b")
 
 
+# Signing in: YouTube asks some connections to "sign in to confirm you're not a bot". yt-dlp can use the
+# YouTube login of a browser on this computer (its cookies; nothing is sent anywhere else).
+# configure(): "auto" = try without, and on a sign-in demand with each installed browser's login;
+# "off"; or a browser ("firefox", "chrome", "chromium", "brave", "vivaldi", "edge", "librewolf", with
+# an optional ":profile"); cookies_file = a cookies.txt exported from the browser instead.
+BROWSERS = {"firefox": "~/.mozilla/firefox", "librewolf": "~/.librewolf", "zen": "~/.zen",
+            "chrome": "~/.config/google-chrome", "chromium": "~/.config/chromium",
+            "brave": "~/.config/BraveSoftware/Brave-Browser", "vivaldi": "~/.config/vivaldi",
+            "edge": "~/.config/microsoft-edge"}
+SIGN_IN = re.compile(r"sign in|not a bot|login required|cookies|age-restricted|confirm your age", re.I)
+_conf: dict[str, str] = {"cookies_from_browser": "auto", "cookies_file": ""}
+_working: list[str] = []          # the login that worked last time (tried first from then on)
+
+
+def configure(cookies_from_browser: str = "auto", cookies_file: str = "") -> None:
+    _conf.update(cookies_from_browser=(cookies_from_browser or "auto").strip(), cookies_file=cookies_file or "")
+
+
+def installed_browsers() -> list[str]:
+    import os
+    return [b for b, d in BROWSERS.items() if os.path.isdir(os.path.expanduser(d))]
+
+
+def _logins() -> list[list[str]]:
+    """The ways to call yt-dlp, in order: [] = without a login."""
+    import os
+    f = os.path.expanduser(_conf["cookies_file"]) if _conf["cookies_file"] else ""
+    if f and os.path.isfile(f):
+        return [["--cookies", f]]
+    choice = _conf["cookies_from_browser"].lower()
+    if choice in ("off", "none", "no", ""):
+        return [[]]
+    if choice != "auto":
+        return [["--cookies-from-browser", _conf["cookies_from_browser"]]]
+    ways = [[]] + [["--cookies-from-browser", b] for b in installed_browsers()]
+    if _working and _working in ways:
+        ways.remove(_working)
+        ways.insert(0, _working)
+    return ways
+
+
+def _run(exe: str, login: list[str], args: tuple[str, ...], timeout: float) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run([exe, "--no-warnings", "-J", *login, *args], capture_output=True, text=True,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise FunctionError("YouTube took too long to answer") from exc
+
+
 def _ytdlp(*args: str, timeout: float = 60) -> Any:
     exe = which("yt-dlp")
     if not exe:
         raise FunctionError("yt-dlp isn't installed (needed for YouTube)")
-    try:
-        out = subprocess.run([exe, "--no-warnings", "-J", *args], capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise FunctionError("YouTube took too long to answer") from exc
-    if out.returncode != 0:
+    last = ""
+    ways = _logins()
+    for i, login in enumerate(ways):
+        out = _run(exe, login, args, timeout)
+        if out.returncode == 0:
+            if login and _working != login:
+                _working[:] = login
+            try:
+                return json.loads(out.stdout)
+            except ValueError as exc:
+                raise FunctionError("YouTube sent something unexpected") from exc
         err = (out.stderr or "").strip().splitlines()
-        raise FunctionError(f"YouTube: {err[-1] if err else 'yt-dlp failed'}")
-    try:
-        return json.loads(out.stdout)
-    except ValueError as exc:
-        raise FunctionError("YouTube sent something unexpected") from exc
+        last = next((ln for ln in reversed(err) if "ERROR" in ln), err[-1] if err else "yt-dlp failed")
+        if not SIGN_IN.search(out.stderr or ""):
+            break                                  # not a login problem: another login won't help
+    if SIGN_IN.search(last):
+        tried = [w[1] for w in ways if w]
+        hint = (f" (tried the YouTube login in {', '.join(tried)})" if tried else
+                " -- sign in to YouTube in Firefox or Chrome on this computer, or choose a browser in "
+                "Settings > Listening & Keys > YouTube")
+        raise FunctionError("YouTube wants a signed-in account" + hint)
+    raise FunctionError(f"YouTube: {re.sub(r'^ERROR:\s*(\[[^]]*\]\s*)?', '', last)}")
 
 
 def _video(e: dict[str, Any]) -> dict[str, Any]:

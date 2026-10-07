@@ -706,3 +706,56 @@ def test_replies_are_spoken_without_markdown_links_or_citations():
     assert speakable("See https://www.example.com/page?x=1 for more.") == "See example.com for more."
     assert speakable("Use the [wiki](https://wiki.gg/x) page. 🎉") == "Use the wiki page."
     assert speakable("snake_case and 2*3*4 stay") == "snake_case and 2*3*4 stay."
+
+
+def test_research_browses_the_wiki_to_the_page_the_move_is_on(engine, monkeypatch):
+    """Search engines only show junk, the wiki's search finds nothing for "wumpy": it finds the wiki at
+    its usual address, opens the page a person would (Movement) and reads the Wumpy row there."""
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    from jeeves.functions.partials import web
+    monkeypatch.setattr(web, "search", lambda settings, q, n, problems=None: [
+        {"title": "Parkour Reborn Wiki: Exploring the Game", "url": "https://blog.example/parkour-reborn-wiki",
+         "snippet": "Parkour Reborn is a Roblox parkour game."}])
+    monkeypatch.setattr(web, "request_website", lambda ctx, url, **kw:
+                        "Parkour Reborn is a Roblox parkour game about movement: wallruns, vaults and tricks. " * 5)
+    asked = []
+
+    def wiki_api(base, params):
+        asked.append((base, params.get("list") or params.get("meta") or params.get("action")))
+        if base != "https://parkour-reborn.fandom.com":
+            raise web.FunctionError("no such wiki")
+        if params.get("meta") == "siteinfo":
+            return {"query": {"general": {"sitename": "Parkour Reborn Wiki", "mainpage": "Parkour Reborn Wiki"}}}
+        if params.get("list") == "search":
+            return {"query": {"search": []}}
+        if params.get("list") == "allpages":
+            return {"query": {"allpages": [{"title": t} for t in
+                                           ("Gear", "Movement", "Parkour Reborn Wiki", "Technical", "Upcoming Content")]}}
+        raise web.FunctionError("unexpected")
+    monkeypatch.setattr(web, "_wiki_api", wiki_api)
+    articles = {"Movement": "Movement covers running and vaulting.\n\n" + "Basic moves are listed below.\n\n" * 20 +
+                "Wumpy | Wallrun, jump off and wallrun again within 0.5 s to keep your speed.\n\nRoll | Land softly.",
+                "Gear": "Gear is bought in the shop."}
+    monkeypatch.setattr(web, "wiki_article", lambda base, title: articles.get(title, "Nothing here."))
+
+    def respond(agent, prompt, **kw):
+        if "break this question down" in prompt:
+            return "GOAL: How do I perform a wumpy in Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy"
+        if "what Parkour Reborn is" in prompt:
+            return "Parkour Reborn is a Roblox parkour movement game."
+        if "web search queries" in prompt:
+            return "GUESS: a wumpy is probably a movement technique\nparkour reborn wumpy"
+        if "Pages of the wiki" in prompt:
+            return "Movement\nTechnical"
+        if "actually answer the question" in prompt:
+            return "ANSWERED: 1" if "within 0.5 s" in prompt else "MORE"
+        return "Wallrun, jump off, then wallrun again within half a second [1]."
+    monkeypatch.setattr(engine.models, "respond", respond)
+    engine.speak = lambda ctx, t: None
+    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"],
+                          new_entry("how do I do a wumpy in parkour reborn", "jeeves", "text"))
+    ctx.call("research", question="How do I perform a wumpy in Parkour Reborn?")
+    sources = ctx.entry["sources"]
+    assert [s["title"] for s in sources] == ["Movement"]
+    assert "Wumpy | Wallrun" in sources[0]["text"] and len(sources[0]["text"]) < 400    # just that part
