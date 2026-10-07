@@ -141,7 +141,7 @@ class FunctionContext:
     # ---- calling functions ---------------------------------------------------
     def call(self, name: str, **args: Any) -> Any:
         self.check_cancelled()
-        f: FunctionDef | None = self.engine.registry.get(name)
+        f: FunctionDef | None = self.engine.registry.get(name, self.agent)
         if f is None:
             raise FunctionError(f"there's no function called '{name}'")
         if self.depth > 12:

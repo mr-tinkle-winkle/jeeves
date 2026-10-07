@@ -8,10 +8,10 @@ from dataclasses import asdict
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QListWidget, QPlainTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .common import JEEVES_THEME_DEFAULTS
-from .ui_kit import (CustomButton, CustomLineEdit, ThemeEditorGroup, ThemeSettings,
+from .ui_kit import (CustomListWidget, CustomPlainTextEdit, pick_path, CustomButton, CustomLineEdit, ThemeEditorGroup, ThemeSettings,
                      get_settings, show_message)
 from .widgets import discard, Binder, Page, combo, label, row
 
@@ -116,7 +116,7 @@ class GeneralPage(Page):
                           "model is off.")
         self.b.number(m, "Keep the last", "summary.minutes", 1, 1440, 5, 0, suffix=" min")
         self.b.list_text(m, "Sources", "summary.sources", placeholder="microphone, desktop")
-        self.memory_view = QPlainTextEdit()
+        self.memory_view = CustomPlainTextEdit()
         self.memory_view.setReadOnly(True)
         self.memory_view.setMaximumHeight(140)
         m.addWidget(label("Remembered notes"))
@@ -129,7 +129,7 @@ class GeneralPage(Page):
         self.doctor_btn = CustomButton("Check screen reading && control")
         self.doctor_btn.clicked.connect(self.run_doctor)
         c.addWidget(row(self.doctor_btn))
-        self.doctor_view = QPlainTextEdit()
+        self.doctor_view = CustomPlainTextEdit()
         self.doctor_view.setReadOnly(True)
         self.doctor_view.setMaximumHeight(200)
         self.doctor_view.setPlaceholderText("Takes a screenshot, reads it, and briefly moves the mouse to test "
@@ -311,11 +311,11 @@ class HistoryPage(Page):
                                     "each function in the Dictionary.")
         self.daemon = daemon
         self.items: list[dict[str, Any]] = []
-        self.list = QListWidget()
+        self.list = CustomListWidget()
         self.list.setMinimumHeight(240)
         self.list.currentRowChanged.connect(self.show_item)
         self.body_layout.addWidget(self.list)
-        self.detail = QPlainTextEdit()
+        self.detail = CustomPlainTextEdit()
         self.detail.setReadOnly(True)
         self.detail.setMinimumHeight(220)
         self.body_layout.addWidget(self.detail)
@@ -410,7 +410,7 @@ class DryRunPage(Page):
         btn = CustomButton("Try it")
         btn.clicked.connect(self.go)
         self.body_layout.addWidget(row(label("Agent", False), self.agent, self.text, btn))
-        self.out = QPlainTextEdit()
+        self.out = CustomPlainTextEdit()
         self.out.setReadOnly(True)
         self.out.setMinimumHeight(400)
         self.body_layout.addWidget(self.out)
@@ -457,7 +457,7 @@ class TrainingPage(Page):
         s.addWidget(label("Read each phrase after pressing Record (listening stops when you stop talking). "
                           "Recordings are kept as a dataset; their words and your vocabulary bias recognition "
                           "toward names and jargon. Evaluate shows the error rate with and without that help."))
-        self.phrases = QListWidget()
+        self.phrases = CustomListWidget()
         self.phrases.setMaximumHeight(200)
         s.addWidget(self.phrases)
         rec = CustomButton("Record selected phrase")
@@ -483,7 +483,7 @@ class TrainingPage(Page):
         add = CustomButton("Add")
         add.clicked.connect(self.add_phrase)
         i.addWidget(row(self.ip_text, self.ip_func, self.ip_args, add))
-        self.ip_list = QListWidget()
+        self.ip_list = CustomListWidget()
         self.ip_list.setMaximumHeight(180)
         i.addWidget(self.ip_list)
         rm = CustomButton("Remove selected")
@@ -521,8 +521,7 @@ class TrainingPage(Page):
         self.daemon.call("training.record", None, None, text=item.text())
 
     def export(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-        d = QFileDialog.getExistingDirectory(self, "Export dataset to")
+        d = pick_path(self, "Export dataset to", mode="folder")
         if d:
             self.daemon.call("training.export", lambda p: show_message(self, "Exported", p), None, dest=d)
 
@@ -575,7 +574,7 @@ class WikipediaPage(Page):
         self.q.setPlaceholderText("Alan Turing")
         self.q.returnPressed.connect(self.search)
         t.addWidget(self.q)
-        self.result = QPlainTextEdit()
+        self.result = CustomPlainTextEdit()
         self.result.setReadOnly(True)
         self.result.setMinimumHeight(200)
         t.addWidget(self.result)

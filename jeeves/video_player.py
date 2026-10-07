@@ -16,8 +16,9 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMenu, QPushButton, QSlider, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QPushButton, QVBoxLayout, QWidget
+
+from .gui.ui_kit.custom_slider import CustomSlider
 
 HIDE_AFTER_MS = 5000
 SPEEDS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
@@ -28,23 +29,63 @@ def fmt(ms: float) -> str:
     return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
 
 
-class ChapterSlider(QSlider):
+def _accent() -> str:
+    try:
+        from .gui.ui_kit import Theme
+        return Theme().accent().name()
+    except Exception:  # noqa: BLE001
+        return "#2f6fff"
+
+
+class PlayerButton(QPushButton):
+    """The player's own buttons: painted rounded dark keys (no native button chrome)."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.setCursor(Qt.PointingHandCursor)
+        fm = self.fontMetrics()
+        self.setMinimumSize(fm.horizontalAdvance(text) + 22, fm.height() + 12)
+
+    def setText(self, text: str) -> None:  # noqa: N802 -- Qt name
+        super().setText(text)
+        fm = self.fontMetrics()
+        self.setMinimumWidth(fm.horizontalAdvance(text) + 22)
+
+    def sizeHint(self) -> Any:
+        from PySide6.QtCore import QSize
+        fm = self.fontMetrics()
+        return QSize(fm.horizontalAdvance(self.text()) + 22, fm.height() + 12)
+
+    def paintEvent(self, _e: Any) -> None:
+        from PySide6.QtCore import QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        bg = QColor("#2c2c2c") if self.underMouse() else QColor("#1d1d1d")
+        if self.isDown():
+            bg = QColor(_accent())
+        p.setPen(QPen(QColor("#3a3a3a"), 1))
+        p.setBrush(bg)
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 7, 7)
+        p.setPen(QColor("#eeeeee"))
+        p.drawText(self.rect(), Qt.AlignCenter, self.text())
+        p.end()
+
+
+class ChapterSlider(CustomSlider):
     """The seek bar, with a tick at each chapter start."""
 
     def __init__(self) -> None:
-        super().__init__(Qt.Horizontal)
+        super().__init__(Qt.Horizontal, colors=("#3a3a3a", _accent()))
         self.chapters: list[dict[str, Any]] = []
 
-    def paintEvent(self, e: Any) -> None:
-        super().paintEvent(e)
+    def paint_extra(self, p: QPainter, track: Any) -> None:
         if not self.chapters or self.maximum() <= 0:
             return
-        p = QPainter(self)
         p.setPen(QPen(QColor(255, 255, 255, 200), 2))
         for c in self.chapters[1:]:
-            x = 8 + (self.width() - 16) * (c["start"] * 1000 / self.maximum())
+            x = track.left() + track.width() * (c["start"] * 1000 / self.maximum())
             p.drawLine(int(x), self.height() // 2 - 6, int(x), self.height() // 2 + 6)
-        p.end()
+        p.setPen(Qt.NoPen)
 
 
 class VideoPlayer(QWidget):
@@ -57,10 +98,10 @@ class VideoPlayer(QWidget):
         from PySide6.QtMultimediaWidgets import QVideoWidget
         self.call = call
         self.setWindowTitle("Jeeves — video")
-        self.setStyleSheet("QWidget { background: #000; color: #eee; } QPushButton { background: #1d1d1d; "
-                           "border: 1px solid #3a3a3a; border-radius: 6px; padding: 4px 10px; } "
-                           "QPushButton:hover { background: #2c2c2c; } QMenu { background: #1d1d1d; } "
-                           "QMenu::item:selected { background: #333; }")
+        self.setStyleSheet("QWidget { background: #000; color: #eee; } "
+                           "QMenu { background: #1d1d1d; border: 1px solid #3a3a3a; border-radius: 8px; padding: 4px; } "
+                           "QMenu::item { padding: 5px 18px; border-radius: 6px; } "
+                           f"QMenu::item:selected {{ background: {_accent()}; }}")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -84,7 +125,7 @@ class VideoPlayer(QWidget):
         bar.setSpacing(8)
 
         def button(text: str, fn: Callable[[], Any], tip: str = "") -> QPushButton:
-            b = QPushButton(text)
+            b = PlayerButton(text)
             b.clicked.connect(fn)
             b.setToolTip(tip)
             b.setFocusPolicy(Qt.NoFocus)
@@ -97,7 +138,7 @@ class VideoPlayer(QWidget):
         self.speed_btn = button("1×", self._speed_menu, "Speed (Shift+, / Shift+.)")
         self.quality_btn = button("Auto", self._quality_menu, "Quality")
         self.chapters_btn = button("Chapters", self._chapters_menu, "PgUp / PgDn")
-        self.vol = QSlider(Qt.Horizontal)
+        self.vol = CustomSlider(Qt.Horizontal, colors=("#3a3a3a", _accent()))
         self.vol.setRange(0, 100)
         self.vol.setValue(80)
         self.vol.setFixedWidth(100)

@@ -718,3 +718,44 @@ def test_fewer_pointless_questions(engine):
                                     "look up the Silksong release date")
     assert not engine._worth_asking("", "anything")
     assert engine._worth_asking("How long should the timer be?", "set a timer")
+
+
+def test_one_request_at_a_time_per_agent(engine, monkeypatch):
+    """A new request replaces what the agent was doing; the same request heard twice runs once; a
+    scheduled one waits its turn."""
+    import threading
+    import time as _t
+    from jeeves.functions.base import Cancelled
+    started, stopped = [], []
+    gate = threading.Event()
+
+    def slow(ctx, prompt):
+        started.append(prompt)
+        try:
+            while not gate.is_set():
+                ctx.check_cancelled()
+                _t.sleep(0.02)
+        except Cancelled:
+            stopped.append(prompt)
+            raise
+        return "done"
+    monkeypatch.setattr(engine.registry.functions["local_response"], "impl", slow)
+    engine.settings.set("agents.jeeves.functions", {"research": False})
+    first = engine.handle_text("Jeeves, tell me a long story", source="text")
+    while not started:
+        _t.sleep(0.01)
+    dup = engine.handle_text("Jeeves, tell me a long story", source="text")
+    assert dup.get("duplicate") and dup["id"] == first["id"]
+    second = engine.handle_text("Jeeves, tell me a joke", source="text")
+    deadline = _t.time() + 5
+    while _t.time() < deadline and not stopped:
+        _t.sleep(0.02)
+    assert stopped == ["tell me a long story"]
+    third = engine.handle_text("Jeeves, what's the weather", source="schedule")
+    _t.sleep(0.3)
+    assert "what's the weather" not in started                  # waits for the joke to finish
+    gate.set()
+    deadline = _t.time() + 5
+    while _t.time() < deadline and "what's the weather" not in started:
+        _t.sleep(0.02)
+    assert "what's the weather" in started and second["id"] != third["id"]

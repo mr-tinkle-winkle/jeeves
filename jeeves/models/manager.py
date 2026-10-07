@@ -209,10 +209,14 @@ class ModelManager:
         entry = self._check(kind, self.model_id(kind, agent))
         threads = self._threads()
         ngl = self._gpu_layers_for(entry)
-        reasoning = self.settings.get("models.reasoning", "off")
+        reasoning = self._server_reasoning()
         inst = self._instance(entry, lambda: make_llm(entry, threads, ngl, reasoning))
         if hasattr(inst, "gpu_layers"):
             inst.threads, inst.gpu_layers = threads, ngl
+        if hasattr(inst, "reasoning") and inst.reasoning != reasoning:
+            inst.reasoning = reasoning               # the Jeenius scale changed: restart with thinking allowed
+            if inst.loaded():
+                inst.unload()
         return self._loaded(inst, kind)
 
     def tts(self, agent: dict[str, Any] | None = None) -> tuple[TTS, catalog.ModelEntry | None]:
@@ -252,12 +256,23 @@ class ModelManager:
             return self.wake
 
     # ---- conveniences used by functions ------------------------------------
+    def _server_reasoning(self) -> str:
+        """Thinking allowed by the model server (each request then says whether to think): off only
+        when every agent is at Jeenius 1."""
+        from . import jeenius
+        levels = [jeenius.level(a, self.settings) for a in (self.settings.get("agents", {}) or {}).values()
+                  if isinstance(a, dict) and a.get("enabled", True)] or [jeenius.level(None, self.settings)]
+        return "off" if max(levels) <= 1 else "auto"
+
     def respond(self, agent: dict[str, Any], prompt: str, system: str = "", ctx: Any = None,
                 with_memory: bool = False, raw: bool = False, temperature: float | None = None,
-                max_tokens: int | None = None) -> str | None:
+                max_tokens: int | None = None, kind: str | None = None) -> str | None:
         """The local response model's reply. raw: a step of some task (no character, no memory, not
         spoken). temperature: lower for answers that must stick to given material (research, the
-        screen), default for conversation. max_tokens: for short structured steps."""
+        screen), default for conversation. max_tokens: for short structured steps. kind: "chat",
+        "answer" or "step" -- with the agent's Jeenius level, whether the model thinks first."""
+        from . import jeenius
+        think = jeenius.think_for(jeenius.level(agent, self.settings), kind or ("step" if raw else "chat"), prompt)
         watcher = self._watcher_for(ctx, raw)
         llm = self.vision_llm(agent) if watcher is not None and watcher.latest_jpeg else None
         try:
@@ -282,7 +297,7 @@ class ModelManager:
         cancelled = ctx.is_cancelled if ctx is not None else None
         max_tokens = max_tokens or int(self.settings.get("models.local_response.max_tokens", 512))
         try:
-            reply = llm.chat(messages, max_tokens=max_tokens, on_token=on_token, cancelled=cancelled,
+            reply = llm.chat(messages, max_tokens=max_tokens, on_token=on_token, cancelled=cancelled, think=think,
                              **({} if temperature is None else {"temperature": temperature})).strip()
             if not raw and reply and persona.has_persona(agent) and agent.get("persona_check"):
                 reply = self._keep_in_character(llm, agent, reply, ctx, max_tokens)
@@ -337,7 +352,9 @@ class ModelManager:
                     messages.append({"role": "assistant", "content": str(r["result"])})
         if not raw:
             sys_parts.append("Your reply is read aloud: plain spoken sentences, no markdown, lists or code unless "
-                             "asked. Keep it short unless asked for detail -- but short still sounds like you.")
+                             "asked. Keep it short unless asked for detail -- but short still sounds like you. "
+                             "Asked to estimate, guess or give the odds, give a concrete best estimate with a "
+                             "sentence of reasoning; don't refuse because it can't be known exactly.")
         if sys_parts:
             messages.insert(0, {"role": "system", "content": "\n\n".join(sys_parts)})
         messages.append({"role": "user", "content": f"{prompt}\n\n{persona.reminder(agent)}" if in_character

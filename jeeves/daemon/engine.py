@@ -1365,6 +1365,11 @@ class Engine:
         if not dry_run and source.startswith("text") and any(w.ctx.agent_id == agent_id for w in self.waiters.values()):
             self._deliver_answer(agent_id, text)
             return {"answered": True}
+        if not dry_run:
+            same = self._same_request(agent_id, text)
+            if same is not None:                 # heard twice (the wake model and the backup check): once is enough
+                log.info("'%s' for %s is already being handled", text, agent_id)
+                return {"id": same, "agent": agent_id, "entry": None, "duplicate": True}
         entry = new_entry(text, agent_id, source)
         if request_id:
             entry["id"] = request_id
@@ -1372,6 +1377,16 @@ class Engine:
         self.history.add(entry)
         ctx = FunctionContext(self, agent_id, agent, entry, dry_run=dry_run)
         if not dry_run:
+            # one request at a time per agent: two of them talking over each other, asking two questions
+            # at once and fighting over the mouse was the trouble. Something you asked for now replaces
+            # what it was doing; a timer, trigger or handoff waits for it to finish (_run).
+            if self._user_source(source):
+                for rid in self._agent_requests(agent_id):
+                    log.info("new request for %s: stopping the one it was doing", agent_id)
+                    try:
+                        self.close_request(rid)
+                    except KeyError:
+                        pass
             with self._lock:
                 self.active[entry["id"]] = ctx
         if wait or dry_run:
@@ -1379,6 +1394,32 @@ class Engine:
         else:
             self.run_async(self._run, ctx, skip_functions or set())
         return {"id": entry["id"], "agent": agent_id, "entry": entry if (wait or dry_run) else None}
+
+    @staticmethod
+    def _user_source(source: str) -> bool:
+        return source.split(":", 1)[0] in ("text", "voice", "manual", "review", "extended", "dry_run", "cli", "queued")
+
+    def _agent_requests(self, agent_id: str, exclude: str | None = None) -> list[str]:
+        """The agent's requests in progress (not background ones like screen watching)."""
+        with self._lock:
+            return [rid for rid, c in self.active.items() if c.agent_id == agent_id and rid != exclude
+                    and not c.dry_run and not c.background]
+
+    def _same_request(self, agent_id: str, text: str) -> str | None:
+        t, now = normalize(text), time.time()
+        with self._lock:
+            for rid, c in self.active.items():
+                if c.agent_id == agent_id and not c.dry_run and normalize(c.entry.get("text", "")) == t and \
+                        now - c.entry.get("time", 0) < 6:
+                    return rid
+        return None
+
+    def _wait_turn(self, ctx: FunctionContext, limit: float = 120.0) -> None:
+        """A timer, trigger or handoff for a busy agent: wait until it has finished what it's doing."""
+        deadline = time.time() + limit
+        while self._agent_requests(ctx.agent_id, exclude=ctx.entry["id"]) and time.time() < deadline:
+            ctx.check_cancelled()
+            time.sleep(0.2)
 
     def _decide(self, ctx: FunctionContext, text: str, skip: set[str]) -> Decision:
         agent = dict(ctx.agent)
@@ -1390,6 +1431,8 @@ class Engine:
         entry = ctx.entry
         text = entry["text"]
         try:
+            if not ctx.dry_run and not self._user_source(entry.get("source", "text")):
+                self._wait_turn(ctx)
             ctx.state("thinking")
             try:
                 decision = self._decide(ctx, text, skip)
@@ -1487,7 +1530,7 @@ class Engine:
                 self.publish("history", {"entry": entry})
 
     def _dry_run_body(self, ctx: FunctionContext, decision: Decision) -> None:
-        f = self.registry.get(decision.function)
+        f = self.registry.get(decision.function, ctx.agent)
         ctx.trace("would_call", function=decision.function, args=decision.args)
         if f is None:
             return

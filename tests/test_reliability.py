@@ -759,3 +759,43 @@ def test_research_browses_the_wiki_to_the_page_the_move_is_on(engine, monkeypatc
     sources = ctx.entry["sources"]
     assert [s["title"] for s in sources] == ["Movement"]
     assert "Wumpy | Wallrun" in sources[0]["text"] and len(sources[0]["text"]) < 400    # just that part
+
+
+def test_research_learns_about_the_named_thing_not_a_category(engine, monkeypatch):
+    """"chances an average player beats a white knuckle campaign": learn what White Knuckle is, not "a game"."""
+    from jeeves.functions import research
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    q = "What are the chances an average player beats a white knuckle campaign on their first try?"
+    monkeypatch.setattr(engine.models, "respond", lambda agent, prompt, **kw:
+                        "GOAL: How likely is a first-try win?\nCONTEXT: a game\nTERMS: NONE")
+    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry(q, "jeeves", "text"))
+    assert research.understand(ctx, q)["context"] == ["White Knuckle"]
+    assert research.subject_guess("how do i do a wumpy in parkour reborn") == ["Parkour Reborn"]
+    assert research.wants_estimate(q) and not research.wants_estimate("how do I do a wumpy")
+    from jeeves.functions.builtins import _answer_shape
+    assert "best estimate" in _answer_shape(q)
+
+
+def test_screen_reading_finds_the_app_the_question_is_about(monkeypatch):
+    from types import SimpleNamespace as W
+    from jeeves.functions import builtins as b
+    game = W(id="1", app="steam_app_1", title="Elden Ring", x=0, y=0, w=1920, h=1080, workspace="1", focused=True)
+    disc = W(id="2", app="vesktop", title="#general | Friends - Discord", x=1920, y=0, w=1280, h=1000,
+             workspace="2", focused=False)
+    fox = W(id="3", app="firefox", title="Parkour Reborn Wiki - Movement", x=0, y=0, w=1000, h=900,
+            workspace="1", focused=False)
+    wins = [game, disc, fox]
+    assert b._target_window("who am I in a call with", wins, game) is disc
+    assert b._target_window("what's in the parkour reborn tab", wins, game) is fox
+    assert b._target_window("what does discord say", wins, game) is disc
+    assert b._target_window("what's this error", wins, game) is None
+    acted = []
+    dk = W(windows=lambda: wins, visible=lambda w: w.workspace == "1",
+                             activate=lambda w: acted.append(w.id) or True)
+    ctx = W(think=lambda *a, **k: None)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    target, back = b._bring_up_app(ctx, dk, "who is in my discord call")
+    assert target is disc and back is game and acted == ["2"]       # brought forward, then you go back
+    target, back = b._bring_up_app(ctx, dk, "what's in the parkour reborn tab")
+    assert target is fox and back is None                           # already on screen: left alone

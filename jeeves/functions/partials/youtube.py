@@ -147,40 +147,66 @@ def _try(*args: str, timeout: float = 30) -> Any:
         return None
 
 
+def _followers(d: dict[str, Any]) -> int:
+    for k in ("channel_follower_count", "subscriber_count"):
+        try:
+            if d.get(k) is not None:
+                return int(d[k])
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
 def find_channel(name: str) -> tuple[str, str]:
-    """(channel id or URL, channel name) for a spoken channel name ("moist critikal" -> Moist Critikal),
-    the exact channel -- not just whoever shows up first in a search:
-      1. its @handle (most channels' handle is their name without spaces),
-      2. YouTube's channel search (only channels),
-      3. the channels of matching videos."""
-    best: tuple[float, str, str] = (0.0, "", "")
+    """(channel id, channel name) for a spoken channel name -- the channel people mean, which isn't
+    always the one whose name matches best: "moist critikal" is penguinz0 (millions of subscribers,
+    uploads every day), not a small or abandoned channel that happens to be called "Moist Critikal"
+    (that one gave a year-old video as "the newest"). Every candidate -- the @handle, YouTube's
+    channel search, the channels of matching videos -- is scored on how well its name matches, how
+    many of the matching videos are its own, its subscribers and YouTube's own ranking."""
+    cands: dict[str, dict[str, Any]] = {}
+
+    def add(cid: str, ch: str, followers: int = 0, rank: int | None = None) -> dict[str, Any]:
+        c = cands.setdefault(cid, {"name": ch, "followers": 0, "rank": None, "videos": 0})
+        c["name"] = c["name"] or ch
+        c["followers"] = max(c["followers"], followers)
+        if rank is not None and (c["rank"] is None or rank < c["rank"]):
+            c["rank"] = rank
+        return c
+
     handle = _squash(name)
     if handle:
         data = _try("--flat-playlist", "--playlist-end", "1", f"https://www.youtube.com/@{handle}/videos")
-        if data:
-            ch = data.get("channel") or data.get("uploader") or data.get("title", "").removesuffix(" - Videos")
-            cid = data.get("channel_id") or ""
-            if cid and _name_score(name, ch) >= 0.6:
-                return cid, ch
+        if data and data.get("channel_id"):
+            add(data["channel_id"], data.get("channel") or data.get("uploader") or
+                data.get("title", "").removesuffix(" - Videos"), _followers(data))
     data = _try("--flat-playlist", "--playlist-end", "8",
                 "https://www.youtube.com/results?search_query=" + urllib.parse.quote(name) + "&sp=EgIQAg%3D%3D")
-    for e in (data or {}).get("entries") or []:
-        ch = e.get("channel") or e.get("title") or e.get("uploader") or ""
+    for i, e in enumerate((data or {}).get("entries") or []):
         cid = e.get("channel_id") or (e.get("id") if str(e.get("id", "")).startswith("UC") else "")
-        score = _name_score(name, ch)
-        if cid and score > best[0]:
-            best = (score, cid, ch)
-    if best[0] >= 0.85:
-        return best[1], best[2]
-    for v in search(name, 10):
-        if not v.get("channel_id"):
-            continue
-        score = _name_score(name, v.get("channel", ""))
-        if score > best[0]:
-            best = (score, v["channel_id"], v.get("channel", ""))
-    if best[0] < 0.6:
+        if cid:
+            add(cid, e.get("channel") or e.get("title") or e.get("uploader") or "", _followers(e), i)
+    vids = [v for v in (_try_search(name) or []) if v.get("channel_id")]
+    for v in vids:
+        add(v["channel_id"], v.get("channel", ""))["videos"] += 1
+    if not cands:
         raise FunctionError(f"I couldn't find a YouTube channel called {name}")
-    return best[1], best[2]
+    most = max(c["followers"] for c in cands.values()) or 1
+
+    def score(c: dict[str, Any]) -> float:
+        return (_name_score(name, c["name"]) + 0.5 * min(1.0, c["videos"] / 3) +
+                0.4 * c["followers"] / most + (0.3 if c["rank"] == 0 else 0.1 if c["rank"] is not None else 0))
+    cid, best = max(cands.items(), key=lambda kv: score(kv[1]))
+    if score(best) < 0.6:
+        raise FunctionError(f"I couldn't find a YouTube channel called {name}")
+    return cid, best["name"]
+
+
+def _try_search(query: str) -> list[dict[str, Any]] | None:
+    try:
+        return search(query, 10)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 STOPWORDS = set("the a an and or of to in on for with that this which who is are was video videos vid one "

@@ -6,9 +6,9 @@ import json
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QPlainTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
-from .ui_kit import (CollapseToggleButton, CustomButton, CustomCheckBox, CustomGroupBox, CustomLineEdit,
+from .ui_kit import (CustomPlainTextEdit, pick_path, CollapseToggleButton, CustomButton, CustomCheckBox, CustomGroupBox, CustomLineEdit,
                      show_message)
 from .widgets import discard, Page, combo, label, row
 
@@ -67,7 +67,7 @@ class FunctionRow(QWidget):
         if f["blocked"]:
             d.addWidget(label("Built-in blocked: " + "; ".join(f["blocked"])))
         if f.get("steps") is not None:
-            steps = QPlainTextEdit(json.dumps(f["steps"], indent=2))
+            steps = CustomPlainTextEdit(json.dumps(f["steps"], indent=2))
             steps.setReadOnly(True)
             steps.setMinimumHeight(120)
             d.addWidget(steps)
@@ -133,10 +133,10 @@ class FunctionsPage(Page):
         self.ed_desc.setPlaceholderText("What it does -- the intent model reads this")
         self.ed_kw = CustomLineEdit()
         self.ed_kw.setPlaceholderText("keywords, comma separated")
-        self.ed_args = QPlainTextEdit()
+        self.ed_args = CustomPlainTextEdit()
         self.ed_args.setPlaceholderText('[{"name": "app", "type": "app", "description": "Which app"}]')
         self.ed_args.setMaximumHeight(90)
-        self.ed_steps = QPlainTextEdit()
+        self.ed_steps = CustomPlainTextEdit()
         self.ed_steps.setMinimumHeight(220)
         e.addWidget(row(label("Name", False), self.ed_name, stretch_last=True))
         e.addWidget(row(label("Description", False), self.ed_desc, stretch_last=True))
@@ -256,7 +256,7 @@ class FunctionsPage(Page):
         self.daemon.call("functions.delete", lambda _r: self.refresh({}, set()), None, name=name)
 
     def import_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Import functions", "", "Jeeves functions (*.json)")
+        path = pick_path(self, "Import functions", mode="open", suffix=".json")
         if not path:
             return
         try:
@@ -273,8 +273,8 @@ class FunctionsPage(Page):
             if not manifest.get("functions"):
                 show_message(self, "Export", "You haven't made any custom functions yet.")
                 return
-            path, _ = QFileDialog.getSaveFileName(self, "Export functions", "my-jeeves-functions.json",
-                                                  "Jeeves functions (*.json)")
+            path = pick_path(self, "Export functions", mode="save", suffix=".json",
+                             default_name="my-jeeves-functions.json")
             if path:
                 with open(path, "w") as fh:
                     json.dump(manifest, fh, indent=2)

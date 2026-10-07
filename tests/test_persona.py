@@ -5,7 +5,7 @@ class FakeLLM:
     def __init__(self, replies):
         self.replies, self.calls = list(replies), []
 
-    def chat(self, messages, max_tokens=512, temperature=0.6, json_mode=False, on_token=None, cancelled=None):
+    def chat(self, messages, max_tokens=512, temperature=0.6, json_mode=False, on_token=None, cancelled=None, **kw):
         self.calls.append(messages)
         return self.replies.pop(0) if self.replies else "4: fine"
 
@@ -65,3 +65,24 @@ def test_personality_test_grades_answers(engine, monkeypatch):
     monkeypatch.setattr(engine.models, "llm", lambda kind, agent=None: llm)
     res = engine.models.test_persona(_agent(engine))
     assert res["average"] == 5 and len(res["results"]) == 4 and res["verdict"] == "stays in character"
+
+
+def test_jeenius_scale():
+    from jeeves.models import jeenius
+    from jeeves.config import Settings
+    s = Settings()
+    assert jeenius.level({}, s) == 2 and jeenius.level({"jeenius": 4}, s) == 4
+    t = jeenius.think_for
+    assert t(1, "answer", "explain why the sky is blue") is False
+    assert t(2, "chat", "hi there") is False and t(2, "chat", "explain why the sky is blue") is True
+    assert t(2, "answer", "who won") is True and t(2, "step", "explain why") is False
+    assert t(3, "chat", "thanks") is False and t(3, "chat", "what's a good name for my cat") is True
+    assert t(4, "chat", "hi") == "high" and t(4, "step", "x") is True
+
+
+def test_thinking_is_asked_for_per_request():
+    from jeeves.models.backends import LlamaCppLLM
+    from types import SimpleNamespace
+    llm = LlamaCppLLM(SimpleNamespace(id="m", files=[]), reasoning="auto")
+    assert llm.extra_body(False)["chat_template_kwargs"] == {"reasoning_effort": "low", "enable_thinking": False}
+    assert llm.extra_body("high")["chat_template_kwargs"]["reasoning_effort"] == "high"

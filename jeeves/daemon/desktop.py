@@ -289,3 +289,119 @@ def desktop_box() -> tuple[int, int, int, int]:
     x0, y0 = min(o.x for o in outs), min(o.y for o in outs)
     x1, y1 = max(o.x + o.w for o in outs), max(o.y + o.h for o in outs)
     return x0, y0, x1 - x0, y1 - y0
+
+
+# ---------------------------------------------------------------------------
+# acting on windows (screen reading brings the app it's asked about forward; setups put every app back)
+# ---------------------------------------------------------------------------
+
+def current_workspace() -> str:
+    try:
+        if desktop() == "hyprland":
+            return str((_hypr("activeworkspace") or {}).get("name", ""))
+        return _kdo("get_desktop")
+    except DesktopUnavailable:
+        return ""
+
+
+def visible(w: Window, workspace: str | None = None) -> bool:
+    """On the workspace you're looking at (or on all of them), not minimized."""
+    if w.w <= 0 or w.h <= 0:
+        return False
+    if desktop() != "hyprland":
+        info = window_info(w)
+        if info.get("minimized"):
+            return False
+    ws = current_workspace() if workspace is None else workspace
+    return not ws or not w.workspace or w.workspace in (ws, "-1", "0")
+
+
+def activate(w: Window) -> bool:
+    try:
+        if desktop() == "hyprland":
+            return run(["hyprctl", "dispatch", "focuswindow", f"address:{w.id}"], timeout=3).returncode == 0
+        _kdo("windowactivate", w.id)
+        return True
+    except DesktopUnavailable:
+        return False
+
+
+def _gvariant(text: str) -> dict[str, Any]:
+    """gdbus' printout of an a{sv} -> dict (strings, numbers, booleans, string lists)."""
+    out: dict[str, Any] = {}
+    for m in re.finditer(r"'([\w.-]+)':\s*<(.*?)>(?=,\s*'[\w.-]+':|\s*}\s*,?\)?\s*$)", text.strip(), re.S):
+        k, v = m.group(1), m.group(2).strip()
+        for pre in ("uint32 ", "int32 ", "int64 ", "uint64 ", "double ", "@as "):
+            v = v.removeprefix(pre)
+        if v in ("true", "false"):
+            out[k] = v == "true"
+        elif re.fullmatch(r"-?\d+", v):
+            out[k] = int(v)
+        elif re.fullmatch(r"-?\d+\.\d*(e-?\d+)?", v):
+            out[k] = float(v)
+        elif v.startswith("["):
+            out[k] = re.findall(r"'((?:[^'\\]|\\.)*)'", v)
+        else:
+            out[k] = v.strip("'\"")
+    return out
+
+
+def window_info(w: Window) -> dict[str, Any]:
+    """Everything the compositor knows about a window: KWin's getWindowInfo (minimized, keepAbove,
+    fullscreen, maximized, noBorder, desktops, output...) or Hyprland's client record."""
+    if desktop() == "hyprland":
+        for c in _hypr("clients") or []:
+            if c.get("address") == w.id:
+                return {"floating": c.get("floating"), "fullscreen": bool(c.get("fullscreen")),
+                        "pinned": c.get("pinned"), "monitor": c.get("monitor"), "minimized": False}
+        return {}
+    if not which("gdbus"):
+        return {}
+    try:
+        out = run(["gdbus", "call", "--session", "--dest", "org.kde.KWin", "--object-path", "/KWin",
+                   "--method", "org.kde.KWin.getWindowInfo", w.id], timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    return _gvariant(out.stdout) if out.returncode == 0 else {}
+
+
+def place(w: Window, x: int, y: int, width: int, height: int, workspace: str = "",
+          state: dict[str, Any] | None = None) -> None:
+    """Put a window somewhere: workspace, position, size, and (KDE) its states."""
+    state = state or {}
+    if desktop() == "hyprland":
+        addr = f"address:{w.id}"
+        if workspace:
+            run(["hyprctl", "dispatch", "movetoworkspacesilent", f"{workspace},{addr}"], timeout=3)
+        if state.get("floating") is not None:
+            cur = window_info(w).get("floating")
+            if bool(cur) != bool(state["floating"]):
+                run(["hyprctl", "dispatch", "togglefloating", addr], timeout=3)
+        run(["hyprctl", "dispatch", "movewindowpixel", f"exact {x} {y},{addr}"], timeout=3)
+        run(["hyprctl", "dispatch", "resizewindowpixel", f"exact {width} {height},{addr}"], timeout=3)
+        if state.get("pinned") and not window_info(w).get("pinned"):
+            run(["hyprctl", "dispatch", "pin", addr], timeout=3)
+        return
+    if workspace:
+        try:
+            _kdo("set_desktop_for_window", w.id, workspace)
+        except DesktopUnavailable:
+            pass
+    for prop, key in (("fullscreen", "fullscreen"), ("above", "keepAbove"), ("below", "keepBelow"),
+                      ("no_border", "noBorder"), ("skip_taskbar", "skipTaskbar")):
+        if key in state:
+            try:
+                _kdo("windowstate", "--add" if state[key] else "--remove", prop, w.id)
+            except DesktopUnavailable:
+                pass
+    if not state.get("fullscreen"):
+        try:
+            _kdo("windowsize", w.id, str(width), str(height))
+            _kdo("windowmove", w.id, str(x), str(y))
+        except DesktopUnavailable:
+            pass
+    if state.get("minimized"):
+        try:
+            _kdo("windowminimize", w.id)
+        except DesktopUnavailable:
+            pass

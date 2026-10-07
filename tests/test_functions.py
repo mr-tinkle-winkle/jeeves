@@ -112,11 +112,12 @@ def test_builtins_registered_with_spec_defaults():
     r = Registry(Settings())
     fulls = {f.name: f for f in r.all("full")}
     assert set(fulls) == {"summary", "extended_prompt_mode", "online_prompt", "control_mode", "local_response",
-                          "macros", "timers", "handoff", "research", "screen_reading", "watch_screen", "youtube"}
+                          "macros", "timers", "handoff", "research", "screen_reading", "watch_screen", "youtube",
+                          "steam_game", "setups"}
     on = {n for n, f in fulls.items() if f.default_enabled}
     # SPEC defaults + research and screen reading (both read-only)
     assert on == {"extended_prompt_mode", "local_response", "timers", "handoff", "research", "screen_reading",
-                  "watch_screen", "youtube"}
+                  "watch_screen", "youtube", "steam_game", "setups"}
     partials = {f.name for f in r.all("partial")}
     for needed in ("run_command", "find_on_screen", "read_screen_text", "get_mouse_position", "get_held_keys",
                    "get_focused_app", "get_open_apps", "get_app_position", "get_app_workspace", "get_app_size",

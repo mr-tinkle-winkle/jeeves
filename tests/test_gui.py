@@ -85,3 +85,21 @@ def test_the_logo_ships_in_every_size(qapp):
         assert img.width() == s and img.height() == s and img.hasAlphaChannel()
     assert icon_path(20).name == "jeeves-22.png" and icon_path(1000).name == "jeeves-512.png"
     assert not app_icon().isNull() and len(app_icon().availableSizes()) == len(ICON_SIZES)
+
+
+def test_command_editor_round_trip(qapp):
+    from jeeves.gui.common import install_theme
+    install_theme()
+    from jeeves.gui.command_editor import CommandList
+    lst = CommandList()
+    spec = {"name": "rebuild", "description": "Rebuilds NixOS", "command": "nixos-rebuild switch --flake ~/nix#{host}",
+            "args": [{"name": "host", "description": "which machine", "choices": ["desk", "laptop"],
+                      "required": False}], "confirm": True, "terminal": True, "timeout": 900}
+    lst.load([spec])
+    assert lst.value() == [spec]
+    card = lst._cards[0]
+    card.command.setText("nix-push {message} {branch}")
+    got = lst.value()[0]
+    assert [a["name"] for a in got["args"]] == ["message", "branch"]
+    card.command.setText("nixos-rebuild switch --flake ~/nix#{host}")
+    assert lst.value()[0]["args"][0]["description"] == "which machine"     # remembered while typing

@@ -10,10 +10,10 @@ from typing import Any, Callable
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import (QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
+from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from .ui_kit import (CustomButton, CustomCheckBox, CustomDoubleSpinBox, CustomGroupBox, CustomLineEdit,
+from .ui_kit import (CustomPlainTextEdit, pick_color, CustomButton, CustomCheckBox, CustomDoubleSpinBox, CustomGroupBox, CustomLineEdit,
                      CustomSpinBox, SmoothScrollArea, Theme, combo_box_stylesheet, get_settings,
                      paint_page_outline)
 
@@ -241,8 +241,9 @@ class Binder:
         state = {"value": "#000000"}
 
         def pick() -> None:
-            got = QColorDialog.getColor(QColor(state["value"]), None, text)
-            if got.isValid():
+            picked = pick_color(b.window(), text, state["value"])
+            if picked:
+                got = QColor(picked)
                 state["value"] = got.name()
                 b.set_fill_color(got)
                 b.setText(got.name())
@@ -256,8 +257,8 @@ class Binder:
         self.form_row(layout, text, b, path, setter)
         return b
 
-    def code(self, layout: QVBoxLayout, text: str, path: str, hint: str = "") -> QPlainTextEdit:
-        e = QPlainTextEdit()
+    def code(self, layout: QVBoxLayout, text: str, path: str, hint: str = "") -> CustomPlainTextEdit:
+        e = CustomPlainTextEdit()
         e.setMinimumHeight(80)
         e.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         timer = QTimer(e)

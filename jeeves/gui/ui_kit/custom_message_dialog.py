@@ -46,7 +46,9 @@ class CustomMessageDialog(QDialog):
         button_row.addWidget(ok_btn)
         layout.addLayout(button_row)
 
-        self.setMinimumWidth(320)
+        # sized to the text at a readable width: a wrapped label used to get cut off
+        from .custom_dialogs import fit_to_width
+        fit_to_width(self, max(340, min(560, 220 + len(text) * 2)))
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)

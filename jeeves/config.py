@@ -49,6 +49,10 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         # said when it starts listening and you're waiting ("Yes?"); several separated by | (one is picked
         # at random); "" = say nothing
         "wake_reply": "",
+        # its own commands (Agents > Commands): [{name, description, command with {placeholders}, args:
+        # [{name, description, required, choices}], confirm, terminal, timeout}]
+        "commands": [],
+        "jeenius": None,              # 1-4 (see models.jeenius); None -> the global setting
         # Jump in whenever the AI wants to: 1 = a full part of the conversation, 0 = never
         "jump_in": {"enabled": False, "frequency": 0.3},
         "output_to": "speakers",      # speakers | microphone | both | device | device_mic
@@ -124,7 +128,10 @@ DEFAULTS: dict[str, Any] = {
         "vision": {"model": None, "unload_when_open": []},   # a model that can see (screen watching)
         "gpu_layers": "auto",             # llama.cpp -ngl: "auto" (fit free VRAM), 0 = CPU only, 99 = all
         "favorites": [],                  # starred models (shown first on the Models page)
-        "reasoning": "off",               # thinking models: off (fast) | auto (think first, smarter)
+        "reasoning": "off",               # (old setting, replaced by jeenius)
+        # the Jeenius scale (thinking models): 1 instant, 2 thinks when needed, 3 instant when it can,
+        # 4 always thinks. Agents can have their own (agents.<id>.jeenius).
+        "jeenius": 2,
         "threads": 0,                     # 0 = auto
         # Minimum untouched: what the AIs must always leave for everything else. Limits what
         # gets loaded (and how) and what the Models page recommends.

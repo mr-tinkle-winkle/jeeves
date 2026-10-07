@@ -5,11 +5,13 @@ import copy
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QInputDialog, QPlainTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
-from .ui_kit import (CustomButton, CustomCheckBox, CustomDoubleSpinBox, CustomGroupBox, CustomLineEdit,
+from .ui_kit import (CustomPlainTextEdit, ask_text, CustomButton, CustomCheckBox, CustomDoubleSpinBox, CustomGroupBox, CustomLineEdit,
                      CustomSpinBox, show_message)
+from .command_editor import CommandList
 from .widgets import discard, Page, combo, is_locked, label, row
+from ..models.jeenius import LEVELS
 
 LISTEN = [("Just me (microphone)", "user"), ("Just desktop audio", "desktop"), ("Both", "both"),
           ("A specific device…", "device")]
@@ -69,7 +71,15 @@ class AgentsPage(Page):
                                    "name and the request in one go). Several, separated by |, are picked at "
                                    "random. Empty = says nothing.")
         g.addWidget(row(label("Wake-up reply", False), self.wake_reply, stretch_last=True))
-        self.prompt = QPlainTextEdit()
+        self.jeenius = combo()
+        self.jeenius.addItem("(global setting, Settings > Models)", 0)
+        for n, name in LEVELS.items():
+            self.jeenius.addItem(f"{n} - {name}", n)
+        self.jeenius.setToolTip("How much it thinks before answering. 1 never thinks (fastest); 2 thinks for "
+                                "research and hard questions; 3 thinks unless the request is simple; 4 always "
+                                "thinks.")
+        g.addWidget(row(label("Jeenius", False), self.jeenius, stretch_last=True))
+        self.prompt = CustomPlainTextEdit()
         self.prompt.setPlaceholderText("Default prompt: personality, tone, things to always keep in mind")
         self.prompt.setMinimumHeight(90)
         g.addWidget(label("Personality (default prompt)"))
@@ -83,7 +93,7 @@ class AgentsPage(Page):
         self.persona_btn = CustomButton("Test personality")
         self.persona_btn.clicked.connect(self.test_persona)
         g.addWidget(row(self.persona_btn))
-        self.persona_result = QPlainTextEdit()
+        self.persona_result = CustomPlainTextEdit()
         self.persona_result.setReadOnly(True)
         self.persona_result.setMaximumHeight(170)
         self.persona_result.setPlaceholderText("Asks the agent a few questions with the prompt above (saved or not) "
@@ -240,6 +250,12 @@ class AgentsPage(Page):
         self.func_layout.setContentsMargins(0, 0, 0, 0)
         g.addWidget(self.func_box)
         self.func_checks: dict[str, CustomCheckBox] = {}
+
+        g = self._group(f, "Commands")
+        g.addWidget(label("Programs this agent can run for you by name, e.g. “rebuild the laptop” runs your "
+                          "rebuild command with host = laptop. Each one shows up in its function list."))
+        self.commands = CommandList()
+        g.addWidget(self.commands)
 
         g = self._group(f, "Handoff")
         g.addWidget(label("Agents this one may pass information to (Handoff function)."))
@@ -415,6 +431,8 @@ class AgentsPage(Page):
         self.call_names.setText(", ".join(a.get("call_names", [])))
         self.threshold_global.setChecked(a.get("threshold") is None)
         self.threshold.setValue(a.get("threshold") or 0.6)
+        self.jeenius.setCurrentIndex(max(0, self.jeenius.findData(int(a.get("jeenius") or 0))))
+        self.commands.load(a.get("commands") or [])
         reply = a.get("wake_reply") or ""
         self.wake_reply.setText(" | ".join(reply) if isinstance(reply, list) else str(reply))
         self.prompt.setPlainText(a.get("prompt", ""))
@@ -538,6 +556,7 @@ class AgentsPage(Page):
             "models": {k: c.currentData() for k, c in self.model_boxes.items()},
             "voice_style": self._style(),
             "functions": {name: cb.isChecked() for name, cb in self.func_checks.items()},
+            "commands": self.commands.value(), "jeenius": self.jeenius.currentData() or None,
             "handoff_to": ["*"] if self.any_handoff.isChecked() else
             [k for k, cb in self.handoff_checks.items() if cb.isChecked()],
         })
@@ -550,7 +569,8 @@ class AgentsPage(Page):
                          id=self.current, agent=self._collect())
 
     def add_agent(self) -> None:
-        name, ok = QInputDialog.getText(self, "New agent", "Name (it's also the first call name):")
+        name, ok = ask_text(self, "New agent", "Its name (also the first name you call it by):",
+                            placeholder="Jarvis")
         if not ok or not name.strip():
             return
         aid = "".join(ch for ch in name.lower().strip().replace(" ", "_") if ch.isalnum() or ch in "_-") or "agent"

@@ -28,3 +28,6 @@ from .page_outline import paint_page_outline
 from .scaling import compute_scale
 from .scale_reveal import crossfade_to_index, reveal_from_point, animate_popup_from_point
 from .theme_editor import ThemeEditorGroup
+from .custom_text import CustomPlainTextEdit, CustomTextBrowser, CustomListWidget
+from .custom_dialogs import KitDialog, ask_text, pick_color, pick_path, fit_to_width
+from .custom_slider import CustomSlider

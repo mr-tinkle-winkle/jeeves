@@ -233,3 +233,20 @@ def test_youtube_signs_in_with_a_browser_login_when_asked(monkeypatch, tmp_path)
     yt.configure("auto")
     yt._working.clear()
     assert os.path.exists(fake)
+
+
+def test_the_channel_people_mean_beats_a_small_one_with_the_exact_name(monkeypatch):
+    """"the newest moist critikal video": penguinz0, not an old channel that's literally called Moist Critikal."""
+    from jeeves.functions.partials import youtube as yt
+    fake_youtube(monkeypatch,
+                 handles={"moistcritikal": {"channel": "Moist Critikal", "channel_id": "UCold",
+                                            "channel_follower_count": 9000, "entries": [{"id": "x"}]}},
+                 channel_results=[{"id": "UCpen", "channel_id": "UCpen", "channel": "penguinz0",
+                                   "channel_follower_count": 16000000},
+                                  {"id": "UCold", "channel_id": "UCold", "channel": "Moist Critikal",
+                                   "channel_follower_count": 9000}],
+                 video_results=[{"id": f"v{i}", "title": "Moist Meter", "channel": "penguinz0", "channel_id": "UCpen"}
+                                for i in range(6)],
+                 uploads={"UCpen": [{"id": "today", "title": "New video"}], "UCold": [{"id": "lastyear", "title": "x"}]})
+    assert yt.find_channel("moist critikal")[0] == "UCpen"
+    assert yt.pick(channel="moist critikal", newest=True)["id"] == "today"

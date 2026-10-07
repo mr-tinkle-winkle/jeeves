@@ -159,7 +159,9 @@ class IntentProcessor:
         for attempt in range(2):
             from ..models.backends import BackendError
             try:
-                raw = llm.chat(messages, max_tokens=400, temperature=0.1, json_mode=True,
+                from ..models import jeenius
+                think = jeenius.think_for(jeenius.level(agent, self.settings), "intent", text)
+                raw = llm.chat(messages, max_tokens=400, temperature=0.1, json_mode=True, think=think,
                                on_token=(lambda t: ctx.think(t, append=True)) if ctx else None,
                                cancelled=ctx.is_cancelled if ctx else None)
             except BackendError as exc:

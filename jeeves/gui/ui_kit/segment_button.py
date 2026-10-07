@@ -78,6 +78,10 @@ class SegmentButton(QAbstractButton):
 
     def sizeHint(self) -> QSize:
         pad = 16
+        if self._icon_pixmap is not None and self.text():
+            fm = self.fontMetrics()
+            return QSize(self._icon_target_size + fm.horizontalAdvance(self.text()) + 3 * pad,
+                         max(self._icon_target_size, fm.height()) + pad)
         if self._icon_pixmap is None and self.text():
             fm = self.fontMetrics()
             return QSize(fm.horizontalAdvance(self.text()) + 2 * pad, fm.height() + pad)
@@ -116,7 +120,17 @@ class SegmentButton(QAbstractButton):
         else:
             painter.fillRect(rect, bg)
 
-        if self._icon_pixmap is not None and not self._icon_pixmap.isNull():
+        if self._icon_pixmap is not None and not self._icon_pixmap.isNull() and self.text():
+            # icon and label side by side (the sidebar's Main / Settings)
+            scaled = scaled_cached(self._icon_pixmap, self._icon_target_size, self._icon_target_size)
+            fm = self.fontMetrics()
+            total = scaled.width() + 10 + fm.horizontalAdvance(self.text())
+            x = max(8, (self.width() - total) // 2)
+            painter.drawPixmap(x, (self.height() - scaled.height()) // 2, scaled)
+            painter.setPen(contrast_text(bg))
+            painter.drawText(QRectF(x + scaled.width() + 10, 0, self.width() - x - scaled.width() - 10,
+                                    self.height()), Qt.AlignVCenter | Qt.AlignLeft, self.text())
+        elif self._icon_pixmap is not None and not self._icon_pixmap.isNull():
             scaled = scaled_cached(self._icon_pixmap, self._icon_target_size, self._icon_target_size)
             painter.drawPixmap((self.width() - scaled.width()) // 2,
                                (self.height() - scaled.height()) // 2, scaled)

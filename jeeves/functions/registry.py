@@ -40,6 +40,7 @@ BUILTIN_PARTIAL_MODULES = [
     "jeeves.functions.partials.flow",
 ]
 BUILTIN_FULL_MODULE = "jeeves.functions.builtins"
+BUILTIN_FULL_MODULES = [BUILTIN_FULL_MODULE, "jeeves.functions.apps"]
 
 
 def _import_defs(module: str) -> list[FunctionDef]:
@@ -68,8 +69,9 @@ class Registry:
             for module in BUILTIN_PARTIAL_MODULES:
                 for d in _import_defs(module):
                     self._add(d)
-            for d in _import_defs(BUILTIN_FULL_MODULE):
-                self._add(d)
+            for module in BUILTIN_FULL_MODULES:
+                for d in _import_defs(module):
+                    self._add(d)
             self._load_user_partials()
             self._load_json_dir(paths.functions_dir(), "user")
             apps = paths.functions_dir() / "apps"
@@ -118,8 +120,16 @@ class Registry:
                 self.problems.append(f"{file.name}: {exc}")
 
     # ---- queries ---------------------------------------------------------
-    def get(self, name: str) -> FunctionDef | None:
-        return self.functions.get(name)
+    def get(self, name: str, agent: dict[str, Any] | None = None) -> FunctionDef | None:
+        f = self.functions.get(name)
+        if f is None and agent is not None:
+            f = next((c for c in self.agent_commands(agent) if c.name == name), None)
+        return f
+
+    def agent_commands(self, agent: dict[str, Any]) -> list[FunctionDef]:
+        """The agent's own commands (Agents > Commands), as functions."""
+        from .commands import command_defs
+        return command_defs(agent, set(self.functions))
 
     def all(self, kind: str | None = None) -> list[FunctionDef]:
         return [f for f in self.functions.values() if kind is None or f.kind == kind]
@@ -148,7 +158,7 @@ class Registry:
                 on = self.globally_enabled(f)
             if on:
                 out.append(f)
-        return out
+        return out + self.agent_commands(agent)
 
     # ---- export / save ---------------------------------------------------
     def save_user_function(self, data: dict[str, Any]) -> FunctionDef:

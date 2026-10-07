@@ -385,21 +385,22 @@ class LLM:
     REASONING_ALLOWANCE = 2048    # extra tokens a thinking model gets to think before it answers
     thinks = False                # seen reasoning from this model: give it the allowance from now on
 
-    def extra_body(self) -> dict[str, Any]:
+    def extra_body(self, think: bool | str | None = None) -> dict[str, Any]:
         """Server-specific request fields (llama-server's chat template switches)."""
         return {}
 
     def chat(self, messages: list[dict[str, str]], max_tokens: int = 512, temperature: float = 0.6,
              json_mode: bool = False, on_token: Callable[[str], None] | None = None,
-             cancelled: Callable[[], bool] | None = None) -> str:
+             cancelled: Callable[[], bool] | None = None, think: bool | str | None = None) -> str:
         """The answer. max_tokens is for the answer itself: llama-server counts a thinking model's
         reasoning against it too, so gpt-oss/Qwen3 could think through the whole budget and answer
         nothing (the empty answers). Thinking models get an allowance on top, and an answer that
         still comes back empty after thinking is asked for once more with plenty of room."""
         if not self.loaded():
             self.load()
-        budget = max_tokens + (self.REASONING_ALLOWANCE if self.thinks else 0)
-        content, thought = self._chat_once(messages, budget, temperature, json_mode, on_token, cancelled)
+        budget = max_tokens + (self.REASONING_ALLOWANCE * (2 if think == "high" else 1) if self.thinks or think
+                               else 0)
+        content, thought = self._chat_once(messages, budget, temperature, json_mode, on_token, cancelled, think)
         if thought:
             self.thinks = True
         if not content and thought and not (cancelled and cancelled()):
@@ -408,15 +409,15 @@ class LLM:
             if on_token is not None:
                 on_token("\n[ran out of room while thinking -- trying again]\n")
             content, _ = self._chat_once(messages, max_tokens + 3 * self.REASONING_ALLOWANCE, temperature,
-                                         json_mode, on_token, cancelled)
+                                         json_mode, on_token, cancelled, think)
         return content
 
     def _chat_once(self, messages: list[dict[str, Any]], max_tokens: int, temperature: float, json_mode: bool,
                    on_token: Callable[[str], None] | None,
-                   cancelled: Callable[[], bool] | None) -> tuple[str, str]:
+                   cancelled: Callable[[], bool] | None, think: bool | str | None = None) -> tuple[str, str]:
         """(answer, reasoning) for one request."""
         body: dict[str, Any] = {"model": self.model_name, "messages": messages, "max_tokens": max_tokens,
-                                "temperature": temperature, **self.extra_body()}
+                                "temperature": temperature, **self.extra_body(think)}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         if on_token is None:
@@ -521,12 +522,13 @@ class LlamaCppLLM(LLM):
     def loaded(self) -> bool:
         return self.server.alive()
 
-    def extra_body(self) -> dict[str, Any]:
-        # gpt-oss can't stop thinking (--reasoning off doesn't apply to it); "off" means think as
-        # little as it can. Qwen3 reads enable_thinking. Other templates ignore both.
-        off = self.reasoning not in ("on", "auto")
-        return {"chat_template_kwargs": {"reasoning_effort": "low" if off else "medium",
-                                         "enable_thinking": not off}}
+    def extra_body(self, think: bool | str | None = None) -> dict[str, Any]:
+        # per request (the Jeenius scale): Qwen3 and DeepSeek read enable_thinking, gpt-oss reasoning_effort
+        # (it can't stop thinking altogether: "no" means as little as it can). Other templates ignore both.
+        if think is None:
+            think = self.reasoning in ("on", "auto")
+        effort = "high" if think == "high" else "medium" if think else "low"
+        return {"chat_template_kwargs": {"reasoning_effort": effort, "enable_thinking": bool(think)}}
 
 
 class EndpointLLM(LLM):

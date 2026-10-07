@@ -115,12 +115,12 @@ def main(popups: bool = False) -> int:
 
     from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
     from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
-    from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QVBoxLayout,
-                                   QWidget)
+    from PySide6.QtGui import QFontMetrics
+    from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
     from .gui.common import Daemon, flags_overlay, install_theme, theme_palette
-    from .gui.ui_kit import (CustomButton, CustomCheckBox, CustomLineEdit, SmoothScrollArea, Theme,
-                             paint_page_outline)
+    from .gui.ui_kit import (CustomButton, CustomCheckBox, CustomLineEdit, CustomPlainTextEdit, CustomTextBrowser,
+                             SmoothScrollArea, Theme, fit_to_width, paint_page_outline)
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
@@ -264,15 +264,43 @@ def main(popups: bool = False) -> int:
                         "transcript": "#808080", "watching": "#20b070", "playing": "#ff4040"}
             return QColor(cols.get(stage) or defaults.get(stage, "#808080"))
 
+        def bubble_size(self, text: str) -> tuple[str, int]:
+            """(the text as it fits, its bubble height): measured the same way it's painted, so the window
+            is always tall enough -- a long answer used to run off the bottom of it."""
+            f = QFont()
+            f.setPointSize(11)
+            fm = QFontMetrics(f)
+            width = max(420, int(self.cfg("size", 56)) * 8) - 32
+            limit = int(target_screen().availableGeometry().height() * 0.5)
+            shown = text
+            rect = fm.boundingRect(0, 0, width, 10000, Qt.TextWordWrap, shown)
+            if rect.height() > limit:
+                words = text.split()
+                lo, hi = 0, len(words)
+                while lo < hi:                             # the most words that fit, then "…"
+                    mid = (lo + hi + 1) // 2
+                    cand = " ".join(words[:mid]) + " …"
+                    if fm.boundingRect(0, 0, width, 10000, Qt.TextWordWrap, cand).height() <= limit:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                shown = " ".join(words[:lo]) + " …"
+                rect = fm.boundingRect(0, 0, width, 10000, Qt.TextWordWrap, shown)
+            return shown, rect.height() + 14
+
         def relayout(self) -> None:
             size = int(self.cfg("size", 56))
             w = max(420, size * 8)
             rows = max(1, len(self.visible_states()))
-            h = size * rows + 140
-            if self.response:
-                h += 240                                   # room for the answer bubble
+            h = (size + 8) * rows + 12
+            if self.menu is not None:
+                h = max(h, 6 + 4 * 32 + 16)                 # the right-click menu fits too
+            if self.transcript and time.time() < self.transcript_until:
+                h += self.bubble_size(f"“{self.transcript}”")[1] + 6
+            if self.response and time.time() < self.response_until + 1:
+                h += self.bubble_size(self.response)[1] + 12
             if self.sources:
-                h += 30 * (len(self.sources.get("sources", [])) + 1) + 30
+                h += (QFontMetrics(QFont()).height() + 6) * (len(self.sources.get("sources", [])) + 1) + 30
             corner = self.cfg("corner", "top-right")
             pad = 16
             if use_layer:
@@ -361,8 +389,7 @@ def main(popups: bool = False) -> int:
                 self._label(p, rect, text, right)
                 y += size + 8
             if time.time() < self.transcript_until and self.transcript:
-                self._bubble(p, y, f"“{self.transcript}”", right, QColor(30, 30, 30, 220))
-                y += 40
+                y = self._bubble(p, y, f"“{self.transcript}”", right, QColor(30, 30, 30, 220)) + 6
             if time.time() < self.response_until and self.response:
                 y = self._bubble(p, y, self.response, right, QColor(0, 0, 0, 230)) + 6
                 if self.sources:
@@ -494,8 +521,9 @@ def main(popups: bool = False) -> int:
             f.setPointSize(11)
             p.setFont(f)
             w = self.width() - 12
-            rect = p.fontMetrics().boundingRect(0, 0, w - 20, 400, Qt.TextWordWrap, text)
-            box = QRectF(6, y, min(w, rect.width() + 20), min(400, rect.height() + 14))
+            text, bh = self.bubble_size(text)
+            rect = p.fontMetrics().boundingRect(0, 0, w - 20, 10000, Qt.TextWordWrap, text)
+            box = QRectF(6, y, min(w, rect.width() + 20), bh)
             if right:
                 box.moveRight(self.width() - 6)
             p.setPen(Qt.NoPen)
@@ -551,6 +579,7 @@ def main(popups: bool = False) -> int:
                     rect = next(r for r, k, i in self.hits if i == hit[1] and k == hit[0])
                     self.menu = {"rid": hit[1], "anchor": QRectF(rect)}
                     self.menu_until = time.time() + 10
+                    self.relayout()
                 else:
                     self.menu = None
                 self.update()
@@ -762,7 +791,7 @@ def main(popups: bool = False) -> int:
             self.looking = QLabel("")
             self.looking.setWordWrap(True)
             self.lay.addWidget(self.looking)
-            self.text = QPlainTextEdit()
+            self.text = CustomPlainTextEdit()
             self.text.setReadOnly(True)
             self.lay.addWidget(self.text, 1)
             self.resize(560, 420)
@@ -792,10 +821,9 @@ def main(popups: bool = False) -> int:
 
         def __init__(self, data: dict[str, Any]) -> None:
             super().__init__(f"{data.get('agent_name', 'Jeeves')} — sources")
-            from PySide6.QtWidgets import QTextBrowser
             self.data = data
             self.expanded: set[int] = set()
-            self.view = QTextBrowser()
+            self.view = CustomTextBrowser()
             self.view.setOpenLinks(False)
             self.view.anchorClicked.connect(self._clicked)
             self.lay.addWidget(self.view, 1)
@@ -839,7 +867,7 @@ def main(popups: bool = False) -> int:
             send = CustomButton("Send")
             send.clicked.connect(lambda: self._send(self.edit.text()))
             self.lay.addWidget(send, alignment=Qt.AlignRight)
-            self.resize(440, 160)
+            fit_to_width(self, 480)
 
         def _send(self, text: str) -> None:
             if text.strip():
@@ -856,7 +884,7 @@ def main(popups: bool = False) -> int:
             self.edit.setPlaceholderText("Jeeves, set a timer for 10 minutes")
             self.edit.returnPressed.connect(self._send)
             self.lay.addWidget(self.edit)
-            self.resize(560, 120)
+            fit_to_width(self, 560)
 
         def showEvent(self, e: Any) -> None:
             super().showEvent(e)
@@ -887,7 +915,7 @@ def main(popups: bool = False) -> int:
             nav.addWidget(self.next)
             self.lay.addLayout(nav)
             self.title = self.heading("")
-            self.body = QPlainTextEdit()
+            self.body = CustomPlainTextEdit()
             self.body.setReadOnly(True)
             self.lay.addWidget(self.body, 1)
             self.resize(720, 560)
@@ -986,11 +1014,15 @@ def main(popups: bool = False) -> int:
             super().__init__(None, flags_overlay() | Qt.WindowTransparentForInput)
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.text = text
+            f = QFont()
+            self.setFont(f)
+            h = QFontMetrics(f).boundingRect(0, 0, 520 - 28, 2000, Qt.AlignCenter | Qt.TextWordWrap, text).height()
+            h = max(60, h + 28)                      # as tall as its text: long notices were cut off
             if use_layer:
-                self.resize(520, 60)
+                self.resize(520, h)
             else:
                 scr = target_screen().availableGeometry()
-                self.setGeometry(scr.x() + (scr.width() - 520) // 2, scr.y() + 40, 520, 60)
+                self.setGeometry(scr.x() + (scr.width() - 520) // 2, scr.y() + 40, 520, h)
             QTimer.singleShot(6000, self.close)
             present(self, ["top"], (40, 0, 0, 0))
 

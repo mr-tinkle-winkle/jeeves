@@ -6,6 +6,7 @@ from typing import Any
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from .ui_kit import CustomButton, CustomCheckBox, CustomLineEdit, CustomSpinBox, show_message
+from ..models.jeenius import LEVELS
 from .widgets import Binder, Page, clear_layout, combo, get_path as _get, label
 
 KIND_TITLES = {
@@ -37,6 +38,14 @@ class ModelsPage(Page):
         self._settings: dict[str, Any] = {}
         self._locked: set[str] = set()
 
+        j = self.section("Jeenius")
+        self.b.choice(j, "How much agents think", "models.jeenius",
+                      [(f"{n} - {name}", n) for n, name in LEVELS.items()],
+                      hint="For thinking models (Qwen3, gpt-oss...). 1 answers instantly, never thinks. "
+                           "2 thinks for research, screen questions and hard questions. 3 thinks unless the "
+                           "request is simple (\"open Firefox\" stays instant). 4 thinks before every "
+                           "answer. Each agent can override it (Main > Agents). Thinking shows in the "
+                           "indicator's thoughts view; it's never spoken.")
         r = self.section("Recommended for your computer")
         self.hw_label = label("Checking your hardware…")
         r.addWidget(self.hw_label)
@@ -114,10 +123,6 @@ class ModelsPage(Page):
         p = self.section("Performance")
         self._gpu_layers_row(p)
         self.b.number(p, "CPU threads", "models.threads", 0, 128, 1, hint="0 = automatic")
-        self.b.choice(p, "Thinking models (Qwen3, gpt-oss)", "models.reasoning",
-                      [("Answer straight away (fast)", "off"), ("Think first when the model wants to (smarter, slower)", "auto")],
-                      hint="Thinking shows up in the indicator's thoughts view; it's never spoken. Takes effect "
-                           "when the model next loads (Unload all models now).")
         unload = CustomButton("Unload all models now")
         unload.clicked.connect(lambda: daemon.call("models.unload_all", None, None))
         p.addWidget(unload)

@@ -50,6 +50,49 @@ def _lines(reply: str | None, key: str) -> str:
     return "" if v.upper().startswith("NONE") else v
 
 
+GENERIC = set("""a an the game games video videogame app application program software player players campaign
+campaigns level levels mode map maps mod mods server servers character characters boss bosses item items build
+builds run runs speedrun thing things person people place places show series movie book product company team
+version update patch dlc average first try time chance chances odds way their his her our its whole""".split())
+
+
+def subject_ok(subject: str, question: str) -> bool:
+    """A real name from the question ("White Knuckle"), not a category word ("a game") the model offered
+    instead -- looking up "what is a game" taught it nothing."""
+    words = [w for w in re.findall(r"[a-z0-9']+", subject.lower())]
+    if not words or all(w in GENERIC or w in STOP for w in words):
+        return False
+    q = re.sub(r"[^a-z0-9 ]", " ", question.lower())
+    return all(w in q.split() or len(w) > 4 and w[:-1] in q for w in words if w not in STOP and w not in GENERIC)
+
+
+CATEGORY = r"(?:campaign|game|mod|modpack|map|server|update|patch|dlc|expansion|series|season|boss|character|app)"
+
+
+def subject_guess(question: str) -> list[str]:
+    """Names in the question without a model: "a white knuckle campaign" -> White Knuckle, "in Parkour
+    Reborn" -> Parkour Reborn, any Capitalized Words."""
+    out: list[str] = []
+    for m in re.finditer(rf"\b(?:a|an|the|my|your|of|in|on|for)\s+((?:[\w'-]+\s+){{0,3}}?[\w'-]+)\s+{CATEGORY}s?\b",
+                         question, re.I):
+        out.append(m.group(1))
+    m = re.search(r"\b(?:in|on|for|from)\s+(?:the\s+game\s+)?([A-Z0-9][\w'.:-]*(?:\s+[A-Z0-9][\w'.:-]*)*)", question)
+    if m:
+        out.append(m.group(1))
+    m = re.search(r"\b(?:in|on)\s+(?:the\s+game\s+)?((?:[\w'-]+\s+){0,2}[\w'-]+)\s*[?.!]*$", question, re.I)
+    if m:                                           # "... in parkour reborn" (said, so no capitals)
+        out.append(m.group(1))
+    for m in re.finditer(r"(?<!^)(?<![.!?]\s)\b([A-Z][\w'-]+(?:\s+[A-Z][\w'-]+)+)", question):
+        out.append(m.group(1))
+    seen, keep = set(), []
+    for c in out:
+        c = c.strip(" ?.,")
+        if c and subject_ok(c, question) and c.lower() not in seen:
+            seen.add(c.lower())
+            keep.append(" ".join(w if w[:1].isupper() else w.capitalize() for w in c.split()))
+    return keep
+
+
 def understand(ctx: Any, question: str) -> dict[str, Any]:
     """{goal, context: [things to learn about first], terms: [words to look up]} -- the question broken
     down before any searching, so the searches are about the right thing."""
@@ -57,20 +100,23 @@ def understand(ctx: Any, question: str) -> dict[str, Any]:
         ctx.agent,
         f"Question: {question}\n\nBefore searching, break this question down. Reply in exactly this format:\n"
         "GOAL: the question restated clearly and completely (keep exact names and spellings)\n"
-        "CONTEXT: what the question happens in or is about, to learn about first -- a game, app, show, product, "
-        "place or person -- or NONE\n"
+        "CONTEXT: the specific named thing the question is about, to learn about first -- the game, app, show, "
+        "product, place or person, by its NAME as it appears in the question (never a category like 'a game') -- "
+        "or NONE\n"
         "TERMS: unfamiliar words or names in the question to look up, comma-separated, or NONE\n\n"
-        "Example:\nQuestion: how do i do a wumpy in parkour reborn\n"
-        "GOAL: How do I perform a 'wumpy' in the game Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy",
+        "Examples:\nQuestion: how do i do a wumpy in parkour reborn\n"
+        "GOAL: How do I perform a 'wumpy' in the game Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy\n\n"
+        "Question: what are the chances an average player beats a white knuckle campaign on their first try\n"
+        "GOAL: How likely is an average player to beat a White Knuckle campaign on the first attempt?\n"
+        "CONTEXT: White Knuckle\nTERMS: NONE",
         ctx=None, raw=True, temperature=0.1, max_tokens=120)
     goal = _lines(reply, "GOAL") or question
-    context = [c.strip() for c in re.split(r",|;| and ", _lines(reply, "CONTEXT")) if len(c.strip()) > 1][:2]
-    terms = [t.strip() for t in _lines(reply, "TERMS").split(",") if len(t.strip()) > 1][:3]
-    if not reply or not (context or terms):          # no model / no usable answer: "... in <Game>"
-        m = re.search(r"\b(?:in|on|for|from)\s+(?:the\s+game\s+)?([A-Z0-9][\w'.:-]*(?:\s+[A-Z0-9][\w'.:-]*)*)\s*\??$",
-                      question)
-        if m and not context:
-            context = [m.group(1)]
+    context = [c.strip() for c in re.split(r",|;| and ", _lines(reply, "CONTEXT")) if len(c.strip()) > 1]
+    context = [c for c in context if subject_ok(c, question)][:2]
+    terms = [t.strip() for t in _lines(reply, "TERMS").split(",") if len(t.strip()) > 1]
+    terms = [t for t in terms if not subject_ok(t, " ".join(context)) and t.lower() not in GENERIC][:3]
+    if not context:                                  # no model / it gave a category: names in the question
+        context = subject_guess(question)[:1]
     return {"goal": goal, "context": context, "terms": terms}
 
 
@@ -156,7 +202,21 @@ def kind_of(question: str) -> str:
     return "howto" if HOWTO.search(question) else "fact"
 
 
+ESTIMATE = re.compile(r"\b(estimate|guess|chances?|odds|likel(y|ihood)|probab(le|ly|ility)|roughly|approximately|"
+                      r"ballpark|how many people|what percent(age)?|predict|would you say|your (best )?(take|opinion))\b",
+                      re.I)
+
+
+def wants_estimate(question: str) -> bool:
+    """A question whose answer is an estimate ("what are the chances...", "estimate how long..."):
+    nothing states it outright, so the answer is reasoned from what is known instead of refused."""
+    return bool(ESTIMATE.search(question))
+
+
 def what_counts(question: str) -> str:
+    if wants_estimate(question):
+        return ("facts to base an estimate on (difficulty, completion rates, how long it takes, what players "
+                "say) -- an exact figure isn't needed")
     if kind_of(question) == "howto":
         return ("the actual steps or inputs to do it. A page that only says what it is, why it's useful or its "
                 "history does NOT answer a how-to question")

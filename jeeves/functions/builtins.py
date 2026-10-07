@@ -196,12 +196,20 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
     4. The model answers from the clean text. The raw OCR is never read out."""
     from ..daemon import desktop as dk
     from .partials import screen as sc
+    target, back = _bring_up_app(ctx, dk, question)
     shot = sc.screenshot()
     try:
         width, height = sc._image_size(shot)
         mp = sc.Mapper((width, height))
         rect = sc._rect_for(region, width, height, mp, screen)
-        blocks = sc.layout_blocks([w for w in sc.ocr_words(shot) if sc._inside(w, rect)])
+        words = [w for w in sc.ocr_words(shot) if sc._inside(w, rect)]
+        if target is not None and region == "anywhere":
+            # the app the question is about: read that, not whatever else is on screen
+            trect = mp.rect_to_image((target.x, target.y, target.w, target.h))
+            inside = [w for w in words if sc._inside(w, trect)]
+            if len(inside) >= 3:
+                words = inside
+        blocks = sc.layout_blocks(words)
         try:
             outs = dk.outputs()
         except Exception:  # noqa: BLE001
@@ -223,6 +231,8 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
             if b["app"]:
                 b["where"] += f", in {b['app']}"
         app = f"The window they're using: {f.app} -- {f.title}\n" if f else ""
+        if target is not None:
+            app += f"Their question is about this app: {_app_name(target)} -- {target.title}\n"
         app += _app_hints({b["app"] for b in blocks} | {f.app if f else ""} | {w["name"] for w in wins})
         vision = ctx.engine.models.vision_llm(ctx.agent)
         if not blocks and vision is None:
@@ -253,7 +263,7 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
                 "belongs to what -- then answer that. To read something out, read it naturally and in order, "
                 "skipping usernames, timestamps, buttons and menus unless they matter; summarize when that serves "
                 "them better. If it isn't there, say so. Don't describe anything they didn't ask about.",
-                ctx=ctx, temperature=0.3)
+                ctx=ctx, temperature=0.3, kind="answer")
         if answer:
             return ctx.say(answer)
         if not text:
@@ -265,6 +275,83 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
                        "for you.")
     finally:
         shot.unlink(missing_ok=True)
+        if back is not None:                   # put back the window you were using
+            dk.activate(back)
+
+
+APP_NAMES = {"discord": "Discord", "vesktop": "Discord", "webcord": "Discord", "steam": "Steam",
+             "spotify": "Spotify", "firefox": "Firefox", "chromium": "Chromium", "google-chrome": "Chrome",
+             "brave-browser": "Brave", "code": "VS Code", "konsole": "the terminal", "alacritty": "the terminal",
+             "kitty": "the terminal", "org.kde.dolphin": "the file manager", "obs": "OBS"}
+# what people call things in an app, for questions that don't name it ("who's in my call")
+APP_TALK = {"Discord": r"\b(call|voice (chat|channel)|vc|server|dms?|channel|discord)\b",
+            "Steam": r"\b(steam|friends? list|library|store page)\b",
+            "Spotify": r"\b(spotify|song|playlist|track|what'?s playing)\b",
+            "OBS": r"\b(obs|stream(ing)?|recording|scene)\b",
+            "the terminal": r"\b(terminal|console|command|error output|build log)\b",
+            "VS Code": r"\b(code|editor|vs ?code)\b"}
+BROWSER_TALK = r"\b(browser|tab|website|web ?page|page|site|youtube|reddit|wiki)\b"
+
+
+def _app_name(w) -> str:
+    app = (w.app or "").lower()
+    name = next((v for k, v in APP_NAMES.items() if k in app), "") or (w.app or "").split(".")[-1]
+    return "Discord" if "discord" in (w.title or "").lower() else name
+
+
+def _target_window(question: str, wins: list, focused) -> object | None:
+    """The open app a question is about: named ("in Discord"), or what people say about it ("who's in my
+    call" -> Discord), or its window title ("the Elden Ring wiki tab")."""
+    import re as _re
+    from .research import keywords
+    q = question.lower()
+    qwords = set(keywords(question))
+    best, best_score = None, 0.0
+    for w in wins:
+        name = _app_name(w)
+        score = 0.0
+        tokens = {t for t in _re.split(r"[^a-z0-9]+", (w.app or "").lower() + " " + name.lower()) if len(t) > 2}
+        if tokens & qwords:
+            score += 3
+        if name in APP_TALK and _re.search(APP_TALK[name], q):
+            score += 2
+        if name in ("Firefox", "Chromium", "Chrome", "Brave") and _re.search(BROWSER_TALK, q):
+            score += 1.5
+        title_hits = len(qwords & set(keywords(w.title or "")))
+        score += min(3, title_hits)
+        if w is focused or getattr(w, "focused", False):
+            score += 0.5                       # a tie goes to the one you're using
+        if score > best_score:
+            best, best_score = w, score
+    return best if best_score >= 2 else None
+
+
+def _bring_up_app(ctx, dk, question: str) -> tuple[object | None, object | None]:
+    """(the window the question is about, the window to go back to after). An app on another workspace
+    or minimized is brought forward for the look; one already on screen is left where it is."""
+    try:
+        wins = [w for w in dk.windows() if w.w > 40 and w.h > 40]
+        f = next((w for w in wins if w.focused), None)
+    except Exception:  # noqa: BLE001 -- no window list (another desktop): read the whole screen
+        return None, None
+    target = _target_window(question, wins, f)
+    if target is None:
+        return None, None
+    ctx.think(f"That's about {_app_name(target)} ({target.title})")
+    try:
+        if dk.visible(target):
+            return target, None
+    except Exception:  # noqa: BLE001
+        return target, None
+    if dk.activate(target):
+        import time as _t
+        _t.sleep(0.7)                           # let it draw
+        try:
+            target = next((w for w in dk.windows() if w.id == target.id), target)
+        except Exception:  # noqa: BLE001
+            pass
+        return target, f
+    return target, None
 
 
 APP_HINTS = {
@@ -299,16 +386,9 @@ def _windows_in_image(dk, mp, focused) -> list[dict]:
         ws = [w for w in dk.windows() if w.w > 40 and w.h > 40]
     except Exception:  # noqa: BLE001
         ws = [focused] if focused else []
-    names = {"discord": "Discord", "vesktop": "Discord", "webcord": "Discord", "steam": "Steam",
-             "spotify": "Spotify", "firefox": "Firefox", "chromium": "Chromium", "google-chrome": "Chrome",
-             "brave-browser": "Brave", "code": "VS Code", "konsole": "the terminal", "alacritty": "the terminal",
-             "kitty": "the terminal", "org.kde.dolphin": "the file manager", "obs": "OBS"}
     out = []
     for w in sorted(ws, key=lambda w: (not w.focused, w.w * w.h)):
-        app = (w.app or "").lower()
-        name = next((v for k, v in names.items() if k in app), "") or (w.app or "").split(".")[-1]
-        if "discord" in (w.title or "").lower():
-            name = "Discord"
+        name = _app_name(w)
         out.append({"rect": mp.rect_to_image((w.x, w.y, w.w, w.h)), "name": name or "a window"})
     return out
 
@@ -670,7 +750,7 @@ ACKS = ["Let me look that up.", "One moment, I'll check.", "Looking into it.", "
 )
 def research(ctx, question, depth=""):
     import random
-    from .research import best_of, fit, run
+    from .research import best_of, fit, run, wants_estimate
     if ctx.dry_run:
         return f"<researched answer to: {question}>"
     question = str(question)
@@ -684,10 +764,13 @@ def research(ctx, question, depth=""):
     learned = ("Background you looked up first:\n" + "\n".join(f"- {n}" for n in notes) + "\n\n") if notes else ""
     if not sources:                              # nothing online: answer from what it knows, and say so
         reply = ctx.engine.models.respond(
-            ctx.agent, f"{learned}{original}\n\n(You couldn't look this up online just now. If you genuinely know the "
-            "answer, give it and say briefly that you couldn't check it. If it's about something specific you "
-            "don't clearly know -- a particular game's moves or items, a small community, a recent event -- do NOT "
-            "guess or make something up: say you couldn't look it up and don't know.)", ctx=ctx, temperature=0.3)
+            ctx.agent, f"{learned}{original}\n\n(You couldn't look this up online just now. " + (
+                "They asked for an estimate: give your best concrete estimate from what you know, with the reasoning "
+                "in a sentence, and say you couldn't check it online.)" if wants_estimate(original + " " + question) else
+                "If you genuinely know the answer, give it and say briefly that you couldn't check it. If it's about "
+                "something specific you don't clearly know -- a particular game's moves or items, a small community, "
+                "a recent event -- do NOT guess or make something up: say you couldn't look it up and don't know.)"),
+            ctx=ctx, temperature=0.3)
         if reply is None:
             raise FunctionError("I couldn't look that up online, and I don't know it myself")
         return ctx.say(reply)
@@ -700,11 +783,12 @@ def research(ctx, question, depth=""):
         ctx.agent,
         f"Sources:\n{material}\n\n{learned}The user asked: {asked}\n\n"
         "Answer exactly that from these sources, nothing more. Skip any source that's about something else (another "
-        "game, item or person); if none of them answer it, say you couldn't find it. "
+        "game, item or person); if none of them answer it, say you couldn't find it"
+        f"{' -- unless they asked for an estimate, then estimate from what you have' if wants_estimate(original + ' ' + question) else ''}. "
         f"{_answer_shape(original + ' ' + question)} No history, background or general information unless they "
         "asked for it. After each fact put the number of its source in square brackets, like [2]. Never add "
         "anything the sources don't say; if they only partly answer it, say in one sentence what's missing.",
-        ctx=ctx, temperature=0.3)
+        ctx=ctx, temperature=0.3, kind="answer")
     if answer is None:
         # no answer from the model: never read a raw snippet out as if it were one (that's how a line
         # about something else entirely got said as the answer) -- point at the sources instead
@@ -722,7 +806,11 @@ def research(ctx, question, depth=""):
 
 
 def _answer_shape(question: str) -> str:
-    from .research import kind_of
+    from .research import kind_of, wants_estimate
+    if wants_estimate(question):
+        return ("They want an estimate: give a concrete best estimate (a number or range) in the first sentence, "
+                "then the one or two facts from the sources it rests on, and say plainly it's an estimate. Reason "
+                "from what the sources say and general knowledge -- never refuse because nothing states it exactly.")
     if kind_of(question) == "howto":
         return ("They want to know how to do it: give the steps in order, as short plain sentences (2 to 5), with "
                 "the exact keys, timings or requirements the sources give.")
