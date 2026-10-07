@@ -286,9 +286,8 @@ def restore(ctx: Any, dk: Any, saved: list[dict[str, Any]], wait: float = 25.0) 
 
 @full(
     "setups",
-    "Saves the current setup -- the open apps and where each window is (position, size, workspace, "
-    "state) -- under a name, or gets you set up: opens what's missing and puts every window back. Also "
-    "lists and deletes setups.",
+    "Saves the open apps and where every window is under a name, or gets you set up: opens what's missing "
+    "and puts each window back. Also lists and deletes setups.",
     args=[Arg("action", "string", "save, restore, list or delete", required=False, default="restore",
               choices=["save", "restore", "list", "delete"]),
           Arg("setup", "string", "The setup's name, e.g. 'streaming' (empty: the default one)", required=False,

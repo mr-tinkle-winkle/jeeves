@@ -229,7 +229,7 @@ def test_screen_reading_picks_the_relevant_part_and_reads_it_closely(engine, mon
     prompts = []
 
     def respond(agent, prompt, system="", ctx=None, with_memory=False, raw=False, **kw):
-        prompts.append(prompt)
+        prompts.append((prompt, system))
         if "Which blocks" in prompt:
             line = next(ln for ln in prompt.splitlines() if "bridge" in ln)
             return line[1:line.index("]")]
@@ -239,8 +239,9 @@ def test_screen_reading_picks_the_relevant_part_and_reads_it_closely(engine, mon
     engine.speak = lambda ctx, t: said.append(t)
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
     ctx.call("screen_reading", question="what did dan say")
-    answer_prompt = prompts[-1]
-    glance, zoomed = answer_prompt.split("The part of the screen that matters")
+    question, screen = prompts[-1]
+    assert question == "what did dan say"                         # the question alone; the screen is context
+    zoomed, glance = screen.split("The part of the screen that matters")[1].split("The rest of the screen")
     assert "build the bridge tonight" in zoomed and "iron plates" in zoomed
     assert "Options" not in zoomed and "Options" in glance       # read closely: only the part that matters
     assert said == ["Dan wants to build the bridge tonight and says to bring iron plates."]
@@ -293,7 +294,8 @@ def test_vision_model_gets_the_zoomed_in_crop(engine, monkeypatch, tmp_path):
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
     ctx.call("screen_reading", question="what did dan say")
     parts = seen["messages"][-1]["content"]
-    assert [p["type"] for p in parts].count("image_url") == 1 and "bridge" in parts[-1]["text"]
+    assert [p["type"] for p in parts].count("image_url") == 1 and parts[-1]["text"] == "what did dan say"
+    assert "bridge" in seen["messages"][0]["content"]             # what was read off it: context, not the question
     assert said == ["Dan says build the bridge tonight."]
 
 
@@ -325,7 +327,7 @@ def test_research_stops_at_the_page_that_answers_a_how_to(engine, monkeypatch):
     monkeypatch.setattr(web, "request_website", lambda ctx, url, **kw: read.append(url) or pages[url])
 
     def respond(agent, prompt, **kw):
-        prompts.append(prompt)
+        prompts.append(kw.get("system", "") + "\n" + prompt)
         if "web search queries" in prompt:
             return "wumpy parkour reborn"
         if "actually answer the question" in prompt:
@@ -475,8 +477,8 @@ def test_research_learns_the_context_then_reads_the_games_wiki(engine, monkeypat
     prompts = []
 
     def respond(agent, prompt, **kw):
-        prompts.append(prompt)
-        if "break this question down" in prompt:
+        prompts.append((prompt, kw.get("system", "")))
+        if "Break the question down" in prompt:
             return "GOAL: How do I perform a wumpy in Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy"
         if "what Parkour Reborn is" in prompt:
             return "Parkour Reborn is a Roblox parkour movement game."
@@ -490,13 +492,13 @@ def test_research_learns_the_context_then_reads_the_games_wiki(engine, monkeypat
     engine.speak = lambda ctx, t: said.append(t)
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"],
                           new_entry("how do I do a wumpy in parkour reborn", "jeeves", "text"))
-    ctx.call("research", question="Parkour Reborn Wiki movement section and explain Wumpy to me", depth="deep")
+    ctx.call("research", question="how do I do a wumpy in parkour reborn", depth="deep")
     assert searched[0] == "Parkour Reborn"                               # the context first
     assert wiki_queries and wiki_queries[0] == ("https://parkour-reborn.fandom.com", "wumpy")
     assert [s["title"] for s in ctx.entry["sources"]] == ["Wumpy"]      # straight to the article that answers it
-    final = prompts[-1]
-    assert "how do I do a wumpy in parkour reborn" in final            # answers the ORIGINAL question
-    assert "Roblox parkour movement game" in final and "give the steps in order" in final
+    question, context = prompts[-1]
+    assert question == "how do I do a wumpy in parkour reborn"          # the question, exactly as asked
+    assert "Roblox parkour movement game" in context and "give the steps in order" in context
     assert said[-1] == "Wallrun, jump off, then wallrun again within half a second."
 
 
@@ -612,7 +614,7 @@ def test_screen_reading_understands_lists_not_just_text(engine, monkeypatch, tmp
     prompts = []
 
     def respond(agent, prompt, **kw):
-        prompts.append(prompt)
+        prompts.append(prompt + "\n" + kw.get("system", ""))
         if "Which blocks" in prompt:            # a model that only picks the header / the channel name
             line = next(ln for ln in prompt.splitlines() if pick in ln and ln.startswith("["))
             return line[1:line.index("]")]
@@ -622,7 +624,7 @@ def test_screen_reading_understands_lists_not_just_text(engine, monkeypatch, tmp
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
     ctx.call("screen_reading", question=question)
     answer_prompt = prompts[-1]
-    zoomed = answer_prompt.split("The part of the screen that matters")[1]
+    zoomed = answer_prompt.split("The part of the screen that matters")[1].split("The rest of the screen")[0]
     assert want in zoomed and not_want not in zoomed                 # the entries under it came along
     assert "in Discord" in zoomed and "people in a voice channel are listed" in answer_prompt
 
@@ -740,7 +742,7 @@ def test_research_browses_the_wiki_to_the_page_the_move_is_on(engine, monkeypatc
     monkeypatch.setattr(web, "wiki_article", lambda base, title: articles.get(title, "Nothing here."))
 
     def respond(agent, prompt, **kw):
-        if "break this question down" in prompt:
+        if "Break the question down" in prompt:
             return "GOAL: How do I perform a wumpy in Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy"
         if "what Parkour Reborn is" in prompt:
             return "Parkour Reborn is a Roblox parkour movement game."
@@ -774,7 +776,7 @@ def test_research_learns_about_the_named_thing_not_a_category(engine, monkeypatc
     assert research.subject_guess("how do i do a wumpy in parkour reborn") == ["Parkour Reborn"]
     assert research.wants_estimate(q) and not research.wants_estimate("how do I do a wumpy")
     from jeeves.functions.builtins import _answer_shape
-    assert "best estimate" in _answer_shape(q)
+    assert "estimate" in _answer_shape(q) and "number or range" in _answer_shape(q)
 
 
 def test_screen_reading_finds_the_app_the_question_is_about(monkeypatch):

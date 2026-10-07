@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
+import time
 from typing import Any, Callable
 
 from ..daemon import desktop as dk
@@ -22,6 +24,19 @@ from .backends import LLM, STT, TTS, BackendError, VoskWake, make_llm, make_stt,
 from .download import install, is_installed, uninstall
 
 log = logging.getLogger("jeeves.models")
+
+SPOKEN = "Your reply is spoken aloud: plain sentences, no markdown, lists or code. Keep it short unless asked for detail."
+ESTIMATE = ("They want an estimate: give a concrete number or range with a one-line reason; don't refuse because it "
+            "can't be known exactly.")
+CONVERSATION = {"local_response", "research", "screen_reading", "online_prompt", "summary", "handoff"}
+TURN_SECONDS = 15 * 60                    # an older exchange isn't what "that" refers to
+
+
+def _turn_text(result: Any) -> str:
+    """An earlier answer as a turn: its words, without citation marks, not too long."""
+    t = re.sub(r"\s*\[\d+(?:\s*[,-]\s*\d+)*\]", "", str(result)).strip()
+    return t if len(t) <= 500 else t[:500].rsplit(" ", 1)[0] + " …"
+
 
 KINDS = ("stt", "intent", "tts", "local_response", "vision")
 
@@ -273,7 +288,9 @@ class ModelManager:
         "answer" or "step" -- with the agent's Jeenius level, whether the model thinks first."""
         from . import jeenius
         think = jeenius.think_for(jeenius.level(agent, self.settings), kind or ("step" if raw else "chat"), prompt)
-        watcher = self._watcher_for(ctx, raw)
+        # what it's watching, for conversation while it watches -- not for answers that come with their own
+        # material (research, the screen), where it was one more thing to answer instead of the question
+        watcher = self._watcher_for(ctx, raw) if with_memory else None
         llm = self.vision_llm(agent) if watcher is not None and watcher.latest_jpeg else None
         try:
             llm = llm or self.llm("local_response", agent)
@@ -323,12 +340,13 @@ class ModelManager:
 
     def build_messages(self, agent: dict[str, Any], prompt: str, system: str = "", ctx: Any = None,
                        with_memory: bool = False, raw: bool = False) -> list[dict[str, str]]:
-        """The chat for a reply: character first, then the task, memory and style; the agent's own
-        earlier turns as real turns, other agents' as a note; a character reminder at the end."""
+        """The chat for a reply: the character, the task, what the model needs to know and how the reply
+        is said -- then the request exactly as given. Earlier turns and remembered notes only go in when
+        this request has to do with them: every extra line is something a small model may answer
+        instead of the question."""
         messages: list[dict[str, str]] = []
         sys_parts = []
-        in_character = not raw and persona.has_persona(agent)
-        if in_character:
+        if not raw and persona.has_persona(agent):
             sys_parts.append(persona.identity_block(agent))
         if system:
             sys_parts.append(system)
@@ -338,28 +356,49 @@ class ModelManager:
             mem = ctx.engine.memory.context_for(ctx.agent_id, am["notes"], am["own_only"], about=prompt)
             if mem:
                 sys_parts.append(mem)
-            recent = ctx.engine.recent_for(ctx.agent_id, agent, am["recent"], am["own_only"],
-                                           ctx.request.get("id"))
-            others = [r for r in recent if r.get("agent") not in (None, ctx.agent_id)]
+            mine, others = self.earlier_turns(agent, prompt, ctx)
             note = persona.others_note(others, {k: v.get("name", k) for k, v in ctx.engine.agents().items()})
             if note:
                 sys_parts.append(note)
-            for r in recent:
-                if r in others:
-                    continue
+            for r in mine:
                 messages.append({"role": "user", "content": r["text"]})
-                if r.get("result"):
-                    messages.append({"role": "assistant", "content": str(r["result"])})
+                messages.append({"role": "assistant", "content": r["result"]})
         if not raw:
-            sys_parts.append("Your reply is read aloud: plain spoken sentences, no markdown, lists or code unless "
-                             "asked. Keep it short unless asked for detail -- but short still sounds like you. "
-                             "Asked to estimate, guess or give the odds, give a concrete best estimate with a "
-                             "sentence of reasoning; don't refuse because it can't be known exactly.")
+            from ..functions.research import wants_estimate
+            estimate = wants_estimate(prompt) and "estimate" not in system.lower()   # unless the task says it
+            sys_parts.append(SPOKEN + (" " + ESTIMATE if estimate else ""))
         if sys_parts:
             messages.insert(0, {"role": "system", "content": "\n\n".join(sys_parts)})
-        messages.append({"role": "user", "content": f"{prompt}\n\n{persona.reminder(agent)}" if in_character
-                         else prompt})
+        messages.append({"role": "user", "content": prompt})
         return messages
+
+    def earlier_turns(self, agent: dict[str, Any], prompt: str, ctx: Any
+                      ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """(this agent's last exchange, other agents' ones) worth showing with this prompt. Its own: only
+        when the prompt points back at it ("why is that?", "tell me more") -- the last one, from the last
+        quarter of an hour, conversation only (not "set a timer"). Other agents': only when the prompt
+        names one of them ("what did Claude say?")."""
+        from ..config import agent_memory
+        from ..util import refers_back
+        am = agent_memory(agent, self.settings)
+        if not am["recent"] or ctx is None or not hasattr(ctx.engine, "recent_for"):
+            return [], []
+        names = {k: str(v.get("name", k)) for k, v in ctx.engine.agents().items()}
+        low = prompt.lower()
+        named = {aid for aid, n in names.items() if aid != ctx.agent_id and n and
+                 re.search(rf"\b{re.escape(n.lower())}\b", low)}
+        back = refers_back(prompt)
+        if not back and not named:
+            return [], []
+        now = time.time()
+        recent = [r for r in ctx.engine.recent_for(ctx.agent_id, agent, am["recent"], am["own_only"],
+                                                   ctx.request.get("id"))
+                  if now - float(r.get("time") or 0) < TURN_SECONDS and r.get("result")]
+        clean = [dict(r, result=_turn_text(r["result"])) for r in recent]
+        mine = [r for r in clean if r.get("agent") in (None, ctx.agent_id) and r.get("function") in CONVERSATION][-1:] \
+            if back else []
+        others = [r for r in clean if r.get("agent") in named][-2:]
+        return mine, others
 
     def _keep_in_character(self, llm: Any, agent: dict[str, Any], reply: str, ctx: Any, max_tokens: int) -> str:
         """Agents > Personality > Check replies: grade the reply; rewrite it once if it's off."""

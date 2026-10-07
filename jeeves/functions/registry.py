@@ -209,7 +209,8 @@ class Registry:
             for a in f.args:
                 kind = f"one of {a.choices}" if a.choices else f"{a.type} ({ARG_TYPES.get(a.type, a.type)})"
                 req = "required" if a.required else f"optional, default {a.default!r}"
-                lines.append(f"  - {a.name}: {kind}; {req}. {a.description}")
+                said = " Filled in from what you say." if a.said else ""
+                lines.append(f"  - {a.name}: {kind}; {req}. {a.description}{said}")
         if f.returns:
             lines.append(f"Returns: {f.returns}")
         for ex in f.examples:
@@ -225,28 +226,35 @@ class Registry:
         return "\n".join(lines)
 
     def brief(self, f: FunctionDef, examples: list[dict[str, Any]] | None = None) -> str:
-        """The function as the intent model needs it: what it's for, its arguments and examples --
-        none of how it works inside (that only gave small models more to get confused by)."""
-        lines = [f"### {f.name}", f.description]
+        """The function as the intent model needs it: what it's for, the arguments it has to fill in and
+        a few examples. Not how it works inside, and not the request itself: arguments that are the
+        user's own words are filled in from what was said (Arg.said), so the model never rewrites them."""
+        lines = [f"### {f.name}: {f.description}"]
         for a in f.args:
+            if a.said:
+                continue
             if a.choices:
-                kind = "one of: " + ", ".join(str(c) for c in a.choices if c not in ("", None))
+                kind = "|".join(str(c) for c in a.choices if c not in ("", None))
+            elif a.type in ("duration", "time"):
+                kind = ARG_TYPES[a.type]
             else:
-                kind = {"string": "text", "boolean": "true/false", "integer": "whole number"}.get(a.type, a.type)
-                if a.type in ("duration", "time", "region", "position"):
-                    kind = ARG_TYPES.get(a.type, a.type)
+                kind = {"boolean": "true/false", "integer": "whole number", "number": "number"}.get(a.type, "text")
             if a.required:
                 need = "required"
             elif a.default not in (None, "", [], False):
                 need = f"default {a.default}"
             else:
                 need = "optional"
-            lines.append(f"- {a.name} ({kind}; {need}): {a.description}".rstrip(": "))
-        said = [re.sub(r"^\w+,\s+", "", ex) for ex in f.examples]       # "Jeeves, set a timer" -> "set a timer"
+            desc = a.description
+            filler = {str(c).lower() for c in a.choices or []} | {"or", "and", "what", "to", "do", "the", "a"}
+            if set(re.findall(r"[\w-]+", desc.lower())) <= filler:
+                desc = ""                       # "What to do", "start or stop": the values already say it
+            lines.append(f"- {a.name} ({kind}; {need})" + (f": {desc}" if desc else ""))
+        said = [re.sub(r"^\w+,\s+", "", ex) for ex in f.examples][:3]    # "Jeeves, set a timer" -> "set a timer"
         if said:
             lines.append("e.g. " + " | ".join(f'"{ex}"' for ex in said))
         elif self.keywords(f):
-            lines.append("e.g. " + " | ".join(f'"{k}"' for k in self.keywords(f)[:6]))
+            lines.append("e.g. " + " | ".join(f'"{k}"' for k in self.keywords(f)[:4]))
         blocked = self.blocked(f)
         if blocked:
             lines.append("Never for: " + "; ".join(blocked))

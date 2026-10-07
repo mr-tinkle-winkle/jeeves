@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from .ui_kit import (CustomPlainTextEdit, ask_text, CustomButton, CustomCheckBox, CustomDoubleSpinBox, CustomGroupBox, CustomLineEdit,
                      CustomSpinBox, show_message)
+from ..functions.custom_sources import parse as parse_sources
 from .command_editor import CommandList
 from .widgets import discard, Page, combo, is_locked, label, row
 from ..models.jeenius import LEVELS
@@ -257,6 +258,22 @@ class AgentsPage(Page):
         self.commands = CommandList()
         g.addWidget(self.commands)
 
+        g = self._group(f, "Custom sources")
+        self.sources_on = CustomCheckBox("Use these sites when researching")
+        g.addWidget(self.sources_on)
+        g.addWidget(label("One site per line: its address, then = and what it's for. When a question fits one, "
+                          "research reads that site first (and searches inside it) before the rest of the web."))
+        self.sources_edit = CustomPlainTextEdit()
+        self.sources_edit.setPlaceholderText("https://parkour-reborn.fandom.com/wiki/Movement = Parkour Reborn "
+                                             "Movement Wiki, for information on any movement techniques")
+        self.sources_edit.setMinimumHeight(90)
+        self.sources_edit.setMaximumHeight(150)
+        g.addWidget(self.sources_edit)
+        self.sources_status = label("")
+        g.addWidget(self.sources_status)
+        self.sources_edit.textChanged.connect(self._sources_changed)
+        self.sources_on.toggled.connect(self.sources_edit.setEnabled)
+
         g = self._group(f, "Handoff")
         g.addWidget(label("Agents this one may pass information to (Handoff function)."))
         self.any_handoff = CustomCheckBox("Any agent")
@@ -433,6 +450,11 @@ class AgentsPage(Page):
         self.threshold.setValue(a.get("threshold") or 0.6)
         self.jeenius.setCurrentIndex(max(0, self.jeenius.findData(int(a.get("jeenius") or 0))))
         self.commands.load(a.get("commands") or [])
+        from ..functions.custom_sources import to_text
+        cs = a.get("custom_sources") or {}
+        self.sources_on.setChecked(bool(cs.get("enabled", True)))
+        self.sources_edit.setEnabled(self.sources_on.isChecked())
+        self.sources_edit.setPlainText(to_text(cs.get("sites") or []))
         reply = a.get("wake_reply") or ""
         self.wake_reply.setText(" | ".join(reply) if isinstance(reply, list) else str(reply))
         self.prompt.setPlainText(a.get("prompt", ""))
@@ -496,6 +518,13 @@ class AgentsPage(Page):
         if lk:
             self.form.setToolTip("This agent is declared in NixOS")
 
+    def _sources_changed(self) -> None:
+        from ..functions.custom_sources import parse
+        sites, problems = parse(self.sources_edit.toPlainText())
+        n = len(sites)
+        self.sources_status.setText("; ".join(problems).capitalize() if problems else
+                                    f"{n} site{'s' if n != 1 else ''}." if n else "")
+
     def _memory_enabled(self, on: bool) -> None:
         for w in (self.mem_recent, self.mem_notes, self.mem_own):
             w.setEnabled(on)
@@ -557,6 +586,8 @@ class AgentsPage(Page):
             "voice_style": self._style(),
             "functions": {name: cb.isChecked() for name, cb in self.func_checks.items()},
             "commands": self.commands.value(), "jeenius": self.jeenius.currentData() or None,
+            "custom_sources": {"enabled": self.sources_on.isChecked(),
+                               "sites": parse_sources(self.sources_edit.toPlainText())[0]},
             "handoff_to": ["*"] if self.any_handoff.isChecked() else
             [k for k, cb in self.handoff_checks.items() if cb.isChecked()],
         })

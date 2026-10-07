@@ -23,21 +23,26 @@ from ..util import normalize, parse_duration, similarity
 from ..config import agent_memory
 from .memory import Memory
 
-SYSTEM = """You decide what {agent}, a voice assistant, should do with the user's request.
-Pick the ONE function below that fits it and fill in its arguments: only functions from this list; for an
-argument with listed values use one of them; leave out optional arguments you don't need.
-Take the most likely meaning -- people speak casually. Only if it truly can't be done without more
-information ("set a timer" with no length), set "function" to null and ask for exactly the missing piece in
-"question". Never ask the user to confirm or repeat what they said.{research}
+SYSTEM = """Pick the function that handles this request to {agent}, a voice assistant, and fill in its arguments.
+Use only the functions below. For an argument with listed values, use one of them; leave out arguments you
+don't need. Take the likeliest meaning: people speak casually. Only if it can't be done without a missing
+detail (a timer with no length), reply {{"function": null, "question": "<ask for just that detail>"}}.{research}
+Reply with JSON only: {{"function": "<name>", "args": {{...}}}}
 
-Answer with JSON only:
-{{"function": "<name or null>", "args": {{...}}, "confidence": <0.0-1.0>, "question": "<only if function is null>"}}
-
-# Functions
 {dictionary}
 """
-RESEARCH_RULE = ("\nQuestions about facts -- games (bosses, builds, items, quests, patches), products, people, "
-                 "places, news, prices, release dates -- go to research, never answered from memory.")
+RECENT_SECONDS = 15 * 60       # older requests aren't what "it" or "that" means
+RESEARCH_RULE = "\nFactual questions (games, products, people, places, news, prices, dates) go to research."
+
+# instructions read word for word ("click Save"): "could you ... please" is in the way
+POLITE_STRIP = {"control_mode"}
+# Words in front of a request that only say "look it up" / "ask X": not part of the question itself
+SAID_PREFIX = {
+    "research": r"^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:look\s+up|search\s+(?:the\s+web\s+|online\s+)?"
+                r"(?:for\s+)?|research|google|find\s+out|check)\s+(?:online\s+)?",
+    "online_prompt": r"^(?:please\s+)?(?:can\s+you\s+)?(?:ask|tell)\s+(?:chat\s*gpt|gpt|codex|gemini|claude|grok)\b"
+                     r"(?:\s+(?:to|about|if|whether))?[\s,:]*",
+}
 
 
 def agent_id_of(ctx: Any) -> str | None:
@@ -72,7 +77,7 @@ class IntentProcessor:
         functions = [f for f in self.registry.enabled_for(agent) if not self._blocked(f, text)]
         ruled = self.rule_decide(agent, text, functions)
         if ruled is not None:
-            return ruled
+            return self.with_said(ruled, agent, text)
         llm = None
         if self.models is not None:
             from ..models.manager import ModelUnavailable
@@ -83,8 +88,29 @@ class IntentProcessor:
                     raise
                 llm = None
         if llm is not None and functions:
-            return self._with_model(llm, agent, text, functions, ctx)
-        return self.keyword_decide(agent, text, functions)
+            return self.with_said(self._with_model(llm, agent, text, functions, ctx), agent, text)
+        return self.with_said(self.keyword_decide(agent, text, functions), agent, text)
+
+    # ---- the request in the user's own words ------------------------------
+    def said_text(self, f: FunctionDef, agent: dict[str, Any], text: str) -> str:
+        """What the user said, as the function's request: without the agent's name, and without the
+        words that only pick the function ("look up", "ask Gemini")."""
+        t = self.strip_address(agent, text, polite=f.name in POLITE_STRIP)
+        prefix = SAID_PREFIX.get(f.name)
+        if prefix:
+            t = re.sub(prefix, "", t, flags=re.I).strip() or t
+        return t.strip()
+
+    def said_args(self, f: FunctionDef, agent: dict[str, Any], text: str) -> dict[str, str]:
+        return {a.name: self.said_text(f, agent, text) for a in f.args if a.said}
+
+    def with_said(self, d: Decision, agent: dict[str, Any], text: str) -> Decision:
+        """The decision with its request arguments set to what was said -- whoever decided (rules,
+        keywords, the model), the function gets the question, not a rewording of it."""
+        f = self.registry.get(d.function, agent) if d.function else None
+        if f is not None:
+            d.args.update(self.said_args(f, agent, text))
+        return d
 
     def validate(self, f: FunctionDef, args: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         out, problems = {}, []
@@ -137,26 +163,24 @@ class IntentProcessor:
                                dictionary=self.registry.dictionary_text(functions, examples, brief=True))
         memory_kind, _ = Memory.detect(text)
         messages = [{"role": "system", "content": system}]
-        am = agent_memory(agent, self.settings)
-        if ctx is not None and hasattr(ctx.engine, "recent_for"):
-            recent = ctx.engine.recent_for(ctx.agent_id, agent, am["recent"], am["own_only"], ctx.request.get("id"))
-        else:
-            recent = self.history.recent(am["recent"], agent=agent_id_of(ctx) if am["own_only"] else None,
-                                         exclude=ctx.request.get("id") if ctx else None) if am["recent"] else []
+        recent = self._recent(agent, text, ctx)
         if recent:
             me = ctx.agent_id if ctx is not None else None
             names = {k: v.get("name", k) for k, v in (self.settings.get("agents", {}) or {}).items()}
 
             def line(r: dict[str, Any]) -> str:
-                to = "" if r.get("agent") in (None, me) else f" (said to {names.get(r['agent'], 'another assistant')})"
-                return f"- \"{r['text']}\"{to} -> {r['function']} {json.dumps(r['args'])}"
-            messages.append({"role": "system", "content": "Recent requests (only to resolve 'that', 'it', 'the one "
-                             "I just made' -- the new request is the one that counts; never act on these again):\n"
-                             + "\n".join(line(r) for r in recent)})
-        messages.append({"role": "user", "content": text})
+                to = "" if r.get("agent") in (None, me) else f" (to {names.get(r['agent'], 'another assistant')})"
+                f = self.registry.get(r.get("function") or "", agent)
+                said = {a.name for a in f.args if a.said} if f is not None else set()
+                args = {k: v for k, v in (r.get("args") or {}).items() if v not in (None, "", [], False)
+                        and k not in said}
+                return f"- \"{r['text']}\"{to} -> {r['function']}" + (f" {json.dumps(args)}" if args else "")
+            messages.append({"role": "system", "content": "Earlier requests, only for what \"it\" or \"that\" "
+                             "refers to:\n" + "\n".join(line(r) for r in recent)})
+        messages.append({"role": "user", "content": self.strip_address(agent, text, polite=False) or text})
         by_name = {f.name: f for f in functions}
         notes: list[str] = []
-        for attempt in range(2):
+        for _attempt in range(2):
             from ..models.backends import BackendError
             try:
                 from ..models import jeenius
@@ -181,7 +205,8 @@ class IntentProcessor:
                 if f is None:
                     err = f"'{name}' isn't one of the available functions."
                 else:
-                    args, problems = self.validate(f, data.get("args") or {})
+                    given = data.get("args") if isinstance(data.get("args"), dict) else {}
+                    args, problems = self.validate(f, {**given, **self.said_args(f, agent, text)})
                     if not problems:
                         if memory_kind and "remember" in by_name and name != "remember":
                             notes.append(f"also asked to remember ({memory_kind})")
@@ -190,6 +215,22 @@ class IntentProcessor:
             notes.append(err)
             messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": err + " Try again."}]
         return Decision(None, {}, 0.0, "", "model", notes)
+
+    def _recent(self, agent: dict[str, Any], text: str, ctx: Any) -> list[dict[str, Any]]:
+        """Earlier requests, only when this one points back at them ("pause it", "the macro I just
+        made"), and only recent ones: otherwise they're noise the model may act on again."""
+        from ..util import refers_back
+        am = agent_memory(agent, self.settings)
+        if not am["recent"] or not refers_back(self.strip_address(agent, text, polite=False)):
+            return []
+        n = min(3, am["recent"])
+        if ctx is not None and hasattr(ctx.engine, "recent_for"):
+            recent = ctx.engine.recent_for(ctx.agent_id, agent, n, am["own_only"], ctx.request.get("id"))
+        else:
+            recent = self.history.recent(n, agent=agent_id_of(ctx) if am["own_only"] else None,
+                                         exclude=ctx.request.get("id") if ctx else None)
+        import time as _time
+        return [r for r in recent if _time.time() - float(r.get("time") or 0) < RECENT_SECONDS]
 
     # ---- keyword matcher ---------------------------------------------------
     def _blocked(self, f: FunctionDef, text: str) -> bool:
@@ -269,8 +310,10 @@ class IntentProcessor:
                     f"Screen Reading is turned off for {name}. Turn it on in Settings > Agents > {name} > "
                     "Functions."))
         if "research" in by_name and self.settings.get("research.auto_for_facts", True):
+            from ..functions import custom_sources
             from .engine import looks_factual
-            if looks_factual(core, agent):  # specific facts get looked up, not guessed
+            if looks_factual(core, agent) or custom_sources.matches(agent, core) and QUESTION.match(low):
+                # specific facts get looked up, not guessed -- and so does anything one of your sites is for
                 return Decision("research", {"question": core, "depth": "quick"}, 0.85, "", "rules")
         if re.match(r"^at\s+\d{1,2}(:\d{2})?\s*(am|pm|a\.m\.|p\.m\.)?\b", low) and "timers" in by_name:
             args, problems = self.validate(by_name["timers"], self._guess_args(by_name["timers"], core, agent))
@@ -373,6 +416,8 @@ class IntentProcessor:
         return args
 
 
+QUESTION = re.compile(r"^(who|what|when|where|which|why|how|is|are|does|do|did|can|could|should|was|were|tell me|"
+                      r"explain)\b")
 CONTROL_PATTERN = (r"^(left[- ]|right[- ]|middle[- ]|double[- ])?click\b|^(press|hit|tap)\s+(the\s+)?\S|"
                    r"^(hold|hold down|release|let go)\b|^type\s+\S|^scroll\s+(up|down|left|right)\b|"
                    r"^(move|put)\s+(the\s+)?(mouse|cursor|pointer)\b|^(take control|use the (mouse|keyboard))\b")

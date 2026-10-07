@@ -3,11 +3,12 @@
 Small local models drift back to "helpful AI assistant" quickly, so the agent's
 prompt isn't just pasted in front:
 
-* it becomes an identity block that explicitly outranks generic assistant habits;
-* the last user message carries a one-line reminder ("reply as Jeeves, in
-  character") -- the instruction nearest the answer is the one small models obey;
-* other agents' earlier replies are shown as a labelled note, never as the
-  model's own past turns (that taught it to talk like the other agent);
+* it opens the system prompt, with one line saying to stay in character;
+* the request itself goes to the model as the user said it -- no reminders or
+  instructions appended to it (they got answered, or read as part of the question);
+* other agents' earlier replies are only shown when the user asks about them, and
+  then as a labelled note, never as the model's own past turns (that taught it to
+  talk like the other agent);
 * optionally every reply is checked against the persona by the model and
   rewritten once if it doesn't fit (Agents > Personality > Check replies).
 
@@ -36,12 +37,12 @@ def has_persona(agent: dict[str, Any]) -> bool:
 
 
 def identity_block(agent: dict[str, Any]) -> str:
+    """The character, as the first thing the model reads. Short: the user's own prompt does the work."""
     name = name_of(agent)
-    return (f"You are {name}. This is your character, and it takes priority over any habit of sounding like a "
-            f"generic AI assistant:\n<character>\n{agent['prompt'].strip()}\n</character>\n"
-            f"Every reply -- short answers, facts, refusals and small talk included -- is said by {name}, in "
-            f"{name}'s own voice, attitude, vocabulary and opinions. Never step out of character to explain "
-            "yourself, and don't call yourself an AI or language model unless the character says so.")
+    prompt = agent["prompt"].strip()
+    lead = "" if re.match(r"^\s*(you are|you're|you play|act as)\b", prompt, re.I) else f"You are {name}. "
+    return (f"{lead}{prompt}\nStay in character in every reply, short and factual ones included, and never call "
+            "yourself an AI unless the character would.")
 
 
 def reminder(agent: dict[str, Any]) -> str:
@@ -49,11 +50,9 @@ def reminder(agent: dict[str, Any]) -> str:
 
 
 def others_note(turns: list[dict[str, Any]], names: dict[str, str]) -> str:
-    lines = [f"- The user asked {names.get(t.get('agent') or '', 'another assistant')}: \"{t['text']}\""
-             + (f" -- it answered: \"{str(t['result'])[:300]}\"" if t.get("result") else "") for t in turns]
-    return ("Earlier, the user also talked to other assistants (not you; don't copy their style). This is "
-            "background only: don't bring them or those conversations up unless the user asks about them.\n"
-            + "\n".join(lines)) if lines else ""
+    lines = [f"- To {names.get(t.get('agent') or '', 'another assistant')}: \"{t['text']}\""
+             + (f" -- it said: \"{str(t['result'])[:300]}\"" if t.get("result") else "") for t in turns]
+    return ("What the user said to the other assistants (they asked about it):\n" + "\n".join(lines)) if lines else ""
 
 
 def judge(chat: Callable[..., str], agent: dict[str, Any], reply: str) -> tuple[int, str]:

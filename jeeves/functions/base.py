@@ -47,13 +47,18 @@ class Arg:
     # specific values this argument can take (function variations); when set,
     # the intent model must pick one of them
     choices: list[Any] | None = None
+    # the request itself, in the user's own words: filled in from what was said (without the agent's
+    # name), never written by the intent model -- its rewordings ("Tell me a funny joke about cheese,
+    # keep it short and in character") reached the answering model instead of the question
+    said: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Arg":
-        return cls(**{k: d[k] for k in ("name", "type", "description", "required", "default", "choices") if k in d})
+        return cls(**{k: d[k] for k in ("name", "type", "description", "required", "default", "choices", "said")
+                      if k in d})
 
 
 @dataclass

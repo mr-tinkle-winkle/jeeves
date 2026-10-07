@@ -51,7 +51,8 @@ class FunctionRow(QWidget):
         for a in f["args"]:
             kind = f"one of {a['choices']}" if a.get("choices") else a["type"]
             req = "required" if a["required"] else f"optional (default {a['default']!r})"
-            d.addWidget(label(f"• {a['name']}: {kind}, {req}. {a['description']}"))
+            said = " Filled in from what you say (the intent model doesn't write it)." if a.get("said") else ""
+            d.addWidget(label(f"• {a['name']}: {kind}, {req}. {a['description']}{said}"))
         if f["returns"]:
             d.addWidget(label(f"Returns: {f['returns']}"))
         for ex in f["examples"]:
@@ -142,7 +143,8 @@ class FunctionsPage(Page):
         e.addWidget(row(label("Description", False), self.ed_desc, stretch_last=True))
         e.addWidget(row(label("Keywords", False), self.ed_kw, stretch_last=True))
         e.addWidget(label("Arguments (JSON list; types: string, number, integer, boolean, duration, time, app, "
-                          "agent, key, path, url, command, list, object)"))
+                          "agent, key, path, url, command, list, object). \"said\": true fills an argument with "
+                          "the request itself, as you said it, instead of the intent model's wording."))
         e.addWidget(self.ed_args)
         e.addWidget(label("Steps -- partial functions combined with control flow (call / set / if / repeat / while / "
                           "for_each / when / wait / return). ${name} reads a variable or argument."))

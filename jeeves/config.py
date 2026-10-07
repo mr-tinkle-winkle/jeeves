@@ -53,6 +53,9 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         # [{name, description, required, choices}], confirm, terminal, timeout}]
         "commands": [],
         "jeenius": None,              # 1-4 (see models.jeenius); None -> the global setting
+        # sites its research reads first when a question fits them (Agents > Custom sources):
+        # [{url, about: what the site is for}]
+        "custom_sources": {"enabled": True, "sites": []},
         # Jump in whenever the AI wants to: 1 = a full part of the conversation, 0 = never
         "jump_in": {"enabled": False, "frequency": 0.3},
         "output_to": "speakers",      # speakers | microphone | both | device | device_mic

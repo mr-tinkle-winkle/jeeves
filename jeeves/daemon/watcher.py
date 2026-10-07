@@ -140,8 +140,8 @@ class Watcher:
         if not self.timeline:
             return ""
         now = time.time()
-        seen = "\n".join(f"- {int(now - t)}s ago: {d}" for t, d in list(self.timeline)[-8:])
-        text = f"\nText on screen right now:\n{self.latest_text[:1500]}" if self.latest_text else ""
+        seen = "\n".join(f"- {int(now - t)}s ago: {d}" for t, d in list(self.timeline)[-5:])
+        text = f"\nText on screen right now:\n{self.latest_text[:1000]}" if self.latest_text else ""
         return f"You are watching the user's screen live. What you've seen (newest last):\n{seen}{text}"
 
     # ---- the loop ---------------------------------------------------------

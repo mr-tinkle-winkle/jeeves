@@ -93,30 +93,30 @@ def subject_guess(question: str) -> list[str]:
     return keep
 
 
-def understand(ctx: Any, question: str) -> dict[str, Any]:
+def understand(ctx: Any, question: str, earlier: str = "") -> dict[str, Any]:
     """{goal, context: [things to learn about first], terms: [words to look up]} -- the question broken
-    down before any searching, so the searches are about the right thing."""
+    down before any searching, so the searches are about the right thing. `earlier`: the exchange a
+    follow-up ("why is that?") refers to."""
     reply = ctx.engine.models.respond(
         ctx.agent,
-        f"Question: {question}\n\nBefore searching, break this question down. Reply in exactly this format:\n"
-        "GOAL: the question restated clearly and completely (keep exact names and spellings)\n"
-        "CONTEXT: the specific named thing the question is about, to learn about first -- the game, app, show, "
-        "product, place or person, by its NAME as it appears in the question (never a category like 'a game') -- "
-        "or NONE\n"
-        "TERMS: unfamiliar words or names in the question to look up, comma-separated, or NONE\n\n"
-        "Examples:\nQuestion: how do i do a wumpy in parkour reborn\n"
-        "GOAL: How do I perform a 'wumpy' in the game Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy\n\n"
-        "Question: what are the chances an average player beats a white knuckle campaign on their first try\n"
-        "GOAL: How likely is an average player to beat a White Knuckle campaign on the first attempt?\n"
-        "CONTEXT: White Knuckle\nTERMS: NONE",
+        (f"Just before, {earlier}\n\n" if earlier else "") +
+        f"Question: {question}\n\nBreak the question down before searching. Reply in exactly this format:\n"
+        "GOAL: the question restated in full, keeping exact names" + (" (say what 'it' or 'that' is)" if earlier
+                                                                      else "") + "\n"
+        "CONTEXT: the named game, app, show, product, place or person it's about, by its name (never a category "
+        "like 'a game'), or NONE\n"
+        "TERMS: unfamiliar words to look up, comma-separated, or NONE\n\n"
+        "Example:\nQuestion: how do i do a wumpy in parkour reborn\n"
+        "GOAL: How do I do a 'wumpy' in the game Parkour Reborn?\nCONTEXT: Parkour Reborn\nTERMS: wumpy",
         ctx=None, raw=True, temperature=0.1, max_tokens=120)
     goal = _lines(reply, "GOAL") or question
+    known = f"{question} {earlier}"
     context = [c.strip() for c in re.split(r",|;| and ", _lines(reply, "CONTEXT")) if len(c.strip()) > 1]
-    context = [c for c in context if subject_ok(c, question)][:2]
+    context = [c for c in context if subject_ok(c, known)][:2]
     terms = [t.strip() for t in _lines(reply, "TERMS").split(",") if len(t.strip()) > 1]
     terms = [t for t in terms if not subject_ok(t, " ".join(context)) and t.lower() not in GENERIC][:3]
     if not context:                                  # no model / it gave a category: names in the question
-        context = subject_guess(question)[:1]
+        context = subject_guess(question)[:1] or subject_guess(earlier)[:1]
     return {"goal": goal, "context": context, "terms": terms}
 
 
@@ -124,17 +124,16 @@ def refine(ctx: Any, goal: str, notes: list[str], terms: list[str]) -> tuple[str
     """(a guess at what the unfamiliar terms are, search queries) -- with the context learned so far."""
     fallback = [goal] + ([f"{goal} guide"] if HOWTO.search(goal) else
                          [f"{goal} wiki", f"{goal} reddit"] if GAME_HINT.search(goal) else [f"{goal} explained"])
-    learned = "\n".join(f"- {n}" for n in notes) or "(nothing yet)"
-    about = f" Think about what {', '.join(terms)} most likely is, given the context -- e.g. in a movement game " \
-            "an unfamiliar word is probably a movement technique." if terms else ""
+    known = ("Known:\n" + "\n".join(f"- {n}" for n in notes) + "\n\n") if notes else ""
+    guess = (f"First a line GUESS: what {', '.join(terms)} most likely is here (in a movement game, an unfamiliar "
+             "word is probably a movement technique). Then " if terms else "")
     reply = ctx.engine.models.respond(
         ctx.agent,
-        f"Question: {goal}\n\nWhat you've learned:\n{learned}\n\n{about.strip()}\nThen write 3 different web "
-        "search queries that would find the answer. Use the context's exact name and the right category word "
-        "(movement, item, boss, setting, command...). For 'how do I...' questions aim at guides and the wiki. "
-        "Reply with GUESS: <one sentence> on the first line, then one query per line, nothing else.",
+        f"Question: {goal}\n\n{known}{guess}{'w' if terms else 'W'}rite 3 different web search queries that "
+        "would find the answer, one per line, nothing else. Use exact names and the right category word "
+        "(movement, item, boss, setting...); for a how-to, aim at guides and wikis.",
         ctx=None, raw=True, temperature=0.2, max_tokens=160)
-    guess = _lines(reply, "GUESS")
+    guess = _lines(reply, "GUESS") if terms else ""
     lines = [re.sub(r"^\s*(?:\d+[.)]|[-*•]|QUERY\s*:)\s*", "", ln, flags=re.I).strip().strip('"')
              for ln in (reply or "").splitlines() if not re.match(r"^\s*GUESS\s*:", ln, re.I)]
     queries = [q for q in lines if 3 <= len(q) <= 150][:3]
@@ -148,19 +147,28 @@ def refine(ctx: Any, goal: str, notes: list[str], terms: list[str]) -> tuple[str
 GUIDE_WORDS = re.compile(r"\b(how to|guide|tutorial|tips|walkthrough|steps|technique|tech)\b", re.I)
 
 
-def rank(results: list[dict[str, str]], question: str) -> list[dict[str, str]]:
+def rank(results: list[dict[str, str]], question: str, prefer: list[str] | tuple = ()) -> list[dict[str, str]]:
+    """Best first: pages that talk about the question on sites worth reading -- your own sources
+    (prefer: their hosts) first of all."""
     kws = set(keywords(question))
     howto = HOWTO.search(question) is not None
+
+    def mine(r: dict[str, str]) -> bool:
+        host = urlparse(r.get("url", "")).netloc.lower()
+        return any(host == p or host.endswith("." + p) for p in prefer)
 
     def score(r: dict[str, str]) -> float:
         host = urlparse(r.get("url", "")).netloc.lower()
         s = 2.0 if any(g in host or g in r.get("url", "") for g in GOOD_SITES) else 0.0
+        if mine(r):
+            s += 3.0
         words = set(keywords(r.get("title", "") + " " + r.get("snippet", "")))
         s += len(kws & words) / max(1, len(kws)) * 3
         if howto and GUIDE_WORDS.search(r.get("title", "") + " " + r.get("snippet", "") + " " + r.get("url", "")):
             s += 1.5                                 # a how-to question: guides first
         return s
-    useful = [r for r in results if not any(b in urlparse(r.get("url", "")).netloc.lower() for b in BAD_SITES)]
+    useful = [r for r in results if mine(r) or not any(b in urlparse(r.get("url", "")).netloc.lower()
+                                                       for b in BAD_SITES)]
     return sorted(useful, key=score, reverse=True)
 
 
@@ -247,10 +255,10 @@ def assess(ctx: Any, question: str, sources: list[dict[str, Any]]) -> tuple[str,
     offset = len(sources) - len(sources[-6:])
     reply = ctx.engine.models.respond(
         ctx.agent,
-        f"Question: {question}\n\nWhat was found so far:\n{material}\n\nDoes this material actually answer the "
-        f"question? That means {what_counts(question)}. Reply ANSWERED: followed by the numbers of the sources "
-        "that answer it (e.g. ANSWERED: 2). If not, reply SEARCH: followed by one web search query for exactly "
-        "what's missing (keep the exact names), or MORE if the next pages might have it.",
+        f"Question: {question}\n\nFound so far:\n{material}\n\nDoes this actually answer the question? It needs "
+        f"{what_counts(question)}. Reply ANSWERED: and the numbers of the sources that answer it (e.g. ANSWERED: "
+        "2), or SEARCH: and one search query for exactly what's missing (keep the exact names), or MORE if the "
+        "next pages might have it.",
         ctx=None, raw=True, temperature=0.0, max_tokens=60) or ""
     head = reply.upper().split("SEARCH")[0]
     if "ANSWERED" in head:
@@ -358,6 +366,12 @@ def term_passages(text: str, terms: list[str], limit: int) -> str:
     return "\n…\n".join(text[a:b].strip() for a, b in merged)[:limit]
 
 
+MAX_TITLES = 150
+CATEGORY_PAGE = re.compile(r"\b(movement|moves?|techniques?|tech|mechanics?|controls?|abilities|skills?|items?|"
+                           r"weapons?|gear|equipment|bosses|enemies|characters?|maps?|levels?|locations?|quests?|"
+                           r"guides?|gameplay|tips|trick(s)?|recipes?|crafting|achievements?)\b", re.I)
+
+
 def pick_pages(ctx, goal: str, terms: list[str], guess: str, titles: list[str], seen_titles: set[str],
                n: int = 3) -> list[str]:
     """Which pages a person browsing this wiki would open to find the term ("wumpy" in a movement
@@ -365,7 +379,13 @@ def pick_pages(ctx, goal: str, terms: list[str], guess: str, titles: list[str], 
     titles = [t for t in titles if t not in seen_titles]
     if not titles:
         return []
-    listing = ", ".join(titles[:400])
+    if len(titles) > MAX_TITLES:                   # a big wiki: the likely pages, not all of them
+        words = set(keywords(" ".join(terms) + " " + guess + " " + goal))
+        rank_of = {t: (-(3 * len(words & set(keywords(t))) + (2 if CATEGORY_PAGE.search(t) else 0)), i)
+                   for i, t in enumerate(titles)}
+        keep = set(sorted(titles, key=rank_of.get)[:MAX_TITLES])
+        titles = [t for t in titles if t in keep]
+    listing = ", ".join(titles)
     reply = ctx.engine.models.respond(
         ctx.agent,
         f"Pages of the wiki: {listing}\n\nQuestion: {goal}\n"
@@ -461,10 +481,11 @@ def read_wiki(ctx: Any, wiki: str, goal: str, terms: list[str], guess: str, quer
     return None
 
 
-def run(ctx: Any, question: str, depth: str | None = None
+def run(ctx: Any, question: str, depth: str | None = None, earlier: str = "", plan_out: dict | None = None
         ) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[str]]:
     """(sources that answer it -- or everything read, if nothing clearly did --, all search results,
-    notes on the context learned along the way)."""
+    notes on the context learned along the way). plan_out gets the question broken down (goal, context,
+    terms)."""
     import time as _time
     from .partials.web import html_to_text, page_links, request_website
     started = _time.time()
@@ -477,10 +498,22 @@ def run(ctx: Any, question: str, depth: str | None = None
     results_all: list[dict[str, str]] = []
     notes: list[str] = []
 
-    plan = understand(ctx, question)
+    plan = understand(ctx, question, earlier)
+    if plan_out is not None:
+        plan_out.update(plan)
     goal, terms = plan["goal"], plan["terms"]
     ctx.think(f"Question: {goal}" + (f"\nContext: {', '.join(plan['context'])}" if plan["context"] else "") +
               (f"\nTo look up: {', '.join(terms)}" if terms else ""))
+    # your own sources for this kind of question first (Agents > Custom sources)
+    from . import custom_sources
+    wikis: set[str] = set()
+    hosts: list[str] = []
+    for site in custom_sources.pick(ctx, question, plan):
+        done = custom_sources.read(ctx, site, goal, terms, sources, seen, per_page, wikis)
+        if done:
+            ctx.think(f"Your source answers it ({', '.join(s['title'] for s in done)}).")
+            return done, results_all, notes
+        hosts.append(custom_sources.host(site["url"]))
     wiki = None
     for subject in plan["context"]:
         ctx.check_cancelled()
@@ -489,11 +522,14 @@ def run(ctx: Any, question: str, depth: str | None = None
     if guess:
         # only for searching: an unconfirmed guess in the answer's context got said as if it were a fact
         ctx.think(f"Probably: {guess}")
-    if wiki:
+    if wiki and wiki not in wikis:
         done = read_wiki(ctx, wiki, goal, terms, guess, queries, sources, seen, per_page)
         if done:
             ctx.think(f"That answers it ({', '.join(s['title'] for s in done)}).")
             return done, results_all, notes
+    if hosts:                                      # then search inside your sources before the whole web
+        within = " ".join(terms) or (queries[0] if queries else goal)
+        queries = [f"site:{h} {within}" for h in dict.fromkeys(hosts)] + queries
 
     if ctx.engine.wikipedia is not None and ctx.engine.wikipedia.available() and not sources:
         try:
@@ -513,7 +549,7 @@ def run(ctx: Any, question: str, depth: str | None = None
             except FunctionError as exc:
                 ctx.think(f"  search failed: {exc}")
         fresh = []
-        for r in rank(found, goal + " " + " ".join(queries)):
+        for r in rank(found, goal + " " + " ".join(queries), prefer=hosts):
             u = r.get("url", "")
             if u and u not in seen and u not in (x.get("url") for x in fresh):
                 fresh.append(r)

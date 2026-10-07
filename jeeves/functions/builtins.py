@@ -28,7 +28,8 @@ CONTROL_ACTIONS_DOC = (
     "separate, with timestamps -- for the last customizable amount of time (1 hour by default).",
     args=[Arg("action", "string", "What to do", choices=["summarize", "ask", "start", "stop", "status"]),
           Arg("minutes", "number", "How far back to look", required=False, default=None),
-          Arg("question", "string", "For 'ask': the question about what was said", required=False, default="")],
+          Arg("question", "string", "For 'ask': the question about what was said", required=False, default="",
+              said=True)],
     how="While on, the wake word model is off and agent names are found in the continuous transcript instead. "
         "Summaries and questions are answered by the local response model from the log.",
     keywords=["summary", "summarize", "what did", "recap"],
@@ -54,21 +55,19 @@ def summary(ctx, action, minutes=None, question=""):
     log_text = s.text(window)
     if not log_text.strip():
         return ctx.say("Nothing has been said in that time.")
+    system = f"What was said (timestamps; [mic] = the user, [desktop] = computer audio):\n{log_text}"
     if action == "ask" and question:
-        prompt = f"Transcript (timestamps, [mic] = the user, [desktop] = computer audio):\n{log_text}\n\n" \
-                 f"Answer from the transcript only: {question}"
+        system = "Answer the user's question from this transcript only.\n\n" + system
+        prompt = str(question)
     else:
-        prompt = (f"Transcript ([mic] = the user, [desktop] = computer audio):\n{log_text}\n\n"
-                  "Summarize it so someone who missed it understands: the main topics, what was decided or "
-                  "asked, and anything important (names, numbers, plans) -- explained in a few plain sentences, "
-                  "not just a list of keywords.")
-    return ctx.say(ctx.call("generate_text", prompt=prompt))
+        prompt = ("Summarize it for someone who missed it: the main topics, what was decided or asked, and anything "
+                  "important (names, numbers, plans), in a few plain sentences.")
+    return ctx.say(ctx.call("generate_text", prompt=prompt, system=system))
 
 
 @full(
     "extended_prompt_mode",
-    "Keeps listening past pauses until you say 'End extended prompt mode', then handles everything you said "
-    "as one request.",
+    "Keeps listening past pauses until you say 'end extended prompt mode', then handles it all as one request.",
     keywords=["extended prompt mode", "start extended prompt"],
     examples=["Jeeves, extended prompt mode."],
     how="The end phrase is the first keyword with 'end' in front, e.g. 'end extended prompt mode'.",
@@ -85,7 +84,7 @@ def extended_prompt_mode(ctx):
     "Sends the request to an online AI and reads its answer: GPT through Codex CLI, Gemini through a free "
     "API key, Claude and Grok through the Jeeves browser.",
     args=[Arg("agent", "string", "Which online AI", choices=ONLINE_AGENTS),
-          Arg("prompt", "string", "The request to send, cleaned up (without the wake word or the online AI's name)")],
+          Arg("prompt", "string", "The request to send (what you said, without 'ask Gemini')", said=True)],
     how="Codex and Gemini answer directly. For Claude and Grok the indicator flashes white: click it, and the "
         "Jeeves browser opens with the request filled in; press send, then the site's copy button -- Jeeves "
         "reads the answer from the clipboard.",
@@ -111,8 +110,8 @@ def online_prompt(ctx, agent, prompt):
     "Controls the computer with a virtual keyboard, mouse and controller: move the mouse, press and release "
     "mouse buttons and keys, type, scroll.",
     args=[Arg("actions", "list", CONTROL_ACTIONS_DOC, required=False, default=None),
-          Arg("instruction", "string", "Plain-language instruction to plan actions for, when actions aren't "
-              "given (e.g. 'click the Save button')", required=False, default="")],
+          Arg("instruction", "string", "What to do, as said (planned into actions when none are given)",
+              required=False, default="", said=True)],
     how="The Abort key stops it and releases every key and button it is holding.",
     keywords=["press", "click", "hold", "type", "move the mouse", "scroll"],
     examples=['Jeeves, hold W. -> actions [{"do":"key","key":"KEY_W","state":"down"}]',
@@ -141,15 +140,14 @@ def control_mode(ctx, actions=None, instruction=""):
 
 @full(
     "screen_reading",
-    "Looks at the screen: reads the text on it (all of it or one area), answers questions about what's shown "
-    "(an error message, a page, a dialog), or says where something is.",
-    args=[Arg("question", "string", "What the user wants to know or have read, as said", required=False,
-              default=""),
-          Arg("region", "region", "Where to look: anywhere, top, bottom, left, right, middle, top-left, ...",
+    "Questions about what's on the screen: reads it out, explains an error, page or dialog, or says where "
+    "something is.",
+    args=[Arg("question", "string", "What you want to know or have read, as said", required=False, default="",
+              said=True),
+          Arg("region", "region", "Part of the screen: anywhere, top, bottom, left, right, middle, top-left, ...",
               required=False, default="anywhere"),
-          Arg("find", "string", "Something to locate on screen (instead of reading)", required=False, default=""),
-          Arg("screen", "string", "Which monitor: current (the one you're working on), all, primary, left, right, "
-              "other, or a monitor name. Finding something searches all of them unless one is named.",
+          Arg("find", "string", "Something to locate (instead of reading)", required=False, default=""),
+          Arg("screen", "string", "Which monitor: all, current, primary, left, right, other or its name",
               required=False, default="")],
     how="Takes a screenshot and reads it with OCR (Tesseract), finds the part the question is about, zooms in "
         "and reads just that again, then has the local response model (or the vision model, shown the zoomed-in "
@@ -255,14 +253,15 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
             answer = _look_with_vision(ctx, vision, q, text, sc.crop_jpeg(shot, area), app)
         if answer is None and text:
             answer = ctx.engine.models.respond(
-                ctx.agent,
-                f"The rest of the screen at a glance (rough, only to understand the layout):\n{_glance(blocks, picked)}"
-                f"\n\n{app}The part of the screen that matters, read closely (OCR: fix obvious misreadings silently, "
-                f"skip anything garbled -- never read it out):\n{text[:5000]}\n\n"
-                f"The user said: {q}\n\nWork out what the screen shows -- which app, what kind of list or view, what "
-                "belongs to what -- then answer that. To read something out, read it naturally and in order, "
-                "skipping usernames, timestamps, buttons and menus unless they matter; summarize when that serves "
-                "them better. If it isn't there, say so. Don't describe anything they didn't ask about.",
+                ctx.agent, q, system=(
+                    "Answer the user's question about their screen from the text read off it below (by OCR: fix "
+                    "obvious misreadings silently and skip garbled bits, never read them out). Work out what it "
+                    "shows -- which app, what kind of list or view, what belongs to what. To read something out, "
+                    "read it naturally and in order, skipping usernames, timestamps, buttons and menus unless they "
+                    "matter, or summarize when that serves them better. If it isn't there, say so. Don't describe "
+                    f"anything they didn't ask about.\n\n{app}The part of the screen that matters, read closely:\n"
+                    f"{text[:5000]}\n\nThe rest of the screen at a glance (rough, only for the layout):\n"
+                    f"{_glance(blocks, picked)}"),
                 ctx=ctx, temperature=0.3, kind="answer")
         if answer:
             return ctx.say(answer)
@@ -439,13 +438,12 @@ def _pick_blocks(ctx, question: str, blocks: list[dict], app: str) -> list[dict]
     outline = "\n".join(lines)
     reply = ctx.engine.models.respond(
         ctx.agent,
-        f"Text found on the user's screen, as numbered blocks (where each is; * = in the window they're using):\n"
-        f"{outline}\n\n{app}The user asked: {question or 'read my screen'}\n\nWhich blocks are needed to answer? "
-        "List their numbers in the order they should be read (a conversation oldest to newest, unless they asked "
-        "about the latest message). When the answer is a list under a header (people under a role, users in a voice "
-        "channel), pick the header AND the entries under it. Leave out anything unrelated -- menus and sidebars "
-        "too, unless the question is about what's in them. Reply with the numbers only, "
-        "like: 4, 7, 2. Reply ALL to read everything in the window they're using, or NONE if nothing fits.",
+        f"Text on the user's screen, as numbered blocks (where each is; * = in the window they're using):\n"
+        f"{outline}\n\n{app}Question: {question or 'read my screen'}\n\nWhich blocks are needed to answer it? "
+        "Reply with their numbers only, in reading order, like: 4, 7, 2 (a conversation oldest to newest unless "
+        "they asked for the latest). For a list under a header (people under a role or in a voice channel), "
+        "include the header and its entries. Leave out unrelated blocks, menus and sidebars unless they're "
+        "asked about. Reply ALL for everything in the window they're using, or NONE if nothing fits.",
         ctx=None, raw=True, temperature=0.0, max_tokens=60)
     if reply is not None:
         ctx.think(f"Looking at blocks: {reply.strip()[:80]}")
@@ -477,14 +475,14 @@ def _look_with_vision(ctx, vision, question: str, text: str, image: bytes | None
     if not image:
         return None
     try:
-        prompt = (f"This is the part of the user's screen that matters, at full resolution.\n{app}"
-                  f"Text read from it (may have small mistakes):\n{text[:3000] or '(none)'}\n\n"
-                  f"The user said: {question}\n\nAnswer from what you see. If they asked you to read something, "
-                  "read it naturally, skipping usernames, timestamps and buttons unless they matter. Plain spoken "
-                  "sentences.")
-        messages = [{"role": "user", "content": image_parts([("crop", image)]) + [{"type": "text", "text": prompt}]}]
+        system = ("The image is the part of the user's screen their question is about. Answer from what you see; "
+                  "to read something out, read it naturally, skipping usernames, timestamps and buttons unless they "
+                  "matter. Your reply is spoken: plain sentences.\n\n"
+                  f"{app}Text read from it (may have small mistakes):\n{text[:3000] or '(none)'}")
         if persona.has_persona(ctx.agent):
-            messages.insert(0, {"role": "system", "content": persona.identity_block(ctx.agent)})
+            system = persona.identity_block(ctx.agent) + "\n\n" + system
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": image_parts([("crop", image)]) + [{"type": "text", "text": question}]}]
         return (vision.chat(messages, max_tokens=int(ctx.settings.get("models.local_response.max_tokens", 512)),
                             temperature=0.3, cancelled=ctx.is_cancelled) or "").strip() or None
     except Exception as exc:  # noqa: BLE001 -- fall back to the text answer
@@ -523,15 +521,15 @@ def _describe_position(ctx, x: int, y: int, outs: list | None = None) -> str:
 
 @full(
     "watch_screen",
-    "Watches the screen live (only when asked): comments on what happens and answers questions about it. "
-    "Also stops watching.",
+    "Watches the screen live and comments until told to stop (only when asked to watch). Also stops "
+    "watching.",
     args=[Arg("action", "string", "start or stop", required=False, default="start", choices=["start", "stop"]),
           Arg("screen", "string", "Which monitor: all (default), current, left, right, primary, other or a name",
               required=False, default="all"),
-          Arg("talkativeness", "number", "0 = silent (questions only) .. 1 = full commentary", required=False,
+          Arg("talkativeness", "number", "0 = only answers questions .. 1 = full commentary", required=False,
               default=None),
-          Arg("focus", "string", "Something to watch for and mention, e.g. 'when the download finishes'",
-              required=False, default="")],
+          Arg("focus", "string", "Something to watch for, e.g. 'when the download finishes'", required=False,
+              default="")],
     how="Captures the screen every couple of seconds, skips unchanged frames, and looks at changed ones with the "
         "vision model (Models > Vision) or, without one, through OCR. Runs until 'stop watching', Close on its "
         "indicator, or Abort.",
@@ -575,8 +573,8 @@ VIDEO_ACTIONS = ["play", "pause", "resume", "stop", "forward", "back", "louder",
 
 @full(
     "youtube",
-    "Finds a YouTube video -- even vaguely described, like 'the newest video from moist critikal' -- and plays it "
-    "in the Jeeves video player. Also pauses, resumes, skips, changes volume or closes the video.",
+    "Plays a YouTube video, even vaguely described ('the newest video from moist critikal'). Also pauses, "
+    "resumes, skips, changes the volume or closes it.",
     args=[Arg("action", "string", "What to do", required=False, default="play", choices=VIDEO_ACTIONS),
           Arg("query", "string", "What the video is about / its title (for play)", required=False, default=""),
           Arg("channel", "string", "Whose channel (for play), as said", required=False, default=""),
@@ -620,8 +618,8 @@ def youtube(ctx, action="play", query="", channel="", newest=False, seconds=None
 
 @full(
     "local_response",
-    "Answers with the local AI model. This is the default when no other function fits.",
-    args=[Arg("prompt", "string", "The request, as said")],
+    "Talks: answers, explains, jokes, gives opinions -- anything no other function fits.",
+    args=[Arg("prompt", "string", "The request, as said", said=True)],
     how="Uses the Local AI Model for Full Responses with the agent's default prompt and recent memory.",
     keywords=["tell me", "what", "who", "why", "how", "explain"],
     examples=["Claude, what is the meaning of life?"],
@@ -687,7 +685,7 @@ def macros(ctx, action, name="", description="", arguments=None):
 
 @full(
     "timers",
-    "Sets timers and schedules, lists or cancels them. A schedule can also run a request at a time.",
+    "Timers and alarms; a schedule can also run a request at a time. Also lists or cancels them.",
     args=[Arg("action", "string", "What to do", choices=["timer", "schedule", "list", "cancel"]),
           Arg("duration", "duration", "For timer: how long", required=False, default=""),
           Arg("time", "time", "For schedule: when", required=False, default=""),
@@ -735,11 +733,10 @@ ACKS = ["Let me look that up.", "One moment, I'll check.", "Looking into it.", "
 
 @full(
     "research",
-    "Looks things up: searches the web (and the offline Wikipedia, if downloaded), reads the best pages and "
-    "answers from them, saying where the answer came from. Use for current events, facts you're unsure of, "
-    "prices, releases, scores, anything that needs looking up.",
-    args=[Arg("question", "string", "What to find out, as a full question"),
-          Arg("depth", "string", "How hard to dig: quick, normal or deep (default: the Research setting)",
+    "Looks it up online and answers from what it reads: facts about games, products, people, places, news, "
+    "prices, releases -- anything that needs looking up.",
+    args=[Arg("question", "string", "What to find out, as said", said=True),
+          Arg("depth", "string", "How hard to dig (default: the Research setting)",
               required=False, default="", choices=["", "quick", "normal", "deep"])],
     how="The indicator turns blue (researching); click it to see the pages being read. The local response "
         "model writes the answer from what it read.",
@@ -753,41 +750,41 @@ def research(ctx, question, depth=""):
     from .research import best_of, fit, run, wants_estimate
     if ctx.dry_run:
         return f"<researched answer to: {question}>"
-    question = str(question)
+    question = str(question).strip()
     ctx.say(random.choice(ACKS))                 # looking things up takes a while: say so right away
-    original = ctx.engine.intent.strip_address(ctx.agent, ctx.entry.get("text") or "") or question
+    earlier = _earlier_exchange(ctx, question)   # "why is that?" is about the last answer
+    plan: dict = {}
     try:
-        sources, _, notes = run(ctx, question, depth or None)
+        sources, _, notes = run(ctx, question, depth or None, earlier=earlier, plan_out=plan)
     except FunctionError as exc:
         ctx.think(f"Research failed: {exc}")
         sources, _, notes = [], [], []
-    learned = ("Background you looked up first:\n" + "\n".join(f"- {n}" for n in notes) + "\n\n") if notes else ""
+    goal = plan.get("goal") or question
+    estimate = wants_estimate(f"{question} {goal}")
+    before = f"Just before, {earlier}\n\n" if earlier else ""
+    background = ("Background:\n" + "\n".join(f"- {n}" for n in notes) + "\n\n") if notes else ""
     if not sources:                              # nothing online: answer from what it knows, and say so
         reply = ctx.engine.models.respond(
-            ctx.agent, f"{learned}{original}\n\n(You couldn't look this up online just now. " + (
-                "They asked for an estimate: give your best concrete estimate from what you know, with the reasoning "
-                "in a sentence, and say you couldn't check it online.)" if wants_estimate(original + " " + question) else
-                "If you genuinely know the answer, give it and say briefly that you couldn't check it. If it's about "
-                "something specific you don't clearly know -- a particular game's moves or items, a small community, "
-                "a recent event -- do NOT guess or make something up: say you couldn't look it up and don't know.)"),
-            ctx=ctx, temperature=0.3)
+            ctx.agent, question, system=before + background + "You couldn't look this up online just now. " + (
+                "Give your best concrete estimate from what you know, with the reasoning in a sentence, and say "
+                "you couldn't check it online." if estimate else
+                "If you know the answer, give it and say you couldn't check it online. If it's about something "
+                "specific you don't clearly know (a particular game's moves or items, a small community, a recent "
+                "event), say you couldn't look it up -- don't guess."),
+            ctx=ctx, temperature=0.3, kind="answer")
         if reply is None:
             raise FunctionError("I couldn't look that up online, and I don't know it myself")
         return ctx.say(reply)
-    sources = best_of(sources, f"{original} {question}")
+    sources = best_of(sources, f"{question} {goal}")
     ctx.trace("sources", sources=[{"title": s["title"], "url": s["url"]} for s in sources])
-    material = fit(sources, 9000)
     ctx.state("thinking", "Writing the answer")
-    asked = original if original.strip().lower() == question.strip().lower() else f"{original}\n(Meaning: {question})"
+    rules = (f"Answer the user's question from the sources below. {_answer_shape(question + ' ' + goal)} Use only "
+             "sources about the right thing (the same game, item or person) and nothing they don't say" +
+             ("; where they don't state it, estimate from what they do say." if estimate else
+              "; if they don't answer it, say so in a sentence.") +
+             " No background or history unless asked. Put the source's number after each fact, like [2].")
     answer = ctx.engine.models.respond(
-        ctx.agent,
-        f"Sources:\n{material}\n\n{learned}The user asked: {asked}\n\n"
-        "Answer exactly that from these sources, nothing more. Skip any source that's about something else (another "
-        "game, item or person); if none of them answer it, say you couldn't find it"
-        f"{' -- unless they asked for an estimate, then estimate from what you have' if wants_estimate(original + ' ' + question) else ''}. "
-        f"{_answer_shape(original + ' ' + question)} No history, background or general information unless they "
-        "asked for it. After each fact put the number of its source in square brackets, like [2]. Never add "
-        "anything the sources don't say; if they only partly answer it, say in one sentence what's missing.",
+        ctx.agent, question, system=f"{rules}\n\n{before}{background}Sources:\n{fit(sources, 9000, urls=False)}",
         ctx=ctx, temperature=0.3, kind="answer")
     if answer is None:
         # no answer from the model: never read a raw snippet out as if it were one (that's how a line
@@ -805,16 +802,27 @@ def research(ctx, question, depth=""):
     return spoken
 
 
+def _earlier_exchange(ctx, question: str) -> str:
+    """For a follow-up ("why is that?"): what was asked and answered just before, in a sentence."""
+    try:
+        mine, _ = ctx.engine.models.earlier_turns(ctx.agent, question, ctx)
+    except Exception:  # noqa: BLE001 -- no history to look at (tests, dry runs)
+        return ""
+    if not mine:
+        return ""
+    r = mine[-1]
+    return f"they asked \"{r['text']}\" and you answered \"{r['result']}\"."
+
+
 def _answer_shape(question: str) -> str:
     from .research import kind_of, wants_estimate
     if wants_estimate(question):
-        return ("They want an estimate: give a concrete best estimate (a number or range) in the first sentence, "
-                "then the one or two facts from the sources it rests on, and say plainly it's an estimate. Reason "
-                "from what the sources say and general knowledge -- never refuse because nothing states it exactly.")
+        return ("They want an estimate: give it first (a number or range), then the one or two facts it rests on, "
+                "and say it's an estimate -- never refuse because nothing states it exactly.")
     if kind_of(question) == "howto":
-        return ("They want to know how to do it: give the steps in order, as short plain sentences (2 to 5), with "
-                "the exact keys, timings or requirements the sources give.")
-    return "Give the answer in the first sentence, then at most two sentences of the detail that matters most."
+        return ("They want to know how to do it: give the steps in order in 2 to 5 short sentences, with the exact "
+                "keys, timings or requirements.")
+    return "Give the answer first, then at most two sentences of the detail that matters most."
 
 
 def show_sources(ctx, question: str, answer: str, sources: list[dict]) -> None:
@@ -828,8 +836,7 @@ def show_sources(ctx, question: str, answer: str, sources: list[dict]) -> None:
 
 @full(
     "handoff",
-    "Passes information to another agent. The sending agent sees the receiving agent's enabled functions and "
-    "tells it whatever is relevant. Only used when you clearly ask for it.",
+    "Passes a request or information to another agent, only when you ask to involve it.",
     args=[Arg("to", "agent", "The agent to hand off to"),
           Arg("message", "string", "What to ask or tell the other agent, including the relevant context")],
     how="Which agents an agent may talk to is set per agent. Recent conversation is included automatically.",

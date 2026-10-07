@@ -103,3 +103,31 @@ def test_command_editor_round_trip(qapp):
     assert [a["name"] for a in got["args"]] == ["message", "branch"]
     card.command.setText("nixos-rebuild switch --flake ~/nix#{host}")
     assert lst.value()[0]["args"][0]["description"] == "which machine"     # remembered while typing
+
+
+def test_agents_page_keeps_commands_jeenius_and_custom_sources(qapp):
+    from jeeves.config import default_agent
+    from jeeves.gui.common import install_theme
+    install_theme()
+    from jeeves.gui.pages_agents import AgentsPage
+
+    class Daemon:
+        def call(self, *a, **kw):
+            pass
+    page = AgentsPage(Daemon())
+    agent = default_agent("Jeeves")
+    agent.update(jeenius=3, custom_sources={"enabled": True, "sites": [
+        {"url": "https://parkour-reborn.fandom.com/wiki/Movement",
+         "about": "Parkour Reborn Movement Wiki, for information on any movement techniques"}]})
+    page.agents = {"jeeves": agent}
+    page.picker.addItem("Jeeves", "jeeves")
+    page.select("jeeves")
+    got = page._collect()
+    assert got["jeenius"] == 3 and got["custom_sources"] == agent["custom_sources"]
+    page.sources_edit.setPlainText(page.sources_edit.toPlainText() + "\nwhite-knuckle.wiki.gg = White Knuckle wiki\nnope")
+    assert "line 3 has no web address" in page.sources_status.text().lower()
+    sites = page._collect()["custom_sources"]["sites"]
+    assert [s["url"] for s in sites] == ["https://parkour-reborn.fandom.com/wiki/Movement",
+                                         "https://white-knuckle.wiki.gg"]
+    page.sources_on.setChecked(False)
+    assert page._collect()["custom_sources"]["enabled"] is False

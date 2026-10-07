@@ -72,10 +72,11 @@ def test_memory_limits_and_own_only(engine):
     engine.memory.add("jeeves note", agent="jeeves")
     engine.memory.add("other note", agent="friday")
     engine.memory.add("latest", agent="friday")
-    assert "jeeves note" not in engine.memory.context_for("jeeves", limit=2)
-    own = engine.memory.context_for("jeeves", limit=10, own_only=True)
+    about = "what notes do you have"                     # asks about memory: every note it may see
+    assert "jeeves note" not in engine.memory.context_for("jeeves", limit=2, about=about)
+    own = engine.memory.context_for("jeeves", limit=10, own_only=True, about=about)
     assert "jeeves note" in own and "other note" not in own
-    assert engine.memory.context_for("jeeves", limit=0) == ""
+    assert engine.memory.context_for("jeeves", limit=0, about=about) == ""
 
 
 def test_remember_refused_when_memory_off(engine):

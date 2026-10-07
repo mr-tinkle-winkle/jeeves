@@ -1560,9 +1560,10 @@ class Engine:
         enabled = {f.name for f in self.registry.enabled_for(ctx.agent)} - skip
         core = self.intent.strip_address(ctx.agent, text)
         if "research" in enabled and looks_factual(core, ctx.agent):
-            return Decision("research", {"question": core, "depth": "quick"}, 0.6, "", "fallback")
+            return self.intent.with_said(Decision("research", {"depth": "quick"}, 0.6, "", "fallback"),
+                                         ctx.agent, text)
         if "local_response" in enabled:
-            return Decision("local_response", {"prompt": text}, 0.5, "", "fallback")
+            return self.intent.with_said(Decision("local_response", {}, 0.5, "", "fallback"), ctx.agent, text)
         return Decision(None, {}, 0.0, "", "fallback")
 
     def _clarifying_question(self, ctx: FunctionContext, text: str) -> str:

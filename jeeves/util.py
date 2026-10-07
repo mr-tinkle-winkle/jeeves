@@ -209,6 +209,52 @@ def truncate(text: str, n: int = 400) -> str:
 
 
 # ---------------------------------------------------------------------------
+# What a model needs to see besides the request
+# ---------------------------------------------------------------------------
+
+_BACK = re.compile(r"\b(you (just )?said|said that|that again|(i|you) just (made|said|did|played|opened|asked)|the one "
+                   r"(i|you)|that one|the same|the last one|the previous|earlier|instead|tell me more|more about "
+                   r"(it|that|this|them)|why('s| is| was)? (that|it)|how come|go on|elaborate|explain (that|it|this)|what "
+                   r"do you mean|what about|how about|what else|such as|like what)\b", re.I)
+_PRONOUN = re.compile(r"\b(it|that|this|those|these|them|they|he|she|him|her|there|one|again)\b", re.I)
+
+
+def refers_back(text: str) -> bool:
+    """Whether a request leans on what was said before ("why is that?", "play it again", "and the
+    second one?", "is he still alive?"). Only then are earlier turns worth showing a model: otherwise
+    a small model answers them, or mixes them into the answer, instead of the question. A whole
+    question that only uses a pronoun for something it names itself ("... on their first try") doesn't."""
+    t = text.strip().lower()
+    words = re.findall(r"[\w']+", t)
+    if not words:
+        return False
+    if words[0] in ("and", "but", "so", "also", "then", "or") or _BACK.search(t):
+        return True
+    if re.search(r"\bwhat (time|day|date|year|month) is it\b|\bis it (raining|sunny|cold|hot|late)\b", t):
+        return False                                  # "it" with nothing to refer to
+    if len(words) <= 2 and words[0] in ("why", "really", "how", "what", "huh", "seriously", "wait"):
+        return True                                   # "why?", "really?", "how so?"
+    return len(words) <= 6 and bool(_PRONOUN.search(t)) and len(content_words(t)) <= 2
+
+
+_COMMON = set("the a an and or of to in on for with what which who whom whose when where why how is are was "
+              "were be been being do does did can could should would will shall may might must i me my mine you "
+              "your yours it its this that these those there here about from at by as into than then them they "
+              "we our us he him his she her please tell know find out get got have has had just like some any all "
+              "not no yes so if but one thing things something anything really very much more most also too"
+              .split())
+
+
+def content_words(text: str) -> set[str]:
+    """The words that carry meaning ("my dog's name" -> {dog, name}), plurals folded."""
+    out = set()
+    for w in re.findall(r"[a-z0-9]+", text.lower()):
+        if len(w) > 2 and w not in _COMMON:
+            out.add(w[:-1] if len(w) > 4 and w.endswith("s") and not w.endswith("ss") else w)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # How alike two words sound (no pronunciation dictionary needed)
 # ---------------------------------------------------------------------------
 

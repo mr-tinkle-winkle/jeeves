@@ -497,13 +497,16 @@ def test_research_reads_pages_and_answers(engine, monkeypatch):
         return f"The answer at {url} is 42. " * 20
     monkeypatch.setattr(web, "request_website", fake_site)
     prompts = []
-    engine.models.respond = lambda agent, prompt, **kw: prompts.append(prompt) or "It's 42, according to Site A."
+    engine.models.respond = lambda agent, prompt, **kw: prompts.append((prompt, kw.get("system", ""))) or \
+        "It's 42, according to Site A."
     res = engine.handle_text("Jeeves, look up the answer to everything", wait=True)
     entry = engine.history.get(res["id"])
     assert entry["function"] == "research" and entry["args"]["question"] == "the answer to everything"
     assert entry["response"] == "It's 42, according to Site A."
     assert read == ["https://a.example", "https://b.example"]
-    assert "[1] Site A" in prompts[-1] and "[2] Site B" in prompts[-1]
+    question, material = prompts[-1]
+    assert question == "the answer to everything"                    # the question alone, as said
+    assert "[1] Site A" in material and "[2] Site B" in material
     assert any(t["kind"] == "stage" and t["stage"] == "researching" for t in entry["trace"])
 
 
@@ -759,3 +762,69 @@ def test_one_request_at_a_time_per_agent(engine, monkeypatch):
     while _t.time() < deadline and "what's the weather" not in started:
         _t.sleep(0.02)
     assert "what's the weather" in started and second["id"] != third["id"]
+
+
+def test_the_request_reaches_the_function_as_said_not_reworded(engine, monkeypatch):
+    """The intent model only picks the function (and things like a timer's length): what the user asked
+    goes to the answering model in their own words, not the intent model's rewording of it."""
+    calls = []
+
+    class Intent:
+        def __init__(self, reply):
+            self.reply = reply
+
+        def chat(self, messages, **kw):
+            calls.append(messages)
+            return self.reply
+    agent = dict(engine.agents()["jeeves"], id="jeeves")
+    cases = [
+        ('{"function": "local_response", "args": {"prompt": "Tell me a funny joke about cheese, keep it short '
+         'and in character"}}', "Jeeves, tell me a joke about cheese", {"prompt": "tell me a joke about cheese"}),
+        ('{"function": "research", "args": {"question": "White Knuckle campaign completion statistics", '
+         '"depth": "deep"}}', "Jeeves, look up how many people finish white knuckle",
+         {"question": "how many people finish white knuckle", "depth": "deep"}),
+    ]
+    for reply, text, want in cases:
+        monkeypatch.setattr(engine.models, "llm", lambda kind, agent=None, r=reply: Intent(r))
+        d = engine.intent.decide(agent, text)
+        assert {k: d.args[k] for k in want} == want
+    system, user = calls[0][0]["content"], calls[0][-1]["content"]
+    assert user == "tell me a joke about cheese"                      # no name, nothing added
+    local = system.split("### local_response")[1].split("###")[0]
+    assert "- prompt" not in local                                    # it isn't asked to write the request
+    assert "confidence" not in system
+
+
+def test_said_text_drops_only_the_words_that_pick_the_function(engine):
+    agent = dict(engine.agents()["jeeves"], id="jeeves")
+    reg = engine.registry
+    said = engine.intent.said_text
+    assert said(reg.get("research"), agent, "Jeeves, could you look up when the next patch comes out") == \
+        "when the next patch comes out"
+    assert said(reg.get("online_prompt"), agent, "Jeeves, ask Gemini what the tallest building is") == \
+        "what the tallest building is"
+    assert said(reg.get("local_response"), agent, "Jeeves, can you tell me a joke") == "can you tell me a joke"
+    assert said(reg.get("control_mode"), agent, "Jeeves, could you type hello world please") == "type hello world"
+
+
+def test_the_answering_model_gets_the_question_and_nothing_unrelated(engine, monkeypatch):
+    """End to end: a reworded request from the intent model, a note and an earlier request about other
+    things -- the answering model sees the character, how to reply, and the question as it was said."""
+    chats = []
+
+    class LLM:
+        def chat(self, messages, json_mode=False, **kw):
+            chats.append(messages)
+            if json_mode:
+                return '{"function": "local_response", "args": {"prompt": "Tell me a funny cheese joke, in character"}}'
+            return "What cheese is made backwards? Edam, sir."
+    monkeypatch.setattr(engine.models, "llm", lambda kind, agent=None: LLM())
+    monkeypatch.setattr(engine.models, "vision_llm", lambda agent=None: None)
+    engine.speak = lambda ctx, t: None
+    engine.memory.add("my dog is called Biscuit", permanent=True, agent="jeeves")
+    engine.handle_text("Jeeves, set a timer for 5 minutes", wait=True)
+    engine.handle_text("Jeeves, tell me a joke about cheese", wait=True)
+    answer = chats[-1]
+    assert [m["role"] for m in answer] == ["system", "user"]
+    assert answer[-1]["content"] == "tell me a joke about cheese"
+    assert "Biscuit" not in answer[0]["content"] and "timer" not in answer[0]["content"]

@@ -16,11 +16,11 @@ def _agent(engine, **kw):
     return a
 
 
-def test_character_comes_first_and_is_repeated_last(engine):
+def test_character_comes_first_and_the_request_is_left_as_said(engine):
     msgs = engine.models.build_messages(_agent(engine), "what's the weather like?")
-    assert msgs[0]["role"] == "system" and msgs[0]["content"].startswith("You are Jeeves.")
-    assert "<character>" in msgs[0]["content"] and "takes priority" in msgs[0]["content"]
-    assert msgs[-1]["role"] == "user" and msgs[-1]["content"].endswith("(Reply as Jeeves, fully in character.)")
+    assert msgs[0]["role"] == "system" and msgs[0]["content"].startswith("You are Jeeves, a dry-witted")
+    assert "Stay in character" in msgs[0]["content"]
+    assert msgs[-1] == {"role": "user", "content": "what's the weather like?"}     # nothing tacked on
 
 
 def test_raw_requests_have_no_character(engine):
@@ -35,7 +35,7 @@ def test_other_agents_replies_are_not_its_own_turns(engine):
     engine.settings.set("agents.friday", default_agent("Friday", prompt="Bubbly and casual."))
     for agent, text, result in (("friday", "tell me a joke", "omg ok so like"), ("jeeves", "time?", "Noon, sir.")):
         e = new_entry(text, agent, "text")
-        e["response"] = result
+        e["response"], e["function"] = result, "local_response"
         engine.history.add(e)
         engine.history.finish(e)
     a = _agent(engine)
@@ -43,7 +43,49 @@ def test_other_agents_replies_are_not_its_own_turns(engine):
     msgs = engine.models.build_messages(a, "and now?", ctx=ctx, with_memory=True)
     assistant = [m["content"] for m in msgs if m["role"] == "assistant"]
     assert assistant == ["Noon, sir."]                      # only its own past replies
-    assert "omg ok so like" in msgs[0]["content"] and "not you" in msgs[0]["content"]
+    assert "omg ok so like" not in msgs[0]["content"]        # Friday's only when asked about
+    msgs = engine.models.build_messages(a, "what did Friday just say?", ctx=ctx, with_memory=True)
+    assert "omg ok so like" in msgs[0]["content"] and not [m for m in msgs if m["role"] == "assistant"]
+
+
+def test_earlier_turns_only_for_a_follow_up(engine):
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    for text, fn, result in (("set a timer for 5 minutes", "timers", "Timer set."),
+                             ("what's the tallest mountain", "research", "Everest, sir [1].")):
+        e = new_entry(text, "jeeves", "text")
+        e["response"], e["function"] = result, fn
+        engine.history.add(e)
+        engine.history.finish(e)
+    a = _agent(engine)
+    ctx = FunctionContext(engine, "jeeves", a, new_entry("x", "jeeves", "text"))
+    fresh = engine.models.build_messages(a, "tell me a joke about cheese", ctx=ctx, with_memory=True)
+    assert [m["role"] for m in fresh] == ["system", "user"]
+    follow = engine.models.build_messages(a, "why is that?", ctx=ctx, with_memory=True)
+    assert follow[1:] == [{"role": "user", "content": "what's the tallest mountain"},
+                          {"role": "assistant", "content": "Everest, sir."},       # citation marks gone
+                          {"role": "user", "content": "why is that?"}]
+
+
+def test_only_notes_about_the_request_are_shown(engine):
+    for note in ("my dog is called Biscuit", "I play Satisfactory on weekends", "the wifi password is in the drawer"):
+        engine.memory.add(note, permanent=True, agent="jeeves")
+    assert engine.memory.context_for("jeeves", about="tell me a joke about cheese") == ""
+    dog = engine.memory.context_for("jeeves", about="what's my dog called?")
+    assert "Biscuit" in dog and "Satisfactory" not in dog and "wifi" not in dog
+    everything = engine.memory.context_for("jeeves", about="what do you remember about me?")
+    assert all(w in everything for w in ("Biscuit", "Satisfactory", "wifi"))
+
+
+def test_follow_ups_are_told_apart_from_whole_questions():
+    from jeeves.util import refers_back
+    for t in ("why is that", "why?", "tell me more", "play it again", "and the second one?", "is he still alive",
+              "what about Germany", "adjust the macro I just made"):
+        assert refers_back(t), t
+    for t in ("tell me a joke about cheese", "what time is it", "how do I do a wumpy in parkour reborn",
+              "what are the chances an average player beats a white knuckle campaign on their first try",
+              "is it going to rain tomorrow", "how old is tom cruise and what is his latest movie"):
+        assert not refers_back(t), t
 
 
 def test_out_of_character_reply_is_rewritten(engine, monkeypatch):
