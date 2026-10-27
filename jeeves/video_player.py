@@ -131,9 +131,9 @@ class VideoPlayer(QWidget):
             b.setFocusPolicy(Qt.NoFocus)
             return b
         self.play_btn = button("Pause", self.toggle, "Space")
-        self.pos = ChapterSlider()
-        self.pos.setFocusPolicy(Qt.NoFocus)
-        self.pos.sliderMoved.connect(self.seek_to)
+        self.seek_bar = ChapterSlider()
+        self.seek_bar.setFocusPolicy(Qt.NoFocus)
+        self.seek_bar.sliderMoved.connect(self.seek_to)
         self.time = QLabel("0:00 / 0:00")
         self.speed_btn = button("1×", self._speed_menu, "Speed (Shift+, / Shift+.)")
         self.quality_btn = button("Auto", self._quality_menu, "Quality")
@@ -145,12 +145,12 @@ class VideoPlayer(QWidget):
         self.vol.setFocusPolicy(Qt.NoFocus)
         self.vol.valueChanged.connect(self._volume)
         widgets = [self.play_btn, button("◀|", lambda: self.step_frame(-1), "Previous frame (,)"),
-                   button("|▶", lambda: self.step_frame(1), "Next frame (.)"), self.pos, self.time, self.speed_btn,
+                   button("|▶", lambda: self.step_frame(1), "Next frame (.)"), self.seek_bar, self.time, self.speed_btn,
                    self.quality_btn, self.chapters_btn, QLabel("Vol"), self.vol,
                    button("YouTube", self._open_page), button("Fullscreen", self.fullscreen, "F"),
                    button("Close", self.close, "Esc")]
         for w in widgets:
-            bar.addWidget(w, 1 if w is self.pos else 0)
+            bar.addWidget(w, 1 if w is self.seek_bar else 0)
         lay.addWidget(self.bottom)
 
         self.video = QMediaPlayer(self)
@@ -160,7 +160,7 @@ class VideoPlayer(QWidget):
         self.audio = QMediaPlayer(self)
         self.audio_out = QAudioOutput(self)
         self.audio.setAudioOutput(self.audio_out)
-        self.video.durationChanged.connect(lambda d: self.pos.setRange(0, int(d)))
+        self.video.durationChanged.connect(lambda d: self.seek_bar.setRange(0, int(d)))
         self.video.positionChanged.connect(self._tick)
         self.video.mediaStatusChanged.connect(self._status)
         self.video.errorOccurred.connect(lambda _e, msg: self.title.setText(f"Couldn't play it: {msg}"))
@@ -198,7 +198,7 @@ class VideoPlayer(QWidget):
         self.split = bool(d.get("audio"))
         self.fps = float(d.get("fps") or 30) or 30.0
         self.chapters = sorted(d.get("chapters") or [], key=lambda c: c.get("start", 0))
-        self.pos.chapters = self.chapters
+        self.seek_bar.chapters = self.chapters
         self.chapters_btn.setVisible(bool(self.chapters))
         self.heights = sorted({int(h) for h in d.get("heights") or [] if h}, reverse=True)
         self.height_now = int(d.get("height") or 0)
@@ -245,8 +245,8 @@ class VideoPlayer(QWidget):
             self.video.setPosition(a)
 
     def _tick(self, ms: int) -> None:
-        if not self.pos.isSliderDown():
-            self.pos.setValue(int(ms))
+        if not self.seek_bar.isSliderDown():
+            self.seek_bar.setValue(int(ms))
         self.time.setText(f"{fmt(ms)} / {fmt(self.video.duration())}")
         ch = self.chapter_at(ms)
         self.chapter.setText(ch.get("title", "") if ch else "")

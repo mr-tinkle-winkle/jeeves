@@ -338,7 +338,9 @@ def test_research_stops_at_the_page_that_answers_a_how_to(engine, monkeypatch):
     engine.speak = lambda ctx, t: said.append(t)
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
     ctx.call("research", question="how do I do a wumpy in parkour reborn", depth="deep")
-    assert "https://w/history" not in read                        # stopped once it had the steps
+    # stopped once it had the steps: the history page (loaded alongside, in the background) never reached
+    # the model
+    assert not any("named after a player" in p for p in prompts)
     assert [s["url"] for s in ctx.entry["sources"]] == ["https://w/guide"]
     assert "A page that only says what it is" in next(p for p in prompts if "actually answer" in p)
     final = prompts[-1]
@@ -380,8 +382,11 @@ def test_search_falls_back_when_duckduckgo_blocks(monkeypatch):
     class S:
         def get(self, k, d=None):
             return d
+    monkeypatch.setattr(web, "_failed_at", {})
     assert web.search(S(), "wumpy", 5, problems)[0]["url"] == "https://w/wumpy"
     assert calls == ["ddg", "mojeek"] and "bot check" in problems[0]
+    calls.clear()                             # it just refused: the next search asks Mojeek first
+    assert web.search(S(), "wumpy", 5, [])[0]["url"] == "https://w/wumpy" and calls == ["mojeek"]
 
 
 def test_result_page_parsers():
@@ -493,7 +498,7 @@ def test_research_learns_the_context_then_reads_the_games_wiki(engine, monkeypat
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"],
                           new_entry("how do I do a wumpy in parkour reborn", "jeeves", "text"))
     ctx.call("research", question="how do I do a wumpy in parkour reborn", depth="deep")
-    assert searched[0] == "Parkour Reborn"                               # the context first
+    assert "Parkour Reborn" in searched[:2]                              # the context first (two searches at once)
     assert wiki_queries and wiki_queries[0] == ("https://parkour-reborn.fandom.com", "wumpy")
     assert [s["title"] for s in ctx.entry["sources"]] == ["Wumpy"]      # straight to the article that answers it
     question, context = prompts[-1]

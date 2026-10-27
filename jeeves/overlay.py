@@ -385,6 +385,9 @@ def main(popups: bool = False) -> int:
                     self.hits.append((rect, "spinner", st["request"]))
                 label = st.get("agent_name") or ("Listening" if stage == "listening" else "")
                 detail = st.get("detail") or ""
+                if stage == "responding" and detail and self.response and time.time() < self.response_until and \
+                        (detail in self.response or self.response in detail):
+                    detail = ""                     # it's in the response box right below: not twice
                 text = f"{label}: {detail}" if detail and label else (detail or label)
                 self._label(p, rect, text, right)
                 y += size + 8
@@ -909,9 +912,9 @@ def main(popups: bool = False) -> int:
             self.next = CustomButton("›")
             self.prev.clicked.connect(lambda: self.step(1))
             self.next.clicked.connect(lambda: self.step(-1))
-            self.pos = QLabel("")
+            self.where = QLabel("")
             nav.addWidget(self.prev)
-            nav.addWidget(self.pos, 1, Qt.AlignCenter)
+            nav.addWidget(self.where, 1, Qt.AlignCenter)
             nav.addWidget(self.next)
             self.lay.addLayout(nav)
             self.title = self.heading("")
@@ -946,10 +949,10 @@ def main(popups: bool = False) -> int:
             if not self.items:
                 self.title.setText("No responses yet")
                 self.body.setPlainText("")
-                self.pos.setText("")
+                self.where.setText("")
                 return
             e = self.items[self.index]
-            self.pos.setText(f"{self.index + 1} of {len(self.items)}  ·  {time.strftime('%a %H:%M:%S', time.localtime(e['time']))}")
+            self.where.setText(f"{self.index + 1} of {len(self.items)}  ·  {time.strftime('%a %H:%M:%S', time.localtime(e['time']))}")
             self.title.setText(f"{e.get('agent')}: “{e.get('text')}”")
             lines = [f"Response: {e.get('response') or '—'}", f"Status: {e.get('status')}",
                      f"Function: {e.get('function')} {json.dumps(e.get('args'))}", "", "Everything it did:"]

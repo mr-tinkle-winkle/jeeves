@@ -7,7 +7,7 @@ import time
 from dataclasses import asdict
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .common import JEEVES_THEME_DEFAULTS
@@ -46,14 +46,23 @@ class GeneralPage(Page):
                            "it if quiet speech is missed.")
 
         k = self.section("Keybinds")
-        k.addWidget(label("Key names are Linux names joined with +, e.g. KEY_LEFTMETA+KEY_J. Keybinds need read "
-                          "access to the keyboard (the NixOS module grants it). You can also bind these commands "
-                          "in your desktop's shortcut settings instead: jeeves --manual_request=text · "
+        k.addWidget(label("Press Record and hold the keys, or type Linux key names joined with +, e.g. "
+                          "KEY_LEFTMETA+KEY_J (mouse buttons too: BTN_SIDE, BTN_EXTRA). Keybinds need read access "
+                          "to the keyboard (the NixOS module grants it). You can also bind these commands in your "
+                          "desktop's shortcut settings instead: jeeves --manual_request=text · "
                           "jeeves --manual_request=voice --agent=NAME · jeeves --review · jeeves --abort"))
         self.b.check(k, "Watch the keyboard for keybinds", "general.watch_keyboard_for_keybinds")
-        self.b.check(k, "Always listen for wake words", "wake_word.enabled",
-                     hint="Off: the microphone is only open during a Voice Request or while an agent waits for "
-                          "your answer. Voice Request: Unknown then works like a push-to-talk wake word.")
+        self.listen_mode = self.b.listen_mode(
+            k, hint="Only while holding: agents only listen for their names while you hold the keys below (and a "
+                    "second after you let go), from your microphone and desktop audio alike. The microphone stays "
+                    "open so a name said as you press them isn't cut off, but nothing listens for names until then. "
+                    "Off: the microphone is only open during a Voice Request or while an agent waits for your "
+                    "answer; Voice Request: Unknown then works like a push-to-talk wake word.",
+            on_mode=self._listen_mode_shown)
+        self.hold_row = self.combo_edit(k, "Keys to hold", "wake_word.hold_keys")
+        self.hold_status = label("")
+        self.hold_status.setContentsMargins(4, 0, 0, 4)
+        k.addWidget(self.hold_status)
         self.b.check(k, "Catch calls the wake word model misses", "wake_word.stt_backup",
                      hint="What you say without an agent's name being heard is checked by speech recognition too, "
                           "which catches a name run together with other words, said fast or over loud sound. "
@@ -161,15 +170,72 @@ class GeneralPage(Page):
             self.doctor_view.setPlainText(format_report(res) if isinstance(res, list) else str(res))
         self.daemon.call("doctor", done, done)
 
-    def combo_edit(self, layout: QVBoxLayout, text: str, path: str, single: bool = False) -> None:
+    def combo_edit(self, layout: QVBoxLayout, text: str, path: str, single: bool = False) -> QWidget:
+        """A key combo: typed (KEY_LEFTMETA + KEY_J) or recorded (Record, then hold the keys)."""
         e = CustomLineEdit()
+        rec = CustomButton("Record")
+        rec.setToolTip("Press, then hold the keys (or mouse buttons) together and let go")
 
         def out() -> None:
             keys = [x.strip().upper() for x in e.text().split("+") if x.strip()]
             self.b._emit(path, (keys[0] if keys else None) if single else keys)
         e.editingFinished.connect(out)
-        self.b.form_row(layout, text, e, path,
-                        lambda v: e.setText(v if isinstance(v, str) else combo_text(v)))
+        rec.clicked.connect(lambda: self._record_combo(e, rec, out, single))
+        box = row(e, rec, stretch=0)
+        return self.b.form_row(layout, text, box, path,
+                               lambda v: e.setText(v if isinstance(v, str) else combo_text(v)))
+
+    def _record_combo(self, e: CustomLineEdit, rec: CustomButton, save: Any, single: bool) -> None:
+        """Record: the daemon reads the keys (it sees every keyboard and mouse, and the desktop's own
+        shortcuts never get in the way), and keybinds don't fire meanwhile."""
+        rec.setEnabled(False)
+        rec.setText("Hold the keys…")
+
+        def finish(problem: str = "") -> None:
+            rec.setEnabled(True)
+            rec.setText("Record")
+            if problem:
+                show_message(self, "Record a key combo", problem)
+
+        def poll(res: Any) -> None:
+            if not isinstance(res, dict):
+                finish(f"Couldn't record: {res}")
+                return
+            keys = res.get("keys") or []
+            status = str(res.get("status") or "")
+            if res.get("recording"):
+                if not keys and status and not status.startswith(("watching", "disabled", "off")):
+                    finish(f"Jeeves can't read the keyboard ({status}).")      # (the daemon gives up by itself)
+                    return
+                rec.setText(" + ".join(keys) if keys else "Hold the keys…")
+                QTimer.singleShot(120, lambda: self.daemon.call("keyboard.recorded", poll, poll))
+                return
+            if keys:
+                e.setText(keys[-1] if single else combo_text(keys))
+                save()
+                finish()
+            else:
+                finish("" if status.startswith("watching") else f"Jeeves can't read the keyboard ({status}).")
+        self.daemon.call("keyboard.record", poll, poll, seconds=10)
+
+    def _listen_mode_shown(self, mode: str) -> None:
+        hold = mode == "hold"
+        self.hold_row.setVisible(hold)
+        self.hold_status.setVisible(hold)
+        if hold:
+            self._update_hold_status()
+
+    def _update_hold_status(self) -> None:
+        def got(res: Any) -> None:
+            status = str(res.get("status", "")) if isinstance(res, dict) else str(res)
+            if status.startswith("watching"):
+                text = f"Jeeves sees your keys ({status})."
+            elif status.startswith(("disabled", "off")) or not status:
+                text = ""
+            else:
+                text = f"⚠ Jeeves can't read the keyboard ({status}), so no agent will hear its name."
+            self.hold_status.setText(text)
+        self.daemon.call("keyboard.state", got, got)
 
     def refresh(self, settings: dict[str, Any], locked: set[str]) -> None:
         self.settings = settings
@@ -263,7 +329,7 @@ class AccountsPage(Page):
         save_key = CustomButton("Save key")
         save_key.clicked.connect(lambda: daemon.call("accounts.set_key", lambda _r: self.refresh_status(), None,
                                                      name="gemini_api_key", value=self.key.text().strip() or None))
-        g.addWidget(row(self.key, save_key, stretch_last=False))
+        g.addWidget(row(self.key, save_key, stretch=0))
         self._status_row(g, "gemini", None)
         for site in ("claude", "grok"):
             g = self.section(site.title() + " (Jeeves browser)")
@@ -288,7 +354,7 @@ class AccountsPage(Page):
             b = CustomButton(button)
             b.clicked.connect(lambda: self.daemon.call("accounts.login", None, None, name=name))
             widgets.append(b)
-        layout.addWidget(row(*widgets, stretch_last=False))
+        layout.addWidget(row(*widgets, stretch=0))
 
     def refresh_status(self) -> None:
         def got(items: Any) -> None:
@@ -409,7 +475,7 @@ class DryRunPage(Page):
         self.text.returnPressed.connect(self.go)
         btn = CustomButton("Try it")
         btn.clicked.connect(self.go)
-        self.body_layout.addWidget(row(label("Agent", False), self.agent, self.text, btn))
+        self.body_layout.addWidget(row(label("Agent", False), self.agent, self.text, btn, stretch=2))
         self.out = CustomPlainTextEdit()
         self.out.setReadOnly(True)
         self.out.setMinimumHeight(400)
@@ -482,7 +548,8 @@ class TrainingPage(Page):
         self.ip_args.setPlaceholderText('{"seconds": 30}  (optional JSON)')
         add = CustomButton("Add")
         add.clicked.connect(self.add_phrase)
-        i.addWidget(row(self.ip_text, self.ip_func, self.ip_args, add))
+        self.ip_func.setSizeAdjustPolicy(self.ip_func.SizeAdjustPolicy.AdjustToContents)
+        i.addWidget(row(self.ip_text, self.ip_func, self.ip_args, add, stretch=(0, 2)))
         self.ip_list = CustomListWidget()
         self.ip_list.setMaximumHeight(180)
         i.addWidget(self.ip_list)

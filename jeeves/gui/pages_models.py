@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from .ui_kit import CustomButton, CustomCheckBox, CustomLineEdit, CustomSpinBox, show_message
 from ..models.jeenius import LEVELS
-from .widgets import Binder, Page, clear_layout, combo, get_path as _get, label
+from .widgets import Binder, Page, bulk, clear_layout, combo, get_path as _get, label
 
 KIND_TITLES = {
     "stt": ("Speech to text", "stt", "models.stt.model"),
@@ -72,10 +72,11 @@ class ModelsPage(Page):
                            "speech to text included.")
 
         w = self.section("Wake word")
-        self.b.check(w, "Always listen for agent names", "wake_word.enabled",
-                     hint="Off: the microphone only listens during a Voice Request (keybind or jeeves "
-                          "--manual_request=voice) or while an agent waits for an answer. Also off while the "
-                          "Summary log is on (names are found in its transcript instead).")
+        self.b.listen_mode(w, hint="Only while holding: names are only listened for while you hold a key combo "
+                                   "(set under Listening & Keys). Off: the microphone only listens during a Voice "
+                                   "Request (keybind or jeeves --manual_request=voice) or while an agent waits for "
+                                   "an answer. The wake word model is also off while the Summary log is on (names "
+                                   "are found in its transcript instead).")
         self.b.choice(w, "Engine", "wake_word.engine",
                       [("Vosk keyword spotter (light, recommended)", "vosk"),
                        ("Transcribe everything with the STT model", "stt-match")])
@@ -255,7 +256,7 @@ class ModelsPage(Page):
             f"<b>Now:</b> light models — {hy.get('reason') or 'other programs are busy'}" if hy.get("light") else
             "<b>Now:</b> full models")
         self.b.load(self._settings, self._locked)
-        self._render_catalog()
+        self.after_fade(self._render_catalog)
 
     def _fill_light(self) -> None:
         """The light-set choosers: the fixed options, then each downloaded model of that kind."""
@@ -311,7 +312,6 @@ class ModelsPage(Page):
             lines.append(f"llama.cpp can use the GPU ({', '.join(hw['llama_gpu'])}). GPU layers (below) on Auto "
                          "fits as much of each model on it as your free VRAM allows.")
         self.hw_label.setText("<br>".join(lines))
-        clear_layout(self.rec_layout)
         roles = [("wake", "Wake word", "wake_word.model"), ("stt", "Speech to text", "models.stt.model"),
                  ("intent", "Intention processing", "models.intent.model"),
                  ("local_response", "Local responses", "models.local_response.model"),
@@ -319,20 +319,23 @@ class ModelsPage(Page):
                  ("local_response_smart", "  …or smarter", "models.local_response.model"),
                  ("vision", "Vision (seeing the screen)", "models.vision.model"),
                  ("tts", "Text to speech", "models.tts.model"), ("tts_voice", "Voice", "models.tts_voice")]
-        for role, title, path in roles:
-            pick = picks.get(role)
-            if not pick:
-                continue
-            current = _get(self._settings, path) == pick["id"]
-            use = CustomButton("In use" if current else "Use this")
-            use.setEnabled(not current)
-            use.clicked.connect(lambda _=False, path=path, mid=pick["id"]: self._use(path, mid))
-            line = QWidget()
-            h = QHBoxLayout(line)
-            h.setContentsMargins(0, 0, 0, 0)
-            h.addWidget(label(f"<b>{title}:</b> {pick['name']} — {pick['why']}"), 1)
-            h.addWidget(use, 0)
-            self.rec_layout.addWidget(line)
+        with bulk(self.rec_box):
+            clear_layout(self.rec_layout)
+            for role, title, path in roles:
+                pick = picks.get(role)
+                if not pick:
+                    continue
+                current = _get(self._settings, path) == pick["id"]
+                use = CustomButton("In use" if current else "Use this")
+                use.setEnabled(not current)
+                use.clicked.connect(lambda _=False, path=path, mid=pick["id"]: self._use(path, mid))
+                line = QWidget()
+                h = QHBoxLayout(line)
+                h.setContentsMargins(0, 0, 0, 0)
+                h.addWidget(label(f"<b>{title}:</b> {pick['name']} — {pick['why']}"), 1)
+                h.addWidget(use, 0)
+                self.rec_layout.addWidget(line)
+        self.relayout()
         if self.catalog:                 # mark the recommended entries in the choosers
             self._fill(self.wake_model, "wake")
             for kind, (_t, cat_kind, _p) in KIND_TITLES.items():
@@ -363,6 +366,12 @@ class ModelsPage(Page):
             self._update_rows()
             return
         self._catalog_sig = sig
+        with bulk(self.catalog_box):
+            self._fill_catalog(kind, fitf, sort, q, favs)
+        self._update_rows()
+        self.relayout()
+
+    def _fill_catalog(self, kind: Any, fitf: Any, sort: Any, q: str, favs: list[str]) -> None:
         clear_layout(self.catalog_layout)
         self.rows = {}
         items = []
@@ -398,7 +407,6 @@ class ModelsPage(Page):
             self.catalog_layout.addWidget(self._row(m, m["id"] in favs))
         if not items:
             self.catalog_layout.addWidget(label("No models match."))
-        self._update_rows()
 
     def _row(self, m: dict[str, Any], fav: bool) -> QWidget:
         r = QWidget()

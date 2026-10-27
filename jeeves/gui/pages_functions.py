@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from .ui_kit import (CustomPlainTextEdit, pick_path, CollapseToggleButton, CustomButton, CustomCheckBox, CustomGroupBox, CustomLineEdit,
                      show_message)
-from .widgets import discard, Page, combo, label, row
+from .widgets import bulk, discard, Page, combo, label, row
 
 EXAMPLE_STEPS = """[
   {"call": "get_open_apps", "as": "apps"},
@@ -106,7 +106,7 @@ class FunctionsPage(Page):
         bar = QHBoxLayout()
         self.search = CustomLineEdit()
         self.search.setPlaceholderText("Search functions")
-        self.search.textChanged.connect(self._filter)
+        self.search.textChanged.connect(lambda _t: self._filter())
         self.kind = combo()
         for lab, v in (("All", None), ("Full functions", "full"), ("Partial functions", "partial"),
                        ("Custom", "custom")):
@@ -124,6 +124,7 @@ class FunctionsPage(Page):
             bar.addWidget(w, 1 if w is self.search else 0)
         self.body_layout.addLayout(bar)
         self.problems = label("")
+        self.problems.setVisible(False)            # (empty, it left a gap above the list)
         self.body_layout.addWidget(self.problems)
 
         self.editor_box = CustomGroupBox("Custom function")
@@ -176,8 +177,12 @@ class FunctionsPage(Page):
 
     def refresh(self, settings: dict[str, Any], locked: set[str]) -> None:
         self.daemon.call("functions.list", self._got, lambda _e: None)
-        self.daemon.call("status", lambda st: self.problems.setText(
-            ("Problems: " + "; ".join(st.get("problems", []))) if st and st.get("problems") else ""), lambda _e: None)
+        self.daemon.call("status", self._show_problems, lambda _e: None)
+
+    def _show_problems(self, st: Any) -> None:
+        text = ("Problems: " + "; ".join(st.get("problems", []))) if isinstance(st, dict) and st.get("problems") else ""
+        self.problems.setText(text)
+        self.problems.setVisible(bool(text))
 
     def _got(self, funcs: Any) -> None:
         sig = json.dumps(funcs, sort_keys=True, default=str)
@@ -185,25 +190,34 @@ class FunctionsPage(Page):
             return          # nothing changed: skip the rebuild (UI guide pitfall 14)
         self._sig = sig
         self.functions = funcs or []
-        for r in self.rows:
-            discard(r)
-        self.rows = []
-        for f in sorted(self.functions, key=lambda f: (f["kind"] != "full", f["source"] != "builtin", f["name"])):
-            r = FunctionRow(self, f)
-            self.rows.append(r)
-            self.list_layout.addWidget(r)
         partials = sorted(f["name"] for f in self.functions if f["kind"] == "partial")
         self.partials_hint.setText("Partials you can call: " + ", ".join(partials))
-        self._filter()
+        self.after_fade(self._rebuild)
 
-    def _filter(self) -> None:
+    def _rebuild(self) -> None:
+        with bulk(self.list):
+            for r in self.rows:
+                discard(r)
+            self.rows = []
+            for f in sorted(self.functions, key=lambda f: (f["kind"] != "full", f["source"] != "builtin", f["name"])):
+                r = FunctionRow(self, f)
+                self.rows.append(r)
+                self.list_layout.addWidget(r)
+            self._filter(relayout=False)
+        self.relayout()
+
+    def _filter(self, relayout: bool = True) -> None:
         q = self.search.text().lower()
         kind = self.kind.currentData()
-        for r in self.rows:
-            f = r.f
-            hay = (f["name"] + f["description"] + " ".join(f["effective_keywords"])).lower()
-            ok = q in hay and (kind is None or (kind == "custom" and f["source"] != "builtin") or f["kind"] == kind)
-            r.setVisible(ok)
+        with bulk(self.list):          # (showing rows one by one re-laid out the page for each)
+            for r in self.rows:
+                f = r.f
+                hay = (f["name"] + f["description"] + " ".join(f["effective_keywords"])).lower()
+                ok = q in hay and (kind is None or (kind == "custom" and f["source"] != "builtin") or
+                                   f["kind"] == kind)
+                r.setVisible(ok)
+        if relayout:
+            self.relayout()
 
     def _reloaded(self, res: Any) -> None:
         self._sig = None

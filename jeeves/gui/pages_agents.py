@@ -87,7 +87,7 @@ class AgentsPage(Page):
         g.addWidget(self.prompt)
         g.addWidget(label("Who the agent is and how it talks. Be specific: \u201cDry, formal British butler. Calls "
                           "the user sir. Short sentences, understated wit, never says 'awesome'.\u201d beats \u201cbe a "
-                          "butler\u201d. Every reply ends with a reminder to stay in character."))
+                          "butler\u201d. It comes first in everything the agent is asked, so keep it to the point."))
         self.persona_check = CustomCheckBox("Check replies stay in character (rewrites ones that don't; one or two "
                                             "extra model calls per reply)")
         g.addWidget(self.persona_check)

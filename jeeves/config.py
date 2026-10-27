@@ -17,6 +17,7 @@ import copy
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -120,6 +121,10 @@ DEFAULTS: dict[str, Any] = {
         # things you say that the wake word model heard no name in are checked by speech recognition too,
         # which catches the calls it misses ("hey Jeeves what time is it", fast, over loud sound)
         "stt_backup": True,
+        # Only listen for agent names while these keys are held (you still say the name; on every source).
+        # Linux key names; mouse buttons work too (BTN_SIDE, BTN_EXTRA). Works with "enabled" off as well.
+        "hold_to_listen": False,
+        "hold_keys": ["KEY_RIGHTCTRL"],
     },
     "models": {
         # all "model" values are catalog ids from jeeves.models.catalog
@@ -295,17 +300,32 @@ class LockedError(PermissionError):
 
 
 class _FileCache:
+    """A settings file, re-read only when it changes -- and looked at (stat) at most every RECHECK seconds:
+    settings are read many times a second (every listener checks what to listen for)."""
+    RECHECK = 0.25
+
     def __init__(self, path_fn):
         self._path_fn = path_fn
-        self._key = None
+        self._key: Any = None
         self._data: dict[str, Any] = {}
+        self._checked = 0.0
+
+    def invalidate(self) -> None:
+        self._checked = 0.0
 
     def read(self) -> dict[str, Any]:
+        now = time.monotonic()
+        if self._key is not None and now - self._checked < self.RECHECK:
+            return self._data
+        self._checked = now
         path: Path = self._path_fn()
         try:
             st = path.stat()
         except OSError:
-            self._key, self._data = None, {}
+            if self._key != "missing":
+                # the same empty dict from now on: a new one every read made the merged settings look
+                # changed every time, so they were merged again (deep copies of everything) on every read
+                self._key, self._data = "missing", {}
             return self._data
         key = (str(path), st.st_mtime_ns, st.st_size)
         if key != self._key:
@@ -393,6 +413,7 @@ class Settings:
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
         os.replace(tmp, path)
+        self._user.invalidate()                  # what was just written counts at once
 
 
 # ---------------------------------------------------------------------------

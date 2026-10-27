@@ -97,6 +97,8 @@ NAME_TAIL_FRAMES = 8          # 240 ms
 TAIL_LIMIT = 0.6              # s: speech still going on when a listen opens is the name's own end, unless it
                               # lasts this long into the listen ("Jeeves open the mixer" in one breath)
 REPLY_WAIT = 0.4              # s of quiet after the name before the wake-up reply ("Yes?")
+HOLD_INDICATOR = "hold-to-listen"   # the indicator shown while the hold-to-listen keys are held
+HOLD_SHOW_AFTER = 0.3         # s held before it shows (the keys may be part of a quick shortcut)
 
 
 def is_noise_text(text: str) -> bool:
@@ -149,7 +151,8 @@ class Engine:
         self.imports = Imports(self.registry, self.publish)
         from .jumpin import JumpIn
         self.jump_in = JumpIn(self)
-        self.keyboard: Keyboard | None = Keyboard(self.settings, self._keybind) if start_io else None
+        self.keyboard: Keyboard | None = Keyboard(self.settings, self._keybind, self._on_hold) if start_io else None
+        self._hold_problem = self._hold_pending = ""      # hold-to-listen can't work: said / seen once
         self._lock = threading.RLock()
         self._apply_lock = threading.Lock()
         self.speaking = 0
@@ -175,6 +178,7 @@ class Engine:
         if not self.start_io:
             return
         self.models.start()
+        self.models.warm_up = self._warm_intent
         self.models.preload()
         self.triggers.start()
         if self.keyboard:
@@ -315,7 +319,8 @@ class Engine:
                 return True
             if self.jump_in.wants("microphone"):
                 return True
-            return bool(self.settings.get("wake_word.enabled", True) and self.call_names("microphone"))
+            # (hold-to-listen keeps it open too: the start of a name said as you press the keys is in it)
+            return bool(self.listens_for_names() and self.call_names("microphone"))
         if self.summary.enabled() and "desktop" in (self.settings.get("summary.sources") or []):
             return True
         if any(t.get("event") == "audio_keyword" and t.get("source") in ("desktop", "both")
@@ -333,6 +338,7 @@ class Engine:
                 self._ensure_overlay()
                 if self.start_io and self._listeners_stale():
                     self.apply_settings()
+                self._check_hold_to_listen()
             except Exception:
                 log.exception("housekeeping failed")
 
@@ -495,20 +501,96 @@ class Engine:
             return best
         return None, text, best[2]
 
+    def _warm_intent(self) -> None:
+        """Each agent's intent prompt, read by the intent model ahead of the first request."""
+        for aid, agent in list(self.agents().items())[:4]:
+            if agent.get("enabled", True):
+                try:
+                    self.intent.warm(dict(agent, id=aid))
+                except Exception as exc:  # noqa: BLE001 -- a model that isn't there yet, an endpoint that's off
+                    log.info("couldn't warm up the intent model for %s: %s", aid, exc)
+                    return
+
     # ------------------------------------------------------------------ listening
+    def stt_spells_names(self, agent: dict[str, Any] | None = None) -> bool:
+        """Whether speech recognition writes call names out when they're said. Whisper is given them (its
+        initial prompt), so "Jeeves" comes out as Jeeves -- and "geez" as geez, which is how a call is told
+        from a sound-alike. Vosk's speech recognition can't be given them: "Jeeves" comes out as "the eaves",
+        so looking for the name in its transcript turned down every call."""
+        from ..models import catalog
+        entry = catalog.get(self.models.model_id("stt", agent))
+        return entry is None or entry.engine != "vosk"
+
+    def hold_keys(self) -> list[str] | None:
+        """Hold-to-listen: the keys that must be held for agent names to be listened for (None: it's off,
+        names are always listened for)."""
+        if not self.settings.get("wake_word.hold_to_listen", False):
+            return None
+        keys = self.settings.get("wake_word.hold_keys") or []
+        return [str(k).strip().upper() for k in ([keys] if isinstance(keys, str) else keys) if str(k).strip()]
+
+    def listens_for_names(self) -> bool:
+        """Agent names are listened for: always, or while the hold-to-listen keys are held."""
+        return bool(self.settings.get("wake_word.enabled", True) or self.hold_keys() is not None)
+
+    def may_call(self, source: str, t0: float, t1: float) -> bool:
+        """Could speech heard between t0 and t1 call an agent by name? Always -- unless hold-to-listen is on:
+        then only if the keys were held at some moment of it."""
+        keys = self.hold_keys()
+        if keys is None:
+            return True
+        return bool(keys) and self.keyboard is not None and self.keyboard.held_during(keys, t0, t1)
+
+    def _on_hold(self, held: bool) -> None:
+        """The hold-to-listen keys were pressed or let go: show that agents are listening for their names
+        while they're held (not straight away: the keys can be part of a quick shortcut)."""
+        if held:
+            def show() -> None:
+                kb, keys = self.keyboard, self.hold_keys()
+                if kb is not None and keys and kb.holding(keys) and self.is_on() and \
+                        self.sessions.get("microphone") is None:
+                    self.set_indicator(HOLD_INDICATOR, None, "listening", "say an agent's name",
+                                       source="microphone", mode="hold")
+            timer = threading.Timer(HOLD_SHOW_AFTER, show)
+            timer.daemon = True
+            timer.start()
+        elif HOLD_INDICATOR in self.indicators:
+            self.set_indicator(HOLD_INDICATOR, None, "idle")
+
+    def _check_hold_to_listen(self) -> None:
+        """Hold-to-listen on, but no way to see the keys: names would never be heard. Say so (once)."""
+        keys = self.hold_keys()
+        problem = ""
+        if keys is not None and self.is_on() and self.start_io:
+            kb = self.keyboard
+            if not keys:
+                problem = "Hold-to-listen is on but has no keys to hold, so no agent hears its name."
+            elif kb is None or not kb.status.startswith("watching"):
+                problem = (f"Hold-to-listen is on, but Jeeves can't read the keyboard "
+                           f"({kb.status if kb else 'off'}), so no agent hears its name.")
+        # (seen twice in a row: right after it's turned on, the keyboard takes a moment to be read)
+        if problem and problem == self._hold_pending and problem != self._hold_problem:
+            log.warning("%s", problem)
+            self.publish("notice", {"text": problem + " (Listening & Keys)"})
+            self._hold_problem = problem
+        elif not problem:
+            self._hold_problem = ""
+        self._hold_pending = problem
+
     def detection_modes(self, source: str) -> set[str]:
         modes: set[str] = set()
         summary = self.summary.enabled() and source in (self.settings.get("summary.sources") or [])
         keyword_triggers = any(t.get("event") == "audio_keyword" and t.get("source", "microphone") in (source, "both")
                                for t in self.triggers.all())
         names = self.call_names(source)
-        wake_on = self.settings.get("wake_word.enabled", True) and not self.summary.enabled()
+        wake_on = self.listens_for_names() and not self.summary.enabled()
         if names and wake_on:
             engine = self.settings.get("wake_word.engine", "vosk")
             if engine == "vosk" and self.models.wake_spotter() is not None:
                 modes.add("vosk")
-                if self.settings.get("wake_word.stt_backup", True) and "stt" not in self.models.suspended:
-                    modes.add("backup")
+                if self.settings.get("wake_word.stt_backup", True) and "stt" not in self.models.suspended \
+                        and self.stt_spells_names():
+                    modes.add("backup")              # (it looks for the name in what speech recognition writes)
             else:
                 modes.add("transcribe")
         if summary or keyword_triggers or (names and self.summary.enabled()) or self.jump_in.wants(source):
@@ -527,6 +609,8 @@ class Engine:
             self.sessions[source] = s
         if old is not None:                      # its indicator goes with it
             self.set_indicator(old.request_id, old.agent_id, "idle")
+        if HOLD_INDICATOR in self.indicators:    # heard a name while the hold-to-listen keys were held
+            self.set_indicator(HOLD_INDICATOR, None, "idle")
         stage = "listening"
         self.set_indicator(s.request_id, agent_id, stage, "extended prompt mode" if mode == "extended" else "",
                            source=source, mode=mode)
@@ -565,7 +649,8 @@ class Engine:
 
     def _finish_session(self, s: Session) -> None:
         pcm = s.pcm()
-        if s.preroll and s.mode == "request":
+        spells = self.stt_spells_names(self.agents().get(s.agent_id or ""))
+        if s.preroll and s.mode == "request" and spells:
             pcm = b"".join(s.preroll) + pcm          # the name too: speech recognition confirms it was said
         if s.mode == "training":
             item = self.training.save_recording(s.text, pcm)
@@ -586,7 +671,7 @@ class Engine:
             self.flash_unavailable(s.agent_id, "speech recognition failed (see the log)")
             self.set_indicator(s.request_id, s.agent_id, "idle")
             return
-        if s.mode == "request" and s.preroll is not None:
+        if s.mode == "request" and s.preroll is not None and spells:
             found, rest = self.strip_name(text, s.agent_id)
             if found:
                 text = rest
@@ -719,7 +804,8 @@ class Engine:
             self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
             return
         if conf < thr:
-            if conf >= thr * 0.5 and self.settings.get("wake_word.verify_near_misses", True):
+            if conf >= thr * 0.5 and self.settings.get("wake_word.verify_near_misses", True) and \
+                    self.stt_spells_names(agent):
                 # unsure: check with speech recognition whether the name was really said
                 lst = self.listeners.get(source)
                 n0 = lst.frame_no if lst is not None else 0
@@ -948,9 +1034,10 @@ class Engine:
                     s.reply_at = time.time()          # still quiet: "Yes?" now (it took a moment to notice)
             return
 
-    def on_utterance(self, source: str, pcm: bytes) -> None:
+    def on_utterance(self, source: str, pcm: bytes, may_call: bool = True) -> None:
         """Transcribe-everything path: Summary log, audio keyword triggers, and
-        call names found in the transcript."""
+        call names found in the transcript (may_call: whether a name in it may call an agent --
+        hold-to-listen, Listener._may_call)."""
         try:
             text = self.transcribe(pcm)
         except ModelUnavailable:
@@ -963,13 +1050,13 @@ class Engine:
         if self.sessions.get(source) is not None or self.answer_pending(source):
             return
         wake_by_text = (self.summary.enabled() or self.settings.get("wake_word.engine") == "stt-match"
-                        or self.models.wake_spotter() is None) and self.settings.get("wake_word.enabled", True) \
+                        or self.models.wake_spotter() is None) and self.listens_for_names() \
             or self.summary.enabled()
         aid, rest, _ = self.split_agent(text, source)
         if aid is None:
             self.jump_in.consider(source)      # nobody was addressed: maybe an agent wants to chime in
             return
-        if not wake_by_text:                   # the wake word model handles addressed requests
+        if not wake_by_text or not may_call:   # the wake word model handles addressed requests / keys not held
             return
         if self._hears_itself(aid, text):
             return
@@ -1557,8 +1644,13 @@ class Engine:
 
     def _best_guess(self, ctx: FunctionContext, text: str, skip: set[str]) -> Decision:
         """No clear function: research it if it's a factual question, otherwise just answer."""
-        enabled = {f.name for f in self.registry.enabled_for(ctx.agent)} - skip
+        functions = [f for f in self.registry.enabled_for(ctx.agent) if f.name not in skip]
+        enabled = {f.name for f in functions}
         core = self.intent.strip_address(ctx.agent, text)
+        by_keywords = self.intent.keyword_decide(ctx.agent, text, functions)
+        if by_keywords.function not in (None, "local_response"):      # "set a timer", "look up ..."
+            by_keywords.method = "fallback"
+            return self.intent.with_said(by_keywords, ctx.agent, text)
         if "research" in enabled and looks_factual(core, ctx.agent):
             return self.intent.with_said(Decision("research", {"depth": "quick"}, 0.6, "", "fallback"),
                                          ctx.agent, text)
@@ -1970,6 +2062,7 @@ class Engine:
             "listeners": {src: lst.status for src, lst in self.listeners.items()},
             "overlays": self.overlay_status(),
             "keyboard": self.keyboard.status if self.keyboard else "off",
+            "hold_to_listen": self.hold_keys(),
             "indicators": list(self.indicators.values()),
             "extended": list(self.extended),
             "queue": len(self.queue),

@@ -9,7 +9,9 @@ Per 30 ms frame:
      answer session (no wake word needed);
   3. otherwise the wake word model listens for agent call names. A Vosk
      grammar spotter reacts per phrase; the STT-match / Summary path
-     transcribes every utterance and looks for names in the text.
+     transcribes every utterance and looks for names in the text. With
+     hold-to-listen, only while the keys are held (the wake model doesn't
+     run at all otherwise).
 
 A rolling buffer of the last 20 s lets "Jeeves, open all my apps" said in one
 breath work: when the name is recognised at the end of the phrase, the audio
@@ -45,6 +47,9 @@ SPEECH_RUN = 3                  # frames in a row that count as speech: a key pr
 LEVEL_RUN = SPEECH_RUN
 MIN_SPEECH_LEVEL = 0.0008       # speech detector: quieter than this is digital silence, whatever it says
 BACKUP_MAX_SECONDS = 10.0       # longer talk isn't checked for a missed call (Listener._backup)
+HOLD_GRACE = 1.0                # hold-to-listen: names are still listened for this long after letting go
+HOLD_PREROLL = 0.5              # ... and the wake model hears this much from before the keys went down
+# (HOLD_GRACE > HOLD_PREROLL: a name heard before the keys were let go is never heard twice)
 
 
 @dataclass
@@ -199,6 +204,7 @@ class Listener(threading.Thread):
         self.status = "starting"
         self._cfg: tuple[set[str], list[str], float, Any] | None = None
         self._cfg_at = 0.0
+        self._hold: list[str] | None = None     # hold-to-listen keys (None: names are always listened for)
         self._vad: float | None = None
         self._detector_setting = "auto"
         self._audio_t: float | None = None      # the audio clock (see _clock)
@@ -272,7 +278,11 @@ class Listener(threading.Thread):
         self.voiced_ring.append(voiced)
         self.frame_no += 1
         hits: list[tuple[str, float]] = []
-        if spotter is not None and names:
+        session = eng.sessions.get(self.source)
+        gate = self._gate(now)
+        # hold-to-listen: the wake model only runs while the keys are held -- and while a listen is open,
+        # where its word decoding helps tell when you've stopped talking (a name doesn't count then)
+        if spotter is not None and names and (gate or session is not None):
             if self.wake_rec is None or names != self.spotter_names or self.wake_owner is not spotter:
                 try:
                     self.wake_rec = spotter.recognizer(names)
@@ -282,19 +292,22 @@ class Listener(threading.Thread):
                 self.wake_owner = spotter
                 self.spotter_names = names
                 self.spot_base = self.frame_no - 1
+                if self._hold is not None and self.wake_rec is not None:
+                    hits = self._hold_preroll()
             try:
-                hits = self.wake_rec.feed(frame) if self.wake_rec is not None else []
+                hits += self.wake_rec.feed(frame) if self.wake_rec is not None else []
             except Exception:
                 log.exception("wake word model failed")
+                hits = []
+            if not gate:
                 hits = []
         else:
             self.wake_rec = None
 
-        session = eng.sessions.get(self.source)
         if "transcribe" in modes:
             utterance = self.segmenter.feed(frame, voiced, now, eos)
             if utterance is not None:
-                eng.run_async(eng.on_utterance, self.source, utterance)
+                eng.run_async(eng.on_utterance, self.source, utterance, self._may_call(utterance, now))
         elif "backup" in modes:
             self._backup(frame, voiced, now, eos, bool(hits), session)
 
@@ -364,8 +377,41 @@ class Listener(threading.Thread):
             return
         skip, self._backup_skip = self._backup_skip, False
         seconds = len(utterance) / (2 * 16000)
-        if not skip and 0.4 <= seconds <= BACKUP_MAX_SECONDS:
+        if not skip and 0.4 <= seconds <= BACKUP_MAX_SECONDS and self._may_call(utterance, now):
             eng.run_async(eng.on_backup_utterance, self.source, utterance, self.frame_no)
+
+    # ------------------------------------------------------------------ hold-to-listen
+    def _gate(self, now: float) -> bool:
+        """Are names listened for in the audio at `now`? Always -- unless hold-to-listen is on: then while
+        the keys are held, and HOLD_GRACE after letting go (the end of a name said as you let go is still
+        being decoded). Judged by when the audio was recorded, so a listener running behind (a busy
+        computer) still goes by when you held the keys."""
+        if self._hold is None:
+            return True
+        kb = self.engine.keyboard
+        return bool(self._hold) and kb is not None and kb.held_during(self._hold, now - HOLD_GRACE, now)
+
+    def _may_call(self, utterance: bytes, now: float) -> bool:
+        """Could a name in this utterance (just ended) call an agent: the keys were held during it."""
+        if self._hold is None:
+            return True
+        start = now - len(utterance) / (2 * 16000)
+        return self.engine.may_call(self.source, start - HOLD_GRACE, now)
+
+    def _hold_preroll(self) -> list[tuple[str, float]]:
+        """The wake model (re)starts when the hold-to-listen keys go down: it hears the moment before too,
+        so a name you began saying just before pressing them isn't cut off."""
+        n = min(int(HOLD_PREROLL * 1000 / FRAME_MS), len(self.ring) - 1)
+        if n <= 0 or self.wake_rec is None:
+            return []
+        self.spot_base = self.frame_no - 1 - n
+        hits: list[tuple[str, float]] = []
+        try:
+            for f in list(self.ring)[-1 - n:-1]:
+                hits += self.wake_rec.feed(f)
+        except Exception:
+            log.exception("wake word model failed")
+        return hits
 
     def _voiced(self, frame: bytes, level: float) -> bool:
         """Is someone speaking in this frame: the speech detector, or the level meter without it."""
@@ -414,6 +460,7 @@ class Listener(threading.Thread):
             names = eng.wake_names(self.source) if spotter is not None else []
             eos = float(eng.settings.get("general.end_of_speech_seconds", 1.2))
             self._cfg, self._cfg_at = (modes, names, eos, spotter), now
+            self._hold = eng.hold_keys()
             self._vad = float(eng.settings.get("audio.vad_threshold", 0.012))
             self._detector_setting = str(eng.settings.get("audio.speech_detector", "auto") or "auto")
         return self._cfg

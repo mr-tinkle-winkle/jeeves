@@ -210,6 +210,8 @@ def _searxng(base: str, query: str, count: int) -> list[dict[str, str]]:
 
 
 ENGINES = {"duckduckgo": _ddg, "mojeek": _mojeek, "bing": _bing}
+_failed_at: dict[str, float] = {}       # engine -> when it last refused or failed
+COOL_DOWN = 600.0                       # s: an engine that just refused is tried last for a while
 
 
 def search(settings, query: str, count: int = 5, problems: list[str] | None = None) -> list[dict[str, str]]:
@@ -222,17 +224,24 @@ def search(settings, query: str, count: int = 5, problems: list[str] | None = No
         order.append(("SearXNG", lambda q, c: _searxng(base, q, c)))
     first = settings.get("research.engine", "duckduckgo")
     names = [first] + [n for n in ENGINES if n != first] if first in ENGINES else list(ENGINES)
+    import time as _time
+    now = _time.monotonic()
+    # an engine that refused a moment ago (a bot check) most likely refuses again: ask the others first
+    names.sort(key=lambda n: now - _failed_at.get(n, -COOL_DOWN) < COOL_DOWN)
     order += [(n, ENGINES[n]) for n in names]
     for name, fn in order:
         try:
             results = fn(query, count)
         except SearchBlocked as exc:
+            _failed_at[name] = _time.monotonic()
             problems.append(str(exc))
             continue
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+            _failed_at[name] = _time.monotonic()
             problems.append(f"{name}: {exc}")
             continue
         if results:
+            _failed_at.pop(name, None)
             return results
         problems.append(f"{name}: no results")
     return []

@@ -77,6 +77,35 @@ class Page(QWidget):
     def finish(self) -> None:
         self.body_layout.addStretch(1)
 
+    def relayout(self) -> None:
+        """After adding many rows: make the page tall enough for them now, before it's painted again --
+        painted first, it showed squeezed into its old height (text cut off, rows on top of each other)
+        until the scroll area caught up. The rows sit in sections with layouts of their own, which only
+        report their new size through queued events: those go first, or the page measured its old size.
+        (Add the rows inside `with bulk(container)`: rows Qt hasn't shown yet don't count.)"""
+        from PySide6.QtCore import QCoreApplication, QEvent
+        for _ in range(4):                  # (each level of nesting queues the next one up)
+            QCoreApplication.sendPostedEvents(None, QEvent.LayoutRequest)
+        self.body_layout.activate()
+        w = self.body.width()
+        h = self.body.heightForWidth(w) if self.body.hasHeightForWidth() else self.body.sizeHint().height()
+        if h > self.body.height():
+            self.body.resize(w, h)
+
+    def after_fade(self, fn: Callable[[], None]) -> None:
+        """Heavy work (rebuilding a long list) waits for the page's fade-in to finish: it holds up
+        painting, and started mid-fade it left the page see-through, blank, until it was done."""
+        anim = getattr(self, "_fade_anim", None)
+        try:
+            running = anim is not None and anim.state() == anim.State.Running
+            left = anim.duration() - anim.currentTime() if running else 0
+        except RuntimeError:              # (the animation is already gone)
+            running, left = False, 0
+        if running:
+            QTimer.singleShot(max(0, left) + 30, fn)
+        else:
+            fn()
+
     def refresh(self, settings: dict[str, Any], locked: set[str]) -> None:
         """Called with fresh settings whenever they change."""
 
@@ -109,6 +138,28 @@ def clear_layout(layout: Any) -> None:
             discard(item.widget())
 
 
+class bulk:
+    """with bulk(container): add many rows to a container that's on screen. Qt shows each new child on its
+    own, laying out everything around it -- up to the whole page -- every time: 150 catalog rows took
+    seconds (and the page looked squeezed meanwhile). Hidden while they go in and shown once, a fraction
+    of a second."""
+
+    def __init__(self, container: QWidget) -> None:
+        self.container = container
+        self.hid = False
+
+    def __enter__(self) -> QWidget:
+        if not self.container.isHidden():
+            self.container.hide()
+            self.hid = True
+        return self.container
+
+    def __exit__(self, *_exc: Any) -> bool:
+        if self.hid:
+            self.container.show()
+        return False
+
+
 def combo() -> QComboBox:
     c = QComboBox()
     c.setStyleSheet(combo_box_stylesheet(get_settings()))
@@ -123,13 +174,16 @@ def label(text: str, wrap: bool = True) -> QLabel:
     return lab
 
 
-def row(*widgets: QWidget, stretch_last: bool = False) -> QWidget:
+def row(*widgets: QWidget, stretch_last: bool = False, stretch: int | tuple[int, ...] | None = None) -> QWidget:
+    """Widgets side by side. stretch_last / stretch (an index or indexes): which of them take the spare
+    width -- a text field squeezed to its minimum next to empty space looked broken."""
     w = QWidget()
     lay = QHBoxLayout(w)
     lay.setContentsMargins(0, 0, 0, 0)
+    grow = {len(widgets) - 1} if stretch_last else ({stretch} if isinstance(stretch, int) else set(stretch or ()))
     for i, x in enumerate(widgets):
-        lay.addWidget(x, 1 if (stretch_last and i == len(widgets) - 1) else 0)
-    if not stretch_last:
+        lay.addWidget(x, 1 if i in grow else 0)
+    if not grow:
         lay.addStretch(1)
     return w
 
@@ -273,14 +327,66 @@ class Binder:
         self._register(path, e, lambda v: e.setPlainText(v or "") if e.toPlainText() != (v or "") else None, None)
         return e
 
+    LISTEN_MODES = [("Always", "always"), ("Only while holding a key combo", "hold"),
+                    ("Off: only during a Voice Request", "off")]
+
+    def listen_mode(self, layout: QVBoxLayout, text: str = "Listen for agent names", hint: str = "",
+                    on_mode: Callable[[str], None] | None = None) -> QComboBox:
+        """wake_word.enabled and wake_word.hold_to_listen as one choice: always, only while holding the
+        hold-to-listen keys, or off (two checkboxes, "always listen" and "only while holding", contradicted
+        each other)."""
+        c = combo()
+        for lab, val in self.LISTEN_MODES:
+            c.addItem(lab, val)
+        state = {"enabled": True, "hold": False}
+
+        def show() -> None:
+            mode = "hold" if state["hold"] else ("always" if state["enabled"] else "off")
+            c.setCurrentIndex(max(0, c.findData(mode)))
+            if on_mode is not None:
+                on_mode(mode)
+
+        def picked(i: int) -> None:
+            mode = c.itemData(i)
+            changes: dict[str, Any] = {"wake_word.hold_to_listen": mode == "hold"}
+            if mode != "hold":
+                changes["wake_word.enabled"] = mode == "always"
+            if not self._muted:
+                self.send(changes)
+            if on_mode is not None:
+                on_mode(mode)
+
+        def set_enabled(v: Any) -> None:
+            state["enabled"] = v is None or bool(v)
+            show()
+
+        def set_hold(v: Any) -> None:
+            state["hold"] = bool(v)
+            show()
+        c.activated.connect(picked)
+        self.form_row(layout, text, c, "wake_word.hold_to_listen", set_hold, hint)
+        self._register("wake_word.enabled", c, set_enabled, None)
+        return c
+
+    @staticmethod
+    def _focused(w: QWidget) -> bool:
+        """The user is typing in it (or in something inside it)."""
+        from PySide6.QtWidgets import QApplication
+        fw = QApplication.focusWidget()
+        return fw is not None and (fw is w or w.isAncestorOf(fw)) and not isinstance(w, CustomCheckBox)
+
     def load(self, settings: dict[str, Any], locked: set[str]) -> None:
         self._muted = True
         try:
+            # one widget can stand for several settings (Listen for agent names): locked if any of them is
+            lock_of: dict[int, bool] = {}
+            for path, w, _setter, _lock in self.items:
+                lock_of[id(w)] = lock_of.get(id(w), False) or is_locked(locked, path)
             for path, w, setter, lock in self.items:
-                if w.hasFocus() and not isinstance(w, (CustomCheckBox,)):
+                if self._focused(w):
                     continue     # don't fight the user's typing
                 setter(get_path(settings, path))
-                lk = is_locked(locked, path)
+                lk = lock_of[id(w)]
                 w.setEnabled(not lk)
                 if lock is not None:
                     lock.setText(LOCK if lk else "")

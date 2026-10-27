@@ -38,6 +38,7 @@ class FunctionContext:
         self.saying_for = 0.0
         self.background = False                         # long-running (watching): calling the agent doesn't pause it
         self.stage = "thinking"
+        self.model_problem = ""                         # why the last model call gave no answer
 
     # ---- cancellation ------------------------------------------------------
     def gate(self) -> None:

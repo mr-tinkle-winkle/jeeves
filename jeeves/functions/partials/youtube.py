@@ -140,10 +140,12 @@ def _name_score(want: str, name: str) -> float:
     return max(similarity(w, n), 0.9 if (w in n or n in w) and min(len(w), len(n)) >= 4 else 0.0)
 
 
-def _try(*args: str, timeout: float = 30) -> Any:
+def _try(*args: str, timeout: float = 30, errors: list[Exception] | None = None) -> Any:
     try:
         return _ytdlp(*args, timeout=timeout)
-    except Exception:  # noqa: BLE001 -- one way of finding it failing is fine; the next is tried
+    except Exception as exc:  # noqa: BLE001 -- one way of finding it failing is fine; the next is tried
+        if errors is not None:
+            errors.append(exc)
         return None
 
 
@@ -174,22 +176,29 @@ def find_channel(name: str) -> tuple[str, str]:
             c["rank"] = rank
         return c
 
+    errors: list[Exception] = []
     handle = _squash(name)
     if handle:
-        data = _try("--flat-playlist", "--playlist-end", "1", f"https://www.youtube.com/@{handle}/videos")
+        data = _try("--flat-playlist", "--playlist-end", "1", f"https://www.youtube.com/@{handle}/videos",
+                    errors=errors)
         if data and data.get("channel_id"):
             add(data["channel_id"], data.get("channel") or data.get("uploader") or
                 data.get("title", "").removesuffix(" - Videos"), _followers(data))
     data = _try("--flat-playlist", "--playlist-end", "8",
-                "https://www.youtube.com/results?search_query=" + urllib.parse.quote(name) + "&sp=EgIQAg%3D%3D")
+                "https://www.youtube.com/results?search_query=" + urllib.parse.quote(name) + "&sp=EgIQAg%3D%3D",
+                errors=errors)
     for i, e in enumerate((data or {}).get("entries") or []):
         cid = e.get("channel_id") or (e.get("id") if str(e.get("id", "")).startswith("UC") else "")
         if cid:
             add(cid, e.get("channel") or e.get("title") or e.get("uploader") or "", _followers(e), i)
-    vids = [v for v in (_try_search(name) or []) if v.get("channel_id")]
+    vids = [v for v in (_try_search(name, errors) or []) if v.get("channel_id")]
     for v in vids:
         add(v["channel_id"], v.get("channel", ""))["videos"] += 1
     if not cands:
+        if errors and len(errors) == (3 if handle else 2):
+            # every way of looking failed (no yt-dlp, no connection, YouTube refusing): say that, not
+            # that the channel doesn't exist
+            raise FunctionError(str(errors[-1])) from errors[-1]
         raise FunctionError(f"I couldn't find a YouTube channel called {name}")
     most = max(c["followers"] for c in cands.values()) or 1
 
@@ -202,10 +211,12 @@ def find_channel(name: str) -> tuple[str, str]:
     return cid, best["name"]
 
 
-def _try_search(query: str) -> list[dict[str, Any]] | None:
+def _try_search(query: str, errors: list[Exception] | None = None) -> list[dict[str, Any]] | None:
     try:
         return search(query, 10)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if errors is not None:
+            errors.append(exc)
         return None
 
 

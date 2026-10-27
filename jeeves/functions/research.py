@@ -285,16 +285,65 @@ def _squash(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
+def search_many(ctx: Any, queries: list[str], count: int = 6) -> list[dict[str, str]]:
+    """Every query searched at once: each takes a second or two, and one after another they added up
+    to most of a research's wait. Results come back in the order of the queries."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .partials import web
+    queries = [q for q in queries if q and q.strip()]
+    if not queries:
+        return []
+    ctx.check_cancelled()
+    ctx.state("researching", "Searching: " + " | ".join(queries))
+    if ctx.dry_run:
+        return []
+
+    def one(q: str) -> tuple[list[dict[str, str]], list[str]]:
+        problems: list[str] = []
+        try:
+            return web.search(ctx.settings, q, count, problems), problems
+        except Exception as exc:  # noqa: BLE001 -- one search failing doesn't stop the others
+            return [], [str(exc)]
+    with ThreadPoolExecutor(max_workers=min(4, len(queries)), thread_name_prefix="jeeves-search") as pool:
+        done = list(pool.map(one, queries))
+    out: list[dict[str, str]] = []
+    for q, (results, problems) in zip(queries, done):
+        ctx.trace("call", function="web_search", args={"query": q, "count": count})
+        ctx.think(f"Searching the web for: {q}", looking_at=f"search: {q}")
+        if not results:
+            ctx.think("  no results (" + "; ".join(problems) + ")" if problems else "  no results")
+        for r in results:
+            ctx.think(f"- {r['title']} ({r['url']})")
+        out += results
+    return out
+
+
+def prefetch(ctx: Any, urls: list[str]) -> dict[str, Any]:
+    """Start loading these pages now, side by side (a page takes a second or more): {url: future of
+    (raw page, error)}. Reading them one at a time made each research wait for every page in turn."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .partials import web
+    pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jeeves-fetch")
+
+    def load(url: str) -> tuple[str, str]:
+        try:
+            return web.request_website(ctx, url, raw=True, max_chars=600000, timeout=8), ""
+        except FunctionError as exc:
+            return "", str(exc)
+        except Exception as exc:  # noqa: BLE001
+            return "", str(exc)
+    futures = {u: pool.submit(load, u) for u in dict.fromkeys(urls) if u}
+    pool.shutdown(wait=False)                  # the threads finish what they started, nothing more
+    return futures
+
+
 def learn_context(ctx: Any, subject: str, notes: list[str], results_all: list[dict[str, str]]) -> str | None:
     """Look the subject up and note what it is. Returns its wiki (a MediaWiki base URL) if one shows up."""
     from .partials.web import request_website, wiki_base
     ctx.think(f"First, what is {subject}?")
-    found: list[dict[str, str]] = []
-    for q in (subject, f"{subject} wiki"):
-        try:
-            found += ctx.call("web_search", query=q, count=6)
-        except FunctionError as exc:
-            ctx.think(f"  search failed: {exc}")
+    found = search_many(ctx, [subject, f"{subject} wiki"])
     results_all += found
     want = _squash(subject)
     wiki = None
@@ -542,12 +591,7 @@ def run(ctx: Any, question: str, depth: str | None = None, earlier: str = "", pl
     for rnd in range(rounds):
         ctx.check_cancelled()
         ctx.think(f"Searching: {' | '.join(queries)}")
-        found: list[dict[str, str]] = []
-        for q in queries:
-            try:
-                found += ctx.call("web_search", query=q, count=6)
-            except FunctionError as exc:
-                ctx.think(f"  search failed: {exc}")
+        found = search_many(ctx, queries)
         fresh = []
         for r in rank(found, goal + " " + " ".join(queries), prefer=hosts):
             u = r.get("url", "")
@@ -556,18 +600,19 @@ def run(ctx: Any, question: str, depth: str | None = None, earlier: str = "", pl
         results_all += fresh
         read = 0
         follow = None
+        loading = prefetch(ctx, [r["url"] for r in fresh[:per_round + 2]])
         for r in fresh:
             if read >= per_round or (_time.time() - started > budget and sources):
                 break
             ctx.check_cancelled()
             seen.add(r["url"])
             ctx.think(f"Reading {r['url']}", looking_at=r["url"])
-            try:
-                page_html = request_website(ctx, r["url"], raw=True, max_chars=600000, timeout=8)
-                text = html_to_text(page_html)[:80000] if "<" in page_html[:2000] else page_html[:80000]
-            except FunctionError as exc:
-                ctx.think(f"  couldn't read it: {exc}")
-                page_html = text = ""
+            fut = loading.get(r["url"]) or prefetch(ctx, [r["url"]])[r["url"]]
+            page_html, problem = fut.result()
+            if problem:
+                ctx.think(f"  couldn't read it: {problem}")
+            text = (html_to_text(page_html)[:80000] if "<" in page_html[:2000] else page_html[:80000]) \
+                if page_html else ""
             if terms and page_html and not any(term_in(text, t) >= 0 for t in terms):
                 # not on this page: follow a link to it, like clicking "Movement" on a game's site
                 link = next((ln for ln in page_links(page_html, r["url"])

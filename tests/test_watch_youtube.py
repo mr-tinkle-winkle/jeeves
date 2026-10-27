@@ -250,3 +250,12 @@ def test_the_channel_people_mean_beats_a_small_one_with_the_exact_name(monkeypat
                  uploads={"UCpen": [{"id": "today", "title": "New video"}], "UCold": [{"id": "lastyear", "title": "x"}]})
     assert yt.find_channel("moist critikal")[0] == "UCpen"
     assert yt.pick(channel="moist critikal", newest=True)["id"] == "today"
+
+
+def test_youtube_says_why_it_cant_look_rather_than_that_the_channel_doesnt_exist(monkeypatch):
+    from jeeves.functions.base import FunctionError
+    from jeeves.functions.partials import youtube as yt
+    monkeypatch.setattr(yt, "which", lambda name: None)
+    import pytest
+    with pytest.raises(FunctionError, match="yt-dlp isn't installed"):
+        yt.find_channel("moist critikal")

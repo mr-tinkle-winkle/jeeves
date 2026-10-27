@@ -87,8 +87,9 @@ def test_research_searches_inside_your_source_when_its_page_doesnt_answer(engine
     engine.speak = lambda ctx, t: None
     q = "what are the chances an average player beats a white knuckle campaign on their first try"
     _ctx(engine, agent, q).call("research", question=q, depth="quick")
-    after_context = searched[searched.index("White Knuckle wiki") + 1:]
-    assert after_context[0].startswith("site:reddit.com ")     # inside your source before the whole web
+    after_context = [q for q in searched if q not in ("White Knuckle", "White Knuckle wiki")]
+    assert after_context[0].startswith("site:reddit.com ") or \
+        any(q.startswith("site:reddit.com ") for q in after_context[:3])   # inside your source, first round
 
 
 def test_a_question_one_of_your_sites_is_for_gets_researched(engine):

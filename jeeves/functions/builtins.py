@@ -631,8 +631,9 @@ def local_response(ctx, prompt):
     ctx.state("thinking")
     reply = ctx.engine.models.respond(ctx.agent, str(prompt), ctx=ctx, with_memory=True)
     if reply is None:
-        raise FunctionError("I didn't get an answer from the local response model. If it keeps happening, "
-                            "check Settings > Models")
+        why = getattr(ctx, "model_problem", "")
+        raise FunctionError(f"I didn't get an answer: {why}" if why else
+                            "I didn't get an answer from the local response model")
     return ctx.say(reply)
 
 

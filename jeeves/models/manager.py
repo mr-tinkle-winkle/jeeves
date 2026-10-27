@@ -295,8 +295,7 @@ class ModelManager:
         try:
             llm = llm or self.llm("local_response", agent)
         except ModelUnavailable as exc:
-            if ctx is not None:
-                ctx.think(f"Local response model unavailable: {exc.reason}")
+            self._problem(ctx, f"the local response model isn't available: {exc.reason}")
             if exc.queueable:
                 raise
             return None
@@ -321,15 +320,20 @@ class ModelManager:
             if not reply and not (cancelled and cancelled()):
                 # an empty answer (e.g. a thinking model that spent max_tokens thinking) used to be
                 # "said" as nothing at all: report it so the caller can say something instead
-                if ctx is not None:
-                    ctx.think("The model gave an empty answer.")
-                log.warning("%s gave an empty answer", getattr(llm, "model_name", "the model"))
+                self._problem(ctx, "the model gave an empty answer")
                 return None
             return reply
         except BackendError as exc:
-            if ctx is not None:
-                ctx.think(f"Model error: {exc}")
+            self._problem(ctx, f"the model failed: {exc}")
             return None
+
+    @staticmethod
+    def _problem(ctx: Any, reason: str) -> None:
+        """Why there's no answer: in the log, the thoughts view, and for the function to say."""
+        log.warning("no answer: %s", reason)
+        if ctx is not None:
+            ctx.think(reason[:1].upper() + reason[1:] + ".")
+            ctx.model_problem = reason
 
     def _watcher_for(self, ctx: Any, raw: bool) -> Any:
         """The agent's screen watcher, when this is one of its other answers (not the watcher itself)."""
@@ -630,14 +634,22 @@ class ModelManager:
         if self.on_available:
             self.on_available(kind)
 
+    warm_up: Callable[[], None] | None = None      # set by the engine: have the intent model read its prompt
+
     def preload(self) -> None:
-        """Load the global choices at startup (in the background)."""
+        """Load the global choices at startup (in the background), then let the intent model read its
+        function list, so the first request is as quick as the rest."""
         def go() -> None:
             for kind in ("stt", "intent"):
                 try:
                     self.stt() if kind == "stt" else self.llm(kind)
                 except ModelUnavailable as exc:
                     log.info("%s not loaded: %s", kind, exc.reason)
+            if self.warm_up is not None:
+                try:
+                    self.warm_up()
+                except Exception as exc:  # noqa: BLE001 -- only a head start
+                    log.info("couldn't warm up the intent model: %s", exc)
         threading.Thread(target=go, daemon=True, name="jeeves-preload").start()
 
 

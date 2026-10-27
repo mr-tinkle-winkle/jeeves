@@ -8,7 +8,7 @@ frame is painted here (behind a transparent viewport).
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import QEvent, Qt, QRectF
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QFrame, QListWidget, QPlainTextEdit, QTextBrowser
 
@@ -42,6 +42,9 @@ def _paint_box(widget, theme: Theme, appearance) -> None:
 
 
 class _BoxMixin:
+    """The box is painted on the whole widget, and the text and the scroll bar sit inside its border --
+    painted on the text area alone, the scroll bar hung outside the box."""
+
     def _setup_box(self, selector: str) -> None:
         self._appearance = get_settings()
         self._theme = Theme(self._appearance)
@@ -49,15 +52,20 @@ class _BoxMixin:
         accent = self._theme.accent().name()
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet(
-            f"{selector} {{ background: transparent; border: none; color: {text}; padding: 6px; "
+            f"{selector} {{ background: transparent; border: none; color: {text}; padding: 4px; "
             f"selection-background-color: {accent}; selection-color: {contrast_text(self._theme.accent()).name()}; }}")
         self.viewport().setAutoFillBackground(False)
         self.setVerticalScrollBar(CustomScrollBar(Qt.Vertical))
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 8
+        inset = 3 + (min(radius, 14) // 4 if radius else 0)      # clear of the border and its round corners
+        self.setContentsMargins(inset, inset, inset, inset)
 
-    def paintEvent(self, event) -> None:          # the frame first, under the (transparent) viewport
-        _paint_box(self.viewport(), self._theme, self._appearance)
-        super().paintEvent(event)
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Paint:          # the box itself; the text and scroll bar paint on top
+            _paint_box(self, self._theme, self._appearance)
+            return True
+        return super().event(event)
 
 
 class CustomPlainTextEdit(_BoxMixin, QPlainTextEdit):

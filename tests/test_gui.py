@@ -131,3 +131,31 @@ def test_agents_page_keeps_commands_jeenius_and_custom_sources(qapp):
                                          "https://white-knuckle.wiki.gg"]
     page.sources_on.setChecked(False)
     assert page._collect()["custom_sources"]["enabled"] is False
+
+
+def test_a_long_list_goes_in_at_once_and_the_page_fits_it(qapp):
+    """Rows added one by one to a list on screen were each shown and laid out on their own (150 Models
+    rows: seconds, with the page squeezed meanwhile)."""
+    from jeeves.gui.widgets import Page, bulk, label
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+    page = Page("Test", "")
+    box = QWidget()
+    lay = QVBoxLayout(box)
+    page.section("Rows").addWidget(box)
+    page.finish()
+    page.resize(800, 600)
+    page.show()
+    qapp.processEvents()
+    with bulk(box):
+        for i in range(60):
+            lay.addWidget(label(f"row {i} " + "word " * 25))
+    page.relayout()
+    b = page.body
+    assert b.height() >= b.heightForWidth(b.width()) > 1500        # tall enough straight away
+    assert all(lay.itemAt(i).widget().isVisible() for i in range(lay.count()))
+    hidden = QWidget()
+    hidden.hide()
+    with bulk(hidden):
+        pass
+    assert hidden.isHidden()                                       # a hidden container stays hidden
+    page.close()

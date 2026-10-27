@@ -29,10 +29,24 @@ class CustomScrollBar(QScrollBar):
         self._appearance = appearance
         self._theme = Theme(appearance)
         default_extent = QApplication.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+        self._extent = default_extent * 2
         if orientation == Qt.Vertical:
-            self.setFixedWidth(default_extent * 2)
+            self.setFixedWidth(self._extent)
         else:
-            self.setFixedHeight(default_extent * 2)
+            self.setFixedHeight(self._extent)
+
+    # The scroll area lays its bar out by the bar's size hint: the style's default width, half of the
+    # fixed width above -- so the bar hung out of the box and its right half was cut off.
+    def sizeHint(self):
+        hint = super().sizeHint()
+        if self.orientation() == Qt.Vertical:
+            hint.setWidth(self._extent)
+        else:
+            hint.setHeight(self._extent)
+        return hint
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)

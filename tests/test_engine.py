@@ -828,3 +828,24 @@ def test_the_answering_model_gets_the_question_and_nothing_unrelated(engine, mon
     assert [m["role"] for m in answer] == ["system", "user"]
     assert answer[-1]["content"] == "tell me a joke about cheese"
     assert "Biscuit" not in answer[0]["content"] and "timer" not in answer[0]["content"]
+
+
+def test_keywords_fill_in_what_they_can_when_the_model_cant(engine):
+    agent = dict(engine.agents()["jeeves"], id="jeeves")
+    fns = engine.registry.enabled_for(agent)
+    d = engine.intent.keyword_decide(agent, "Jeeves, launch Elden Ring", fns)
+    assert d.function == "steam_game" and d.args == {"action": "play", "game": "Elden Ring"}
+    d = engine.intent.keyword_decide(agent, "Jeeves, get set up for streaming", fns)
+    assert d.function == "setups" and d.args == {"action": "restore", "setup": "streaming"}
+    d = engine.intent.keyword_decide(agent, "Jeeves, save my setup as recording", fns)
+    assert d.function == "setups" and d.args == {"action": "save", "setup": "recording"}
+
+
+def test_unusable_model_answers_fall_back_to_keywords(engine, monkeypatch):
+    class Junk:
+        def chat(self, messages, **kw):
+            return "I think the user wants a timer!"
+    monkeypatch.setattr(engine.models, "llm", lambda kind, agent=None: Junk())
+    agent = dict(engine.agents()["jeeves"], id="jeeves")
+    d = engine.intent.decide(agent, "Jeeves, set a timer for 2 minutes for tea")
+    assert d.function == "timers" and d.args["duration"] == "2 minutes"

@@ -151,16 +151,38 @@ class IntentProcessor:
         return out, problems
 
     # ---- model -----------------------------------------------------------
-    def _with_model(self, llm: Any, agent: dict[str, Any], text: str, functions: list[FunctionDef],
-                    ctx: Any) -> Decision:
-        examples = {}
+    def examples(self) -> dict[str, list[dict[str, Any]]]:
+        examples: dict[str, list[dict[str, Any]]] = {}
         if self.settings.get("training.intent_examples_from_ratings", True):
             examples = self.history.rated_examples(int(self.settings.get("training.max_examples", 12)))
         for fname, items in self.extra_examples().items():
             examples.setdefault(fname, []).extend(items)
-        system = SYSTEM.format(agent=agent.get("name", "Jeeves"),
-                               research=RESEARCH_RULE if any(f.name == "research" for f in functions) else "",
-                               dictionary=self.registry.dictionary_text(functions, examples, brief=True))
+        return examples
+
+    def system_prompt(self, agent: dict[str, Any], functions: list[FunctionDef],
+                      examples: dict[str, list[dict[str, Any]]] | None = None) -> str:
+        """The same text for every request to this agent (until its functions or ratings change), so the
+        model server keeps it processed and only reads the new request."""
+        return SYSTEM.format(agent=agent.get("name", "Jeeves"),
+                             research=RESEARCH_RULE if any(f.name == "research" for f in functions) else "",
+                             dictionary=self.registry.dictionary_text(
+                                 functions, self.examples() if examples is None else examples, brief=True))
+
+    def warm(self, agent: dict[str, Any]) -> None:
+        """Have the intent model read this agent's function list now (it keeps it), so the first request
+        doesn't wait for a thousand words to be read."""
+        if self.models is None:
+            return
+        llm = self.models.llm("intent", agent)
+        functions = [f for f in self.registry.enabled_for(agent)]
+        llm.chat([{"role": "system", "content": self.system_prompt(agent, functions)},
+                  {"role": "user", "content": "hello"}], max_tokens=1, temperature=0.0, json_mode=True,
+                 think=False)
+
+    def _with_model(self, llm: Any, agent: dict[str, Any], text: str, functions: list[FunctionDef],
+                    ctx: Any) -> Decision:
+        examples = self.examples()
+        system = self.system_prompt(agent, functions, examples)
         memory_kind, _ = Memory.detect(text)
         messages = [{"role": "system", "content": system}]
         recent = self._recent(agent, text, ctx)
@@ -214,7 +236,10 @@ class IntentProcessor:
                     err = "Problems: " + "; ".join(problems)
             notes.append(err)
             messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": err + " Try again."}]
-        return Decision(None, {}, 0.0, "", "model", notes)
+        # two unusable answers (a small model, or one that thinks in its JSON): keywords, like a model failure
+        d = self.keyword_decide(agent, text, functions)
+        d.notes = notes + ["used keyword matching"] + d.notes
+        return d
 
     def _recent(self, agent: dict[str, Any], text: str, ctx: Any) -> list[dict[str, Any]]:
         """Earlier requests, only when this one points back at them ("pause it", "the macro I just
@@ -400,6 +425,18 @@ class IntentProcessor:
         if f.name == "remember":
             kind, cleaned = Memory.detect(text)
             return {"text": cleaned, "duration": kind or "long_term"}
+        if f.name == "steam_game":
+            if re.search(r"\bwhat games\b|\blist (my )?games\b|\bgames do i have\b", low):
+                return {"action": "list"}
+            game = re.sub(r"^.*?\b(?:launch|start(?:\s+up)?|boot(?:\s+up)?|play|open|run|fire up)\s+(?:the\s+game\s+)?",
+                          "", self.strip_address(agent, text), flags=re.I).strip(" .!?")
+            return {"action": "play", "game": game}
+        if f.name == "setups":
+            action = "list" if re.search(r"\bwhat setups\b|\blist (my )?setups\b", low) else \
+                "save" if re.search(r"\bsave\b|\bremember\b", low) else \
+                "delete" if re.search(r"\b(delete|remove|forget)\b", low) else "restore"
+            m = re.search(r"\b(?:for|as|called|named)\s+(?:my\s+|the\s+)?([\w' -]+?)(?:\s+setup)?[.!?]*$", low)
+            return {"action": action, "setup": m.group(1).strip() if m else ""}
         if f.name == "handoff":
             agents = self.settings.get("agents", {}) or {}
             for aid, a in agents.items():
@@ -407,9 +444,17 @@ class IntentProcessor:
                     if n and re.search(rf"\b{re.escape(n.lower())}\b", low) and aid != agent.get("id"):
                         return {"to": aid, "message": text}
             return {"message": text}
-        # custom / other functions: give free text to the first string argument
+        # custom / other functions: a value named in the request for each argument that has listed values
+        # ("rebuild the desk" -> host = desk), and the free text to the first required string argument
         args: dict[str, Any] = {}
         for a in f.args:
+            for c in a.choices or []:
+                if str(c).strip() and re.search(rf"\b{re.escape(str(c).lower())}\b", low):
+                    args[a.name] = c
+                    break
+        for a in f.args:
+            if a.name in args:
+                continue
             if a.type in ("string", "command") and a.required:
                 args[a.name] = text
                 break

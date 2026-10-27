@@ -162,7 +162,9 @@ class CustomButton(QToolButton):
             # could land on text that reads fine against the theme's
             # normal accent but not against this button's own fill.
             painter.setPen(contrast_text(bg))
-            painter.drawText(self.rect(), Qt.AlignCenter, self.text())
+            # (TextShowMnemonic: "&&" is a literal "&", as QToolButton sizes it -- drawn raw, "Check screen
+            # reading && control" showed both ampersands)
+            painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextShowMnemonic, self.text())
         painter.end()
         # Deliberately NOT calling super().paintEvent() -- this fully
         # replaces QToolButton's native/KDE-styled rendering rather than

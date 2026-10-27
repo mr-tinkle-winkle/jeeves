@@ -51,6 +51,14 @@ class Server:
         e = self.engine
         s = e.settings
 
+        def _agent(a: Any) -> dict[str, Any]:
+            """An agent as edited in the GUI (a dict), or one by its id (from the command line)."""
+            if isinstance(a, str):
+                if a not in e.agents():
+                    raise ValueError(f"no agent '{a}'")
+                return dict(e.agents()[a], id=a)
+            return a
+
         def settings_get(path: str = "") -> Any:
             return {"value": s.get(path) if path else s.effective(), "locked": sorted(s.locked_paths()),
                     "user": s.user()}
@@ -127,6 +135,17 @@ class Server:
             out["devices"] = list_devices()
             out["outputs"] = list_outputs()
             return out
+
+        def keyboard_call(what: str, **kw: Any) -> Any:
+            """The Record buttons next to key combos, and the keyboard's state (Listening & Keys)."""
+            kb = e.keyboard
+            if kb is None:
+                return {"recording": False, "keys": [], "held": [], "status": "off"}
+            if what == "record":
+                return kb.record(float(kw.get("seconds") or 10))
+            if what == "recorded":
+                return kb.recorded()
+            return {"status": kb.status, "held": kb.held(), "hold_keys": e.hold_keys()}
 
         def wiki_search(query: str) -> Any:
             return e.wikipedia.lookup(query, 2000)
@@ -206,9 +225,12 @@ class Server:
             "puppetry.macros": e.puppetry.macro_names,
             "desktop.apps": lambda: {"open": dk.open_apps(), "processes": dk.processes()[:400]},
             "audio.devices": audio_devices,
+            "keyboard.record": lambda seconds=10: keyboard_call("record", seconds=seconds),
+            "keyboard.recorded": lambda: keyboard_call("recorded"),
+            "keyboard.state": lambda: keyboard_call("state"),
             "audio.test_virtual_mic": e.test_virtual_mic,
-            "voice.preview": lambda agent, text="": e.preview_voice(agent, text),
-            "persona.test": lambda agent: e.models.test_persona(agent),
+            "voice.preview": lambda agent, text="": e.preview_voice(_agent(agent), text),
+            "persona.test": lambda agent: e.models.test_persona(_agent(agent)),
             "video.closed": lambda: e.video_state.update(playing=False) or True,
             "video.quality": lambda height, position=0: e.video_quality(height, position),
             "voice.speakers": lambda voice: e.voice_speakers(voice),
