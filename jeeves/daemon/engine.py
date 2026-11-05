@@ -807,6 +807,46 @@ class Engine:
         lead = (", ".join(names) + ".") if names else ""
         return " ".join(p for p in (lead, vocab) if p)
 
+    # ------------------------------------------------------------------ "did you say Jeeves?"
+    MAYBE_SECONDS = 2.5
+
+    def wake_maybe(self, source: str, name: str) -> None:
+        """The wake model thinks it's hearing a name (the moment it appears, before it's sure): the agent's
+        indicator shows at once, so you know to keep talking. If it turns out not to be a call, it spins
+        away in red (misheard)."""
+        if not self.is_on() or self.previewing() or self.sessions.get(source) is not None:
+            return
+        aid = self.agent_by_name(name, source)
+        if aid is None:
+            return
+        rid = f"maybe-{source}"
+        maybes = self.__dict__.setdefault("_maybes", {})
+        maybes[source] = (rid, aid, time.time())
+        self.set_indicator(rid, aid, "listening", "")
+
+        def expire() -> None:
+            cur = maybes.get(source)
+            if cur is not None and cur[0] == rid and time.time() - cur[2] >= self.MAYBE_SECONDS - 0.05:
+                self.clear_maybe(source, misheard=True)
+        threading.Timer(self.MAYBE_SECONDS, expire).start()
+
+    def clear_maybe(self, source: str, misheard: bool = False, hold: bool = False) -> None:
+        """hold: still checking (speech recognition): keep it up a little longer."""
+        maybes = self.__dict__.setdefault("_maybes", {})
+        cur = maybes.get(source)
+        if cur is None:
+            return
+        rid, aid, _t = cur
+        if hold:
+            maybes[source] = (rid, aid, time.time())
+            return
+        maybes.pop(source, None)
+        if misheard:
+            self.set_indicator(rid, aid, "misheard", "")
+            threading.Timer(0.9, lambda: self.set_indicator(rid, aid, "idle")).start()
+        else:
+            self.set_indicator(rid, aid, "idle")
+
     def on_wake(self, source: str, name: str, conf: float, after: list[bytes], threshold: float | None = None,
                 words: int = 0, name_audio: list[bytes] | None = None,
                 after_voiced: list[bool] | None = None) -> None:
@@ -846,10 +886,12 @@ class Engine:
                 n0 = lst.frame_no if lst is not None else 0
                 phrase = list(lst.ring)[-100:] if lst is not None else []
                 log.info("wake '%s' unsure (%.2f < %.2f): checking with speech recognition", name, conf, thr)
+                self.clear_maybe(source, hold=True)
                 self.run_async(self._verify_wake, source, aid, name, conf, phrase, after, threshold, words, n0,
                                name_audio, after_voiced)
             else:
                 log.info("wake '%s' ignored (confidence %.2f < %.2f)", name, conf, thr)
+                self.clear_maybe(source, misheard=True)
             return
         log.info("wake '%s' (%.2f) on %s", name, conf, source)
         self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
@@ -865,6 +907,7 @@ class Engine:
         found = self.strip_name(text, aid)[0]
         log.info("  heard '%s' -> %s", text, "the name: waking" if found else "not the name: ignored")
         if not found or self.sessions.get(source) is not None:
+            self.clear_maybe(source, misheard=not found)
             return
         lst = self.listeners.get(source)
         if lst is not None and lst.frame_no > n0:      # what was said while checking belongs to the request
@@ -878,6 +921,7 @@ class Engine:
     def _start_listen(self, source: str, aid: str, name: str, after: list[bytes], threshold: float | None,
                       words: int, name_audio: list[bytes] | None = None, conf: float = 1.0,
                       after_voiced: list[bool] | None = None) -> None:
+        self.clear_maybe(source)                     # (its own listening indicator takes over)
         if self._hears_itself(aid, name):
             return
         paused = self._interrupt(aid)
@@ -1039,6 +1083,8 @@ class Engine:
         speech recognition checks: a name near the start makes it a call after all."""
         if self.sessions.get(source) is not None or self.answer_pending(source) or self.previewing():
             return
+        if not self._might_be_a_call(source, pcm):
+            return                                   # nothing like a name in it: Whisper never runs
         try:
             text = self.transcribe(pcm)
         except ModelUnavailable:
@@ -1071,6 +1117,35 @@ class Engine:
                 if s is not None and s.agent_id == aid and not s.got_speech and self._wake_reply_phrases(a):
                     s.reply_at = time.time()          # still quiet: "Yes?" now (it took a moment to notice)
             return
+
+    def _might_be_a_call(self, source: str, pcm: bytes) -> bool:
+        """Before Whisper checks something said for a missed name: is there anything like one near its
+        start? The small wake model transcribes it roughly (a fraction of a second of one core); only if a
+        word there resembles a call name does Whisper -- all the CPU's cores for seconds, every time
+        anyone on the desktop or in the room said anything -- get to check. (Listening & Keys >
+        wake_word.backup_precheck; off = every utterance, as before.)"""
+        if not self.settings.get("wake_word.backup_precheck", True):
+            return True
+        if source != "microphone" and not self.settings.get("wake_word.backup_desktop", False):
+            return False                             # desktop audio: the wake model alone (people in a call...)
+        spotter = self.models.wake_spotter()
+        if spotter is None:
+            return True
+        try:
+            rough = spotter.quick_text(pcm[: 16000 * 2 * 4])        # the first 4 s: names come first
+        except Exception:  # noqa: BLE001 -- can't tell: let Whisper check
+            return True
+        words = normalize(rough).split()[:6]
+        if not words:
+            return False
+        import difflib
+        names = {w for a in self.active_agents().values() for n in [a.get("name", "")] + list(a.get("call_names", []))
+                 for w in normalize(n).split() if len(w) >= 3}
+        for w in words + [a + b for a, b in zip(words, words[1:])]:
+            for n in names:
+                if difflib.SequenceMatcher(None, w, n).ratio() >= 0.6 or w[:3] == n[:3]:
+                    return True
+        return False
 
     def on_utterance(self, source: str, pcm: bytes, may_call: bool = True) -> None:
         """Transcribe-everything path: Summary log, audio keyword triggers, and

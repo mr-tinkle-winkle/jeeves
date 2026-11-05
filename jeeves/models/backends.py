@@ -149,6 +149,20 @@ class STT:
     def transcribe(self, pcm: bytes, prompt: str = "", language: str = "en") -> str: raise NotImplementedError
 
 
+_HELP: dict[str, str] = {}
+
+
+def _supports(exe: str, flag: str) -> bool:
+    """Whether this build of a program lists the option in its --help (asked once per program)."""
+    if exe not in _HELP:
+        try:
+            out = subprocess.run([exe, "--help"], capture_output=True, text=True, timeout=10)
+            _HELP[exe] = (out.stdout or "") + (out.stderr or "")
+        except (OSError, subprocess.TimeoutExpired):
+            _HELP[exe] = ""
+    return flag in _HELP[exe]
+
+
 class WhisperCppSTT(STT):
     def __init__(self, entry: ModelEntry, threads: int = 0, gpu: bool = False) -> None:
         self.entry = entry
@@ -165,8 +179,13 @@ class WhisperCppSTT(STT):
         # whisper.cpp gains little past 8 threads; all 28 of them on every few seconds of desktop audio
         # was most of Jeeves' CPU load (and heat), and a crash now and then
         threads = min(env_threads(self.threads), 8)
+        extra = ["-ng"]
+        if self.gpu:
+            # on the graphics card, without flash attention: its lower-precision path is where GPU builds
+            # of whisper.cpp recognize worse than the CPU (when this build has the switch)
+            extra = ["-nfa"] if _supports(exe, "--no-flash-attn") else []
         self.server.start([exe, "-m", str(model), "--host", "127.0.0.1", "--port", str(self.server.port),
-                           "-t", str(threads)] + ([] if self.gpu else ["-ng"]), "/")
+                           "-t", str(threads)] + extra, "/")
 
     def unload(self) -> None:
         self.server.stop()
@@ -265,6 +284,7 @@ class WakeRecognizer:
         self._n = 0
         self._seen = 0
         self._last_partial = ""
+        self.maybe = ""                     # a name just appeared in the partial result (not sure yet)
 
     UNSURE = 0.45            # confidence reported for a name only the partial result had
 
@@ -300,6 +320,8 @@ class WakeRecognizer:
         if not tokens or not self._name_in(tokens):
             self._seen = 0
             return []
+        if self._seen == 0:                 # first sight of a name: say so at once (the indicator shows)
+            self.maybe = next((n for n in self.names if self._name_in_one(n, tokens)), "")
         self._seen += 1
         followed = not self._name_in(tokens[-1:]) and self._name_in(tokens[:-1])
         if self._seen < self.PARTIAL_STABLE and not followed:
@@ -350,6 +372,16 @@ class VoskWake:
 
     def loaded(self) -> bool:
         return self.model is not None
+
+    def quick_text(self, pcm: bytes) -> str:
+        """Everything in a short stretch of audio, by the small wake model with its whole vocabulary: a
+        rough transcript, but a fraction of a second of one CPU core where Whisper large on the CPU
+        takes all of them for several seconds."""
+        if self.model is None:
+            self.load()
+        rec = _vosk().KaldiRecognizer(self.model, RATE)
+        rec.AcceptWaveform(pcm)
+        return json.loads(rec.FinalResult()).get("text", "").strip()
 
     def recognizer(self, names: list[str]) -> WakeRecognizer:
         if self.model is None:

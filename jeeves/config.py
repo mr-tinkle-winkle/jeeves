@@ -126,6 +126,8 @@ DEFAULTS: dict[str, Any] = {
         "notifications": True,
     },
     "wake_word": {
+        "backup_precheck": True,          # a missed-name check runs Whisper only if the small model heard name-like words
+        "backup_desktop": False,          # ...and on desktop audio at all (else: the wake model alone there)
         # If summary.enabled is on, wake word is off: agent names are found in
         # the continuous transcript instead.
         "enabled": True,
