@@ -271,10 +271,20 @@ class WakeRecognizer:
     PARTIAL_EVERY = 2        # frames between partial-result checks (~60 ms)
     PARTIAL_STABLE = 2       # checks in a row the name must stay in the partial result (~120 ms)
 
-    def __init__(self, model: Any, names: list[str]) -> None:
+    # Words that compete with the names in the grammar. With only the names (and [unk]) to choose from,
+    # Vosk decoded any short sound as the nearest name -- "guh", "gee", "cheese" came out as "jeeves" at
+    # confidence 1.0. With these to pick instead, a "guh" is decoded as "uh" or "go", and a name has to
+    # sound like the name. (Never the call names' own words; words the model doesn't know are dropped.)
+    DECOYS = ("the a uh um huh oh ah eh he she we me hey hi yeah you g gee go good get guess just jeez geez "
+              "cheese chief cheers sheets jeans genes keys please these eve eaves leaves believe believes "
+              "reeves steve sleeves weaves achieves even easy").split()
+
+    def __init__(self, model: Any, names: list[str], decoys: list[str] | None = None) -> None:
         self.model = model                  # keeps the shared model alive while in use
         self.names = names
-        self.rec = _vosk().KaldiRecognizer(model, RATE, json.dumps(names + ["[unk]"]))
+        own = {w for n in names for w in n.split()}
+        self.decoys = [w for w in (decoys or []) if w not in own]
+        self.rec = _vosk().KaldiRecognizer(model, RATE, json.dumps(names + self.decoys + ["[unk]"]))
         self.rec.SetWords(True)
         # (not SetPartialWords: with word times in partial results Vosk holds partials back by a second
         # or more, which is exactly what reporting the name early relies on)
@@ -430,7 +440,22 @@ class VoskWake:
             self.load()
         names = sorted({n.lower() for n in names if n.strip()})
         self._warn_unknown(names)
-        return WakeRecognizer(self.model, names)
+        return WakeRecognizer(self.model, names, self._known(WakeRecognizer.DECOYS) if self.decoys else [])
+
+    decoys = True                           # wake_word.decoys (set by the model manager)
+
+    def _known(self, words: list[str] | tuple[str, ...]) -> list[str]:
+        find = getattr(self.model, "vosk_model_find_word", None) or getattr(self.model, "find_word", None)
+        if find is None:
+            return list(words)
+        out = []
+        for w in words:
+            try:
+                if find(w) >= 0:
+                    out.append(w)
+            except Exception:  # noqa: BLE001
+                return list(words)
+        return out
 
     _warned: set[str] = set()
 

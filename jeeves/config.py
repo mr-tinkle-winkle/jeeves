@@ -128,8 +128,8 @@ DEFAULTS: dict[str, Any] = {
     "wake_word": {
         "backup_precheck": True,          # a missed-name check runs Whisper only if the small model heard name-like words
         "backup_desktop": False,          # ...and on desktop audio at all (else: the wake model alone there)
-        # If summary.enabled is on, wake word is off: agent names are found in
-        # the continuous transcript instead.
+        # decoys: everyday words compete with the names in the wake grammar, so "guh" isn't heard as "jeeves"
+        "decoys": True,
         "enabled": True,
         "engine": "vosk",                 # vosk | stt-match
         "model": None,                    # catalog id; None until downloaded

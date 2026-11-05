@@ -271,6 +271,7 @@ class ModelManager:
         with self._lock:
             if self.wake is None or self.wake.entry.id != entry.id:
                 self.wake = VoskWake(entry)
+            self.wake.decoys = bool(self.settings.get("wake_word.decoys", True))
             if not self.wake.loaded():
                 try:
                     self.wake.load()
