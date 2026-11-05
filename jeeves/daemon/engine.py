@@ -347,6 +347,9 @@ class Engine:
     def publish(self, topic: str, data: Any) -> None:
         try:
             self._publish_fn(topic, data)
+        except RuntimeError as exc:
+            if "closed" not in str(exc):            # (shutting down: nobody left to tell)
+                log.exception("publish failed")
         except Exception:
             log.exception("publish failed")
 
@@ -750,11 +753,29 @@ class Engine:
         if that fails too it's reported as ModelUnavailable, which every caller handles -- before,
         it escaped as an unexpected error and the request vanished with no answer."""
         lang = self.settings.get("models.stt.language", "en")
+        now = time.time()
+        if now < getattr(self, "_stt_rest_until", 0.0):
+            raise ModelUnavailable("stt", "speech recognition keeps crashing; resting it for a few minutes")
         for attempt in (1, 2):
             stt = self.models.stt(agent)
             try:
                 return stt.transcribe(pcm, prompt=self.stt_prompt(), language=lang)
             except (BackendError, OSError) as exc:
+                # crashing again and again (each restart reloading the model): rest it for 5 minutes
+                fails = [t for t in getattr(self, "_stt_fails", []) if now - t < 300] + [now]
+                self._stt_fails = fails
+                if len(fails) >= 4:
+                    self._stt_rest_until = now + 300
+                    self._stt_fails = []
+                    log.warning("speech recognition crashed %d times in 5 minutes; resting it for 5", len(fails))
+                    self.publish("notice", {"text": "Speech recognition keeps crashing, so it's resting for 5 "
+                                                    "minutes (see `journalctl --user -u jeeves`). A smaller "
+                                                    "speech model (Models) may help."})
+                    try:
+                        stt.unload()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise ModelUnavailable("stt", f"speech recognition failed: {exc}") from exc
                 if attempt == 2:
                     raise ModelUnavailable("stt", f"speech recognition failed: {exc}") from exc
                 log.warning("speech recognition failed (%s); restarting it and trying again", exc)
