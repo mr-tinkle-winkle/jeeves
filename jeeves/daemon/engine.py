@@ -169,6 +169,7 @@ class Engine:
         self.speaking = 0
         self.speaking_until = 0.0
         self._reply_cache: dict[tuple, tuple[bytes, int]] = {}      # wake-up replies, synthesized once
+        self._backup_guess: dict[str, str | None] = {}              # source -> the agent a missed call sounded like
         self._just_said: list[tuple[str, float, float]] = []          # (text, started, seconds) just spoken
         self._reply_tried: set[tuple] = set()
         self.active: dict[str, FunctionContext] = {}       # request id -> ctx
@@ -1084,6 +1085,19 @@ class Engine:
             return
         if not self._might_be_a_call(source, pcm):
             return                                   # nothing like a name in it: Whisper never runs
+        # something like a name was in it: the spinner shows while speech recognition checks (it was
+        # blank for those seconds -- a call the wake model missed only showed up once it answered)
+        guess = self._backup_guess.pop(source, None) or self.main_agent() or next(iter(self.active_agents()), None)
+        rid = f"backup-{source}"
+        if guess:
+            self.set_indicator(rid, guess, "thinking", "Checking what you said")
+        try:
+            self._backup_check(source, pcm, end_frame)
+        finally:
+            if guess:
+                self.set_indicator(rid, guess, "idle")
+
+    def _backup_check(self, source: str, pcm: bytes, end_frame: int | None) -> None:
         try:
             text = self.transcribe(pcm)
         except ModelUnavailable:
@@ -1140,9 +1154,12 @@ class Engine:
         import difflib
         names = {w for a in self.active_agents().values() for n in [a.get("name", "")] + list(a.get("call_names", []))
                  for w in normalize(n).split() if len(w) >= 3}
+        owner = {w: aid for aid, a in self.active_agents().items()
+                 for n in [a.get("name", "")] + list(a.get("call_names", [])) for w in normalize(n).split()}
         for w in words + [a + b for a, b in zip(words, words[1:])]:
             for n in names:
                 if difflib.SequenceMatcher(None, w, n).ratio() >= 0.6 or w[:3] == n[:3]:
+                    self._backup_guess[source] = owner.get(n)
                     return True
         return False
 
