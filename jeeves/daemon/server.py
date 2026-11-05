@@ -317,7 +317,8 @@ class Server:
         loop = self.loop
         self.engine.on_exit = lambda: loop.call_soon_threadsafe(stop.set)
         self.engine.start()
-        log.info("jeeves daemon listening on %s", sock)
+        from .. import __build__
+        log.info("jeeves daemon (build %s) listening on %s", __build__, sock)
         # Everything loaded at startup lives as long as the daemon: out of the garbage collector's way
         # (its full sweeps went over all of it every few seconds -- the audio makes a lot of garbage).
         import gc

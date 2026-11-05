@@ -99,6 +99,14 @@ def main(argv: list[str] | None = None) -> int:
         if cmd in (None, "gui"):
             from .gui.app import main as gui_main
             return gui_main()
+        if cmd in ("version", "--version"):
+            from . import __build__, __version__
+            print(f"installed: jeeves {__version__} (build {__build__})")
+            try:
+                print(f"running:   build {ipc.call('status').get('build', 'older than 2026-11-05b')}")
+            except Exception:  # noqa: BLE001 -- the daemon isn't running
+                print("running:   (the daemon isn't running)")
+            return 0
         if cmd == "daemon":
             from .daemon.server import main as daemon_main
             daemon_main()

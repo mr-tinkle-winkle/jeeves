@@ -2351,7 +2351,9 @@ class Engine:
         return out
 
     def status(self) -> dict[str, Any]:
+        from .. import __build__
         return {
+            "build": __build__,
             "enabled": self.is_on(),
             "agents": {aid: {"name": a.get("name"), "active": self.agent_active(a)} for aid, a in self.agents().items()},
             "listeners": {src: lst.status for src, lst in self.listeners.items()},
