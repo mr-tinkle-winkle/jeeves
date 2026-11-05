@@ -12,7 +12,7 @@ painting and the increment/decrement buttons' appearance are replaced.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import QEvent, Qt, QRectF
 from PySide6.QtGui import QPainter, QPainterPath
 from PySide6.QtWidgets import QAbstractSpinBox, QDoubleSpinBox, QSpinBox, QAbstractButton
 
@@ -94,6 +94,18 @@ class _CustomSpinBoxMixin:
             f"QAbstractSpinBox {{ background: transparent; border: none; color: {text_color}; "
             f"padding: 2px 26px 2px 8px; }}"
         )
+        # The number itself is drawn by an inner QLineEdit, which the rule above doesn't reach: on a
+        # desktop whose style/color scheme paints line edits itself (KDE Breeze), it kept its own
+        # background and text color, or was squeezed to nothing -- the number vanished. Style it and
+        # place it directly (resizeEvent) so it always shows.
+        edit = self.lineEdit()
+        edit.setFrame(False)
+        edit.setStyleSheet(
+            f"QLineEdit {{ background: transparent; border: none; margin: 0; padding: 0; "
+            f"color: {text_color}; selection-background-color: {self._theme.accent().name()}; "
+            f"selection-color: {contrast_text(self._theme.accent()).name()}; }}"
+        )
+        self.setMinimumHeight(self.fontMetrics().height() + 10)
 
         self._up_btn = _SpinArrowButton(up=True, parent=self)
         self._down_btn = _SpinArrowButton(up=False, parent=self)
@@ -122,6 +134,22 @@ class _CustomSpinBoxMixin:
         arrow_h = usable_h // 2
         self._up_btn.setGeometry(x, margin, arrow_w, arrow_h)
         self._down_btn.setGeometry(x, margin + arrow_h, arrow_w, usable_h - arrow_h)
+        self._place_edit()
+
+    def _place_edit(self) -> None:
+        """The number: left of the arrows, the box's full height (see _setup_custom_chrome)."""
+        margin = 2
+        x = self.width() - _ARROW_WIDTH - margin
+        self.lineEdit().setGeometry(8, margin, max(10, x - 8 - 4), self.height() - 2 * margin)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.StyleChange, QEvent.FontChange):   # Qt puts it back where its style says
+            self._place_edit()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._place_edit()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
