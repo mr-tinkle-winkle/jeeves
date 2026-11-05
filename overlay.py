@@ -131,8 +131,9 @@ def main(popups: bool = False) -> int:
     app.setWindowIcon(app_icon())              # popups, thoughts, sources and the video player
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    logging.getLogger("jeeves.overlay").info("%s on %s (layer-shell: %s)", "popups" if popups else "indicators",
-                                             QGuiApplication.platformName(), use_layer)
+    from . import __build__
+    logging.getLogger("jeeves.overlay").info("%s on %s (layer-shell: %s, build %s)", "popups" if popups else "indicators",
+                                             QGuiApplication.platformName(), use_layer, __build__)
 
     def target_screen() -> Any:
         """Which monitor overlays appear on (Indicators > Screen): the primary one, the one
@@ -348,6 +349,10 @@ def main(popups: bool = False) -> int:
                 self.states[rid] = st
             self.relayout()
             self.update()
+            logging.getLogger("jeeves.overlay").info(
+                "indicator %s %s -> showing %s, window %s %dx%d", rid, st.get("stage"),
+                [s["stage"] for s in self.visible_states()] or "nothing", "up" if self.isVisible() else "down",
+                self.width(), self.height())
 
         def show_response(self, text: str) -> None:
             if not self.cfg("response_text", True):
@@ -377,6 +382,7 @@ def main(popups: bool = False) -> int:
                     elif time.time() - self._empty_since > 0.25:
                         self._empty_since = 0.0
                         self.hide()
+                        logging.getLogger("jeeves.overlay").info("indicator window hidden (nothing to show)")
                 else:
                     self._empty_since = 0.0
                 self.update()
