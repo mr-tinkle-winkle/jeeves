@@ -8,7 +8,7 @@ A local-first voice assistant for Linux (NixOS). Named agents respond to spoken 
 
 ## Status
 
-First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (383 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
+First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (386 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
 
 ## Installing (NixOS)
 
@@ -114,6 +114,7 @@ jeeves overlay --popups   -- Review, Text Request, answers, thoughts, import app
 
 ## Decisions and rationale
 
+- **Names inside names (Jeeves / Evil Jeeves).** The wake model counted "jeeves" inside "evil jeeves" as a call too, and the grammar (names only) turns "hey jeeves" into "evil jeeves" now and then. A name inside a longer one is now one call: the longer when its extra words were heard clearly (confidence >= 0.55), else the shorter (`WakeRecognizer.pick_names`). Speech recognition then has the final word: if the transcript names a different agent than the one woken, the call goes to the one it names (`Engine.named_agent`: the earliest name, the longest of names ending at the same word).
 - **No double calls with Summary on.** A call the wake word model handled was started again from the Summary's transcript: the check was "a wake in the last few seconds", judged when the transcript came back -- after Whisper's seconds on the CPU it had usually expired. Now it's judged by when the words were said (`Engine._woken_during`).
 - **Summary is transcribed lightly.** With Summary on, every utterance in the room or on the desktop went through Whisper (large on the CPU: ~8 cores for ~6 s each time), which is what heated the CPU while Jeeves sat idle. The Summary now uses the wake word model's rough transcript (`summary.transcriber = light`, the default; `whisper` for the accurate one); Whisper only runs when something sounds like a call the wake model missed, or when keyword triggers or jumping in need that source.
 - **Summary no longer switches the wake word model off.** With Summary on, everything was transcribed and names were only found in the finished transcript (seconds after you stopped, no mic indicator while you talked, and a request said without a pause after the name often lost). Now the wake word model hears calls as usual, transcription feeds the Summary, and a name the wake model missed is still caught from the transcript (near the start of what was said, not one it already handled).

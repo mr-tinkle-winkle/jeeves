@@ -321,7 +321,7 @@ class WakeRecognizer:
             self._seen = 0
             return []
         if self._seen == 0:                 # first sight of a name: say so at once (the indicator shows)
-            self.maybe = next((n for n in self.names if self._name_in_one(n, tokens)), "")
+            self.maybe = max((n for n in self.names if self._name_in_one(n, tokens)), key=len, default="")
         self._seen += 1
         followed = not self._name_in(tokens[-1:]) and self._name_in(tokens[:-1])
         if self._seen < self.PARTIAL_STABLE and not followed:
@@ -342,16 +342,39 @@ class WakeRecognizer:
         self._last_partial = ""
         if words:
             self.speech_end = max(self.speech_end, max(float(w.get("end", 0)) for w in words))
-        found = []
-        # multi-word call names: score = mean confidence of their words in sequence
-        text_words = [(w["word"], float(w.get("conf", 0))) for w in words]
-        for name in self.names:
+        return self.pick_names([(w["word"], float(w.get("conf", 0))) for w in words], self.names)
+
+    EXTRA_WORD_CONF = 0.55   # "evil" in "evil jeeves" must be heard this clearly, or it's plain "jeeves"
+
+    @classmethod
+    def pick_names(cls, text_words: list[tuple[str, float]], names: list[str]) -> list[tuple[str, float]]:
+        """The call names in a phrase, scored by the mean confidence of their words. One name inside
+        another ("jeeves" in "evil jeeves") is one call, not two: the longer one when its extra words were
+        heard clearly, else the shorter (the grammar only knows names, so "hey jeeves" can come out as
+        "evil jeeves" -- with "evil" barely heard)."""
+        spans: list[tuple[int, int, str, float]] = []
+        for name in names:
             parts = name.split()
             for i in range(len(text_words) - len(parts) + 1):
                 if [w for w, _ in text_words[i:i + len(parts)]] == parts:
                     conf = sum(c for _, c in text_words[i:i + len(parts)]) / len(parts)
-                    found.append((name, conf))
-        return found
+                    spans.append((i, i + len(parts), name, conf))
+        keep = []
+        for a in spans:
+            inner = [b for b in spans if b is not a and b[0] <= a[0] and a[1] <= b[1] and (b[1] - b[0]) > (a[1] - a[0])]
+            outer = [b for b in spans if b is not a and a[0] <= b[0] and b[1] <= a[1] and (a[1] - a[0]) > (b[1] - b[0])]
+            if inner:                      # a is inside a longer name: only if that one's extra words were unclear
+                b = inner[0]
+                extra = [c for j, (_, c) in enumerate(text_words[b[0]:b[1]]) if not (a[0] <= b[0] + j < a[1])]
+                if extra and min(extra) >= cls.EXTRA_WORD_CONF:
+                    continue
+            if outer:                      # a contains a shorter name: only if its own extra words were clear
+                b = outer[0]
+                extra = [c for j, (_, c) in enumerate(text_words[a[0]:a[1]]) if not (b[0] <= a[0] + j < b[1])]
+                if extra and min(extra) < cls.EXTRA_WORD_CONF:
+                    continue
+            keep.append((a[2], a[3]))
+        return keep
 
 
 class VoskWake:

@@ -500,6 +500,9 @@ class Engine:
 
     def split_agent(self, text: str, source: str | None = None) -> tuple[str | None, str, float]:
         """Find a call name near the start of text -> (agent id, rest of text, score)."""
+        named = self.named_agent(text, source, within=3)
+        if named is not None:                   # (the longest name wins: "Evil Jeeves" over "Jeeves")
+            return named, self.strip_name(text, named, within=3)[1], 1.0
         words = text.strip()
         best: tuple[str | None, str, float] = (None, text, 0.0)
         for aid, a in self.active_agents().items():
@@ -713,6 +716,14 @@ class Engine:
             self.set_indicator(s.request_id, s.agent_id, "idle")
             return
         if s.mode == "request" and s.preroll is not None and spells:
+            other = self.named_agent(text, s.source)
+            if other is not None and other != s.agent_id:
+                # the wake model mixed up two names ("Jeeves" / "Evil Jeeves"); speech recognition heard the
+                # whole thing: the call goes to the agent it names
+                log.info("  woke %s, but speech recognition heard %r: it's for %s", s.agent_id, text, other)
+                self.set_indicator(s.request_id, s.agent_id, "idle")
+                s.agent_id = other
+                self.set_indicator(s.request_id, other, "transcript", text)
             found, rest = self.strip_name(text, s.agent_id)
             if found:
                 text = rest
@@ -765,21 +776,41 @@ class Engine:
         """(was the agent's name said, the rest after it): "Okay so, Jeeves, set a timer" -> (True,
         "set a timer"). Looks at the first `within` words only and accepts spellings that sound the same
         ("Jeevs", "Geeves") -- not merely similar ones ("Reeves", "geez")."""
+        at = self._name_at(text, agent_id, within)
+        return (True, at[2]) if at is not None else (False, text)
+
+    def _name_at(self, text: str, agent_id: str | None, within: int = 10) -> tuple[int, int, str] | None:
+        """Where the agent's name is said: (word index, how many words, the rest after it), or None."""
         agent = self.agents().get(agent_id or "", {})
-        names = [normalize(n).split() for n in list(agent.get("call_names", [])) + [agent.get("name", "")] if n]
-        tokens = re.findall(r"[\w'-]+|[^\w\s]", text)
-        word_idx = [i for i, t in enumerate(tokens) if re.match(r"[\w'-]", t)]
-        for k, i in enumerate(word_idx[:within]):
+        names = sorted((normalize(n).split() for n in list(agent.get("call_names", [])) + [agent.get("name", "")]
+                        if n), key=len, reverse=True)
+        words = list(re.finditer(r"[\w'-]+", text))
+        for k in range(min(within, len(words))):
             for parts in names:
-                if not parts or k + len(parts) > len(word_idx):
+                if not parts or k + len(parts) > len(words):
                     continue
-                said = [normalize(tokens[word_idx[k + j]]) for j in range(len(parts))]
+                said = [normalize(words[k + j].group()) for j in range(len(parts))]
                 if all(a == b or same_onset(a, b) and (similarity(a, b) >= 0.8 or sound_similarity(a, b) >= 0.9)
                        for a, b in zip(said, parts)):
-                    last = word_idx[k + len(parts) - 1]
-                    rest = "".join(t if not re.match(r"[\w'-]", t) else " " + t for t in tokens[last + 1:])
-                    return True, re.sub(r"^[\s,.:;!?-]+", "", rest).strip()
-        return False, text
+                    rest = text[words[k + len(parts) - 1].end():]      # as written: paths, quotes and all
+                    return k, len(parts), re.sub(r"^[\s,.:;!?-]+", "", rest).strip()
+        return None
+
+    def named_agent(self, text: str, source: str | None = None, within: int = 10) -> str | None:
+        """Which agent the words name: the earliest name, and of names starting at the same word the
+        longest -- "Evil Jeeves, ..." is Evil Jeeves, not Jeeves (whose name is in it too)."""
+        best: tuple[int, int, str] | None = None
+        for aid, a in self.active_agents().items():
+            if source and not self._listens(a, source):
+                continue
+            at = self._name_at(text, aid, within)
+            if at is None:
+                continue
+            # a shorter name ending where a longer one ends is the longer one's tail: "evil JEEVES"
+            key = (at[0] + at[1], -at[1])
+            if best is None or key < (best[0], best[1]):
+                best = (key[0], key[1], aid)
+        return best[2] if best else None
 
     FILLER = set("um uh uhm erm er hm hmm mm hey hi oh ok okay so yeah yes no the a and you i like well right "
                  "please thanks thank".split())

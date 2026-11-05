@@ -119,3 +119,31 @@ def test_summary_alone_doesnt_run_whisper(engine, monkeypatch):
     monkeypatch.setattr(engine, "transcribe", lambda pcm, *a, **k: ran.append(1) or "nice weather today")
     engine.on_utterance("microphone", b"\0" * 32000)
     assert "nice weather" in engine.summary.text(5) and not ran
+
+
+def test_nested_names_are_one_call():
+    from jeeves.models.backends import WakeRecognizer as W
+    names = ["jeeves", "evil jeeves"]
+    assert W.pick_names([("evil", 0.9), ("jeeves", 0.95)], names) == [("evil jeeves", 0.925)]
+    assert W.pick_names([("evil", 0.3), ("jeeves", 0.95)], names) == [("jeeves", 0.95)]   # "hey jeeves"
+    assert W.pick_names([("jeeves", 0.9)], names) == [("jeeves", 0.9)]
+
+
+def test_the_transcript_decides_between_jeeves_and_evil_jeeves(engine):
+    engine.settings.set("agents.evil_jeeves", {"name": "Evil Jeeves", "call_names": ["evil jeeves"], "enabled": True})
+    assert engine.named_agent("Evil Jeeves, what time is it?") == "evil_jeeves"
+    assert engine.named_agent("Hey Jeeves, what time is it?") == "jeeves"
+    assert engine.split_agent("Evil Jeeves, set a timer")[:2] == ("evil_jeeves", "set a timer")
+    assert engine.split_agent("Jeeves, set a timer")[:2] == ("jeeves", "set a timer")
+
+
+def test_a_mixed_up_wake_goes_to_the_agent_named(engine, monkeypatch):
+    engine.settings.set("agents.evil_jeeves", {"name": "Evil Jeeves", "call_names": ["evil jeeves"], "enabled": True})
+    monkeypatch.setattr(engine.models, "stt", lambda agent=None: STT("Evil Jeeves, set a timer for 4 minutes"))
+    went = []
+    monkeypatch.setattr(engine, "handle_text", lambda text, aid=None, **k: went.append((aid, text)) or {})
+    s = engine.open_session("microphone", "jeeves", "request")        # the wake model said "jeeves"
+    s.preroll = [b"\0" * 960]
+    s.feed(b"\0" * 960, True, time.time())
+    engine._finish_session(s)
+    assert went == [("evil_jeeves", "set a timer for 4 minutes")]
