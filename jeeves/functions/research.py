@@ -656,3 +656,61 @@ def run(ctx: Any, question: str, depth: str | None = None, earlier: str = "", pl
         ctx.think(f"Not answered yet -- digging deeper: {follow}")
         queries = [follow]
     return sources, results_all, notes
+
+
+# ---------------------------------------------------------------------------- when nothing turns up
+def unknown_term(plan: dict[str, Any], question: str) -> str:
+    """The word research couldn't find anything about: an unfamiliar term, else what it's about."""
+    for t in list(plan.get("terms") or []) + list(plan.get("context") or []):
+        if t.strip():
+            return t.strip()
+    guess = subject_guess(question)
+    return guess[0] if guess else ""
+
+
+def found_nothing(sources: list[dict[str, Any]], term: str) -> bool:
+    """Nothing read, or nothing read so much as mentions the word ("Wumpie" on no page at all)."""
+    if not sources:
+        return True
+    if not term:
+        return False
+    return not any(term_in(s.get("text", "") + " " + s.get("title", ""), term) >= 0 for s in sources)
+
+
+def spelling_variants(ctx: Any, term: str, question: str) -> list[str]:
+    """Other ways the word may be spelled -- what speech recognition heard isn't always how it's written:
+    "Wumpie" may be "Wumpy". The model's suggestions, else the usual sound-alike endings and letters."""
+    out: list[str] = []
+    reply = None
+    try:
+        reply = ctx.engine.models.respond(
+            ctx.agent, f"In the question \"{question}\", the word \"{term}\" may be misspelled (it was heard, not "
+            "typed). List up to 3 other likely spellings of it, one per line, nothing else.",
+            ctx=None, raw=True, temperature=0.3, max_tokens=40)
+    except Exception:  # noqa: BLE001 -- no model: the rules below
+        reply = None
+    for line in (reply or "").splitlines():
+        w = re.sub(r"^[\s\-*\d.)]+", "", line).strip(" \"'.")
+        if w and w.lower() != term.lower() and len(w) <= len(term) + 6 and w not in out:
+            out.append(w)
+    low = term.lower()
+    rules = [(r"ie$", "y"), (r"y$", "ie"), (r"ey$", "y"), (r"i$", "y"), (r"ph", "f"), (r"f", "ph"), (r"c", "k"),
+             (r"k", "c"), (r"(.)\1", r"\1"), (r"z", "s"), (r"s$", "z")]
+    for pat, rep in rules:
+        v = re.sub(pat, rep, low, count=1)
+        if v != low:
+            v = v[:1].upper() + v[1:] if term[:1].isupper() else v
+            if v not in out:
+                out.append(v)
+    return out[:3]
+
+
+def spelled(answer: str) -> str:
+    """A spelling as said: "W U M P Y" / "w-u-m-p-y" -> "wumpy"; anything else as it is."""
+    a = answer.strip().strip(".!?")
+    a = re.sub(r"^(?:it'?s|it is|that'?s|spelled|spelt)\s+", "", a, flags=re.I).strip()
+    parts = re.split(r"[\s,\-.]+", a)
+    if len(parts) >= 3 and all(len(x) == 1 for x in parts if x):
+        word = "".join(parts).lower()
+        return word[:1].upper() + word[1:]        # letters said one by one: written as a name
+    return a

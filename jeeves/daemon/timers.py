@@ -34,12 +34,12 @@ class Ticker:
 
     def _run(self) -> None:
         import subprocess
-        from .audio import _player
+        from .audio import _die_with_parent, _player
         rate = 16000
         sec = tick_pcm(rate)
         try:
             proc = subprocess.Popen(_player(True, rate, self.target), stdin=subprocess.PIPE,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=_die_with_parent)
         except (RuntimeError, OSError):
             return
         try:

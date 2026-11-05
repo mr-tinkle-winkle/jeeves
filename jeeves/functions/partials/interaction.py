@@ -8,7 +8,7 @@ from ..base import Arg, FunctionError, partial
 @partial("speak", "Says something out loud in the agent's voice (and shows it on screen if enabled).",
          args=[Arg("text", "string", "What to say")], category="interaction")
 def speak(ctx, text):
-    ctx.say(str(text))
+    ctx.say(str(text), in_character=True)        # (your own words, as written)
     return str(text)
 
 

@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self.sidebar.talk_to.connect(self._talk_to)
         self.sidebar.make_main.connect(lambda aid: self.send({"general.main_agent": aid}))
         self.sidebar.lobotomize.connect(self.lobotomize)
+        self.sidebar.set_mute.connect(lambda aid, kind, on: self.send({f"agents.{aid}.mute.{kind}": on}))
         self.agents_page.lobotomize = self.lobotomize
         av.addWidget(self.header)
         self.agent_tabs = ThemedTabs([(k, w[k]) for k in self.AGENT_TABS])

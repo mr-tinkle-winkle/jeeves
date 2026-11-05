@@ -214,8 +214,14 @@ def find_channel(name: str) -> tuple[str, str]:
     def score(c: dict[str, Any]) -> float:
         # subscribers on a log scale, steeply: a channel a thousand times bigger is the one people mean
         # even when a small one's name matches better (clip channels, fan reuploads, an abandoned namesake)
-        big = (math.log10(c["followers"] + 1) / most) ** 4
-        return (_name_score(name, c["name"]) + 0.5 * min(1.0, c["videos"] / (3 * len(spellings))) + 0.9 * big + (0.3 if c["rank"] == 0 else 0.1 if c["rank"] is not None else 0))
+        # -- but only a channel that has something to do with the name: its name, or the videos found for
+        # it. A huge unrelated channel in the results (CNN) won on size alone.
+        named = _name_score(name, c["name"])
+        found = min(1.0, c["videos"] / (2 * len(spellings)))
+        relevant = max(named, found)
+        big = (math.log10(c["followers"] + 1) / most) ** 4 * (relevant if relevant >= 0.4 else 0.0)
+        return (named + 0.5 * found + 0.9 * big +
+                (0.3 if c["rank"] == 0 else 0.1 if c["rank"] is not None else 0) * (1.0 if relevant >= 0.4 else 0.2))
     cid, best = max(cands.items(), key=lambda kv: score(kv[1]))
     if score(best) < 0.6:
         raise FunctionError(f"I couldn't find a YouTube channel called {name}")

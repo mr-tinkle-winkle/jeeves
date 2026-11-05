@@ -102,7 +102,7 @@ def online_prompt(ctx, agent, prompt):
         return f"<{agent} answer to: {prompt}>"
     ctx.state("researching", f"Asking {agent}")
     answer = ctx.engine.online.ask(agent, str(prompt), ctx)
-    return ctx.say(answer)
+    return ctx.say(answer, in_character=True)          # (another AI's answer, as it gave it)
 
 
 @full(
@@ -264,7 +264,7 @@ def _read_and_answer(ctx, question: str, region: str, screen: str) -> str:
                     f"{_glance(blocks, picked)}"),
                 ctx=ctx, temperature=0.3, kind="answer")
         if answer:
-            return ctx.say(answer)
+            return ctx.say(answer, in_character=True)
         if not text:
             return ctx.say("I couldn't find anything about that on the screen.")
         ctx.show(text)                           # the clean text is on screen; never read raw OCR aloud
@@ -634,7 +634,7 @@ def local_response(ctx, prompt):
         why = getattr(ctx, "model_problem", "")
         raise FunctionError(f"I didn't get an answer: {why}" if why else
                             "I didn't get an answer from the local response model")
-    return ctx.say(reply)
+    return ctx.say(reply, in_character=True)
 
 
 @full(
@@ -748,18 +748,16 @@ ACKS = ["Let me look that up.", "One moment, I'll check.", "Looking into it.", "
 )
 def research(ctx, question, depth=""):
     import random
-    from .research import best_of, fit, run, wants_estimate
+    from .research import best_of, fit, wants_estimate
     if ctx.dry_run:
         return f"<researched answer to: {question}>"
     question = str(question).strip()
     ctx.say(random.choice(ACKS))                 # looking things up takes a while: say so right away
     earlier = _earlier_exchange(ctx, question)   # "why is that?" is about the last answer
     plan: dict = {}
-    try:
-        sources, _, notes = run(ctx, question, depth or None, earlier=earlier, plan_out=plan)
-    except FunctionError as exc:
-        ctx.think(f"Research failed: {exc}")
-        sources, _, notes = [], [], []
+    sources, notes = _research_until_found(ctx, question, depth, earlier, plan)
+    if sources is None:                          # tried every way, and asked: nothing to be found
+        return ""
     goal = plan.get("goal") or question
     estimate = wants_estimate(f"{question} {goal}")
     before = f"Just before, {earlier}\n\n" if earlier else ""
@@ -775,7 +773,7 @@ def research(ctx, question, depth=""):
             ctx=ctx, temperature=0.3, kind="answer")
         if reply is None:
             raise FunctionError("I couldn't look that up online, and I don't know it myself")
-        return ctx.say(reply)
+        return ctx.say(reply, in_character=True)
     sources = best_of(sources, f"{question} {goal}")
     ctx.trace("sources", sources=[{"title": s["title"], "url": s["url"]} for s in sources])
     ctx.state("thinking", "Writing the answer")
@@ -801,6 +799,62 @@ def research(ctx, question, depth=""):
     ctx.state("responding", spoken)
     ctx.engine.speak(ctx, spoken)
     return spoken
+
+
+def _research_until_found(ctx, question: str, depth: str, earlier: str, plan: dict):
+    """Research, and when nothing at all turns up about the word: other spellings of it ("Wumpie" ->
+    "Wumpy"), then asking you how it's spelled, then asking what it is -- and only then giving up.
+    (sources, notes), or (None, None) when it gave up (and said so)."""
+    from .research import found_nothing, run, spelled, spelling_variants, unknown_term
+
+    def attempt(q: str, d: str | None, out: dict) -> tuple[list, list]:
+        try:
+            src, _, nts = run(ctx, q, d, earlier=earlier, plan_out=out)
+            return src, nts
+        except FunctionError as exc:
+            ctx.think(f"Research failed: {exc}")
+            return [], []
+    sources, notes = attempt(question, depth or None, plan)
+    term = unknown_term(plan, question)
+    if not term or not found_nothing(sources, term) or not ctx.settings.get("research.ask_when_stuck", True):
+        return sources, notes
+
+    def again(q: str, how: str) -> tuple[list, list] | None:
+        out: dict = {}
+        ctx.think(how)
+        src, nts = attempt(q, "quick", out)
+        t = unknown_term(out, q) or term
+        if not found_nothing(src, t):
+            plan.clear()
+            plan.update(out)
+            return src, nts
+        return None
+
+    # 1. other spellings
+    for alt in spelling_variants(ctx, term, question):
+        got = again(re.sub(re.escape(term), alt, question, flags=re.I), f"Nothing about '{term}'; trying '{alt}'")
+        if got:
+            return got
+    user_here = str(ctx.entry.get("source", "text")).split(":", 1)[0] in ("text", "voice", "manual", "cli")
+    if not user_here:
+        return sources, notes                     # (a schedule or trigger: nobody to ask)
+    # 2. how is it spelled?
+    answer = ctx.ask(f"I couldn't find anything about “{term}”. How is it spelled?", timeout=45)
+    if answer:
+        word = spelled(answer)
+        got = again(re.sub(re.escape(term), word, question, flags=re.I), f"Spelled '{word}'")
+        if got:
+            return got
+        term = word
+    # 3. what is it?
+    answer = ctx.ask(f"Still nothing on “{term}”. Could you tell me a bit more about what it is?", timeout=60)
+    if answer:
+        got = again(f"{question} ({term}: {answer})", f"More about it: {answer}")
+        if got:
+            return got
+    # 4. give up
+    ctx.say(f"I'm sorry, I couldn't find anything about “{term}”.")
+    return None, None
 
 
 def _earlier_exchange(ctx, question: str) -> str:

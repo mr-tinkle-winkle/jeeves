@@ -193,7 +193,7 @@ class JumpIn:
         with eng._lock:
             eng.active[entry["id"]] = ctx
         try:
-            ctx.say(reply)
+            ctx.say(reply, in_character=True)
             entry["status"] = "done"
         except Exception as exc:  # noqa: BLE001
             entry["status"] = "error"

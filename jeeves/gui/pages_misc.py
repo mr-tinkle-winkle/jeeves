@@ -81,6 +81,12 @@ class GeneralPage(Page):
                           "key that turns it back on too, add a shortcut for the command “jeeves --toggle” in "
                           "System Settings > Keyboard > Shortcuts."))
 
+        mf = self.section("Misfires")
+        self.b.check(mf, "Ignore talk that isn't for an agent", "general.ignore_chatter",
+                     hint="When a name wakes an agent but what follows is you talking to someone else (\"Jeeves... "
+                          "yeah I guess man, the game tonight was crazy\"), it does nothing instead of answering. "
+                          "Typed and manual requests always count.")
+
         tm = self.section("Timers")
         self.b.check(tm, "Tick like a clock while a timer runs", "timers.tick")
         self.b.check(tm, "Only near the end", "timers.tick_only_under",

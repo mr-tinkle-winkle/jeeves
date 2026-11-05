@@ -68,6 +68,9 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         "output_to": "speakers",      # speakers | microphone | both | device | device_mic
         "output_device": "",          # output_to=device/device_mic: exact output (sink), e.g. a headset
         "show_output": True,          # also show the response text on screen
+        # audio: never speaks (no wake-up reply, nothing synthesized); visual: nothing of it on screen
+        # (no indicator, no text) except when it's asking you something
+        "mute": {"audio": False, "visual": False},
         "enable_when_open": [],       # agent only active while one of these apps is open
         "enable_when_focused": [],    # ... or focused
         "disable_when_open": [],
@@ -77,7 +80,8 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         "prompt": prompt,
         "persona_preset": None,       # the built-in personality it started from (personas.py), if any
         "persona_strength": None,     # light / medium / strong; None = strong (stay fully in character)
-        "persona_check": False,       # grade each reply against the prompt and rewrite it once if it's off
+        "persona_check": False,
+        "persona_every_line": True,   # functions' plain lines ("Timer set.") said in character too       # grade each reply against the prompt and rewrite it once if it's off
         # function name -> bool; missing -> the function's own default
         "functions": {},
         # agent ids this agent may hand off to (Handoff function); "*" = any agent
@@ -107,7 +111,10 @@ def agent_memory(agent: dict[str, Any] | None, settings: Any = None) -> dict[str
 DEFAULTS: dict[str, Any] = {
     "general": {
         "enabled": True,                  # master switch: off = no listening, no models, no requests
-        "main_agent": "",                 # who a manual request (Text / Voice Request: Unknown) naming nobody goes to
+        "main_agent": "",
+        # a wake word followed by talk to someone else ("Jeeves... yeah I guess man, the game was crazy"):
+        # treated as a misfire and ignored, rather than answered
+        "ignore_chatter": True,                 # who a manual request (Text / Voice Request: Unknown) naming nobody goes to
         "end_of_speech_seconds": 1.2,     # silence before listening stops
         "mic_click_extend_seconds": 5.0,  # clicking the onscreen mic adds this
         "mic_hold_release_seconds": 1.0,  # after letting go of a held mic
@@ -217,7 +224,8 @@ DEFAULTS: dict[str, Any] = {
     # a clock ticking while a timer runs (off by default); only_under: just for its last
     # under_seconds (on, 60 s by default)
     "timers": {"tick": False, "tick_only_under": True, "tick_under_seconds": 60},
-    "research": {"engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000,
+    "research": {"ask_when_stuck": True,  # nothing found: other spellings, then ask how it's spelled, then what it is
+                 "engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000,
                  "depth": "normal",            # quick (1 round, 3 pages) | normal (2 rounds, 5) | deep (3, 8)
                  "auto_for_facts": True,       # factual questions (games, products, people...) get researched
                  "max_seconds": 90},           # stop reading more pages after this long

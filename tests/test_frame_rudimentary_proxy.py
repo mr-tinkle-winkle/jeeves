@@ -208,7 +208,7 @@ def test_an_agent_switches_on_and_off_from_its_header_and_its_menu(engine, theme
     row = w.sidebar.rows[("agent", "jeeves")]
     w.sidebar._menu(row, row.rect().center())
     acts = [a for a in w.sidebar._open_menu.actions() if a.text()]
-    assert [a.text() for a in acts] == ["Talk — Jeeves", "Turn Jeeves on", "Make main agent", "Lobotomize Jeeves…",
+    assert [a.text() for a in acts] == ["Talk — Jeeves", "Turn Jeeves on", "Make main agent", "Mute voice", "Mute on screen", "Lobotomize Jeeves…",
                                         "Open Jeeves"] and not acts[0].isEnabled()
     acts[1].trigger()
     assert sent[-1] == {"agents.jeeves.enabled": True} and w.header.switch.isChecked() and w.header.button.isEnabled()

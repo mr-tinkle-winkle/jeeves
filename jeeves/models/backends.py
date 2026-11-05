@@ -674,8 +674,12 @@ class KokoroTTS(TTS):
         amount = float(st.get("blend_amount", 0.3))
         if blend and blend != v and 0 < amount:
             try:                                  # mix two voices: a new voice of your own
-                use = self.k.get_voice_style(v) * (1 - amount) + self.k.get_voice_style(blend) * amount
-            except Exception:  # noqa: BLE001 -- unknown voice: just the main one
+                getter = getattr(self.k, "get_voice_style", None)
+                if getter is None:                # (older kokoro-onnx: the voices table directly)
+                    getter = lambda name: self.k.voices[name]  # noqa: E731
+                use = getter(v) * (1 - amount) + getter(blend) * amount
+            except Exception as exc:  # noqa: BLE001 -- unknown voice: just the main one, and say so
+                log.warning("couldn't mix %s into %s (%s); using %s alone", blend, v, exc, v)
                 use = v
         speed = max(0.5, min(2.0, float(st.get("speed", 1.0))))
         samples, rate = self.k.create(text, voice=use, speed=speed, lang="en-gb" if v.startswith("b") else "en-us")

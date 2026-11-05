@@ -29,7 +29,7 @@ EFFECTS: dict[str, tuple[str, list[str]]] = {
 DEFAULT_STYLE: dict[str, Any] = {
     "speaker": "",          # multi-speaker voices: speaker name or number ("" = the voice's own/first)
     "speed": 1.0,           # 0.5 .. 2.0
-    "pitch": 0.0,           # semitones, -12 .. +12
+    "pitch": 0.0,           # semitones, -24 .. +24
     "expressiveness": 0.667,  # Piper noise scale: 0 = flat, 1 = lively
     "effect": "none",
     "blend": "",            # Kokoro: a second voice mixed in
@@ -42,7 +42,7 @@ def style_of(agent: dict[str, Any] | None) -> dict[str, Any]:
     out.update({k: v for k, v in ((agent or {}).get("voice_style") or {}).items() if v is not None})
     try:
         out["speed"] = max(0.5, min(2.0, float(out["speed"])))
-        out["pitch"] = max(-12.0, min(12.0, float(out["pitch"])))
+        out["pitch"] = max(-24.0, min(24.0, float(out["pitch"])))
         out["expressiveness"] = max(0.0, min(1.2, float(out["expressiveness"])))
         out["blend_amount"] = max(0.0, min(1.0, float(out["blend_amount"])))
     except (TypeError, ValueError):

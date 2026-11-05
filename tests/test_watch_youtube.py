@@ -283,3 +283,23 @@ def test_a_spoken_channel_name_with_a_space_finds_the_same_channel_as_one_word(m
     monkeypatch.setattr(yt, "_try_search", fake_search)
     assert yt.find_channel("moistcritikal")[0] == "UCmain"
     assert yt.find_channel("moist critikal")[0] == "UCmain"
+
+
+def test_a_huge_unrelated_channel_in_the_results_is_not_picked(monkeypatch):
+    """'the newest moist critikal video' opened a CNN video: CNN's subscribers outweighed everything."""
+    from jeeves.functions.partials import youtube as yt
+    main = {"channel_id": "UCmain", "channel": "penguinz0", "channel_follower_count": 17_000_000}
+    cnn = {"channel_id": "UCcnn", "channel": "CNN", "channel_follower_count": 18_000_000}
+    clips = {"channel_id": "UCclips", "channel": "Moist Critikal Clips", "channel_follower_count": 9_000}
+
+    def fake_try(*args, errors=None, **kw):
+        if "/@" in args[-1]:
+            return None
+        return {"entries": [cnn, clips, main]}
+
+    def fake_search(q, errors=None):
+        owners = [main, main, main, clips, cnn] if q == "moistcritikal" else [clips, main, main, cnn]
+        return [{"id": f"v{i}", "channel_id": o["channel_id"], "channel": o["channel"]} for i, o in enumerate(owners)]
+    monkeypatch.setattr(yt, "_try", fake_try)
+    monkeypatch.setattr(yt, "_try_search", fake_search)
+    assert yt.find_channel("moist critikal")[0] == "UCmain"

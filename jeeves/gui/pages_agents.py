@@ -119,6 +119,9 @@ class AgentsPage(Page):
         self.persona_check = CustomCheckBox("Check replies stay in character (rewrites ones that don't; one or two "
                                             "extra model calls per reply)")
         g.addWidget(self.persona_check)
+        self.every_line = CustomCheckBox("Every line in character: functions' plain lines (\"Timer set for 2:00.\") are "
+                                         "said the way it would say them (a short model call each)")
+        g.addWidget(self.every_line)
         self.persona_btn = CustomButton("Test personality")
         self.persona_btn.clicked.connect(self.test_persona)
         g.addWidget(row(self.persona_btn))
@@ -152,6 +155,10 @@ class AgentsPage(Page):
         self.output.currentIndexChanged.connect(lambda _i: self._device_visibility())
         self.show_output = CustomCheckBox("Also show responses on screen")
         g.addWidget(self.show_output)
+        self.mute_audio = CustomCheckBox("Mute its voice: it never speaks (no wake-up reply either)")
+        self.mute_visual = CustomCheckBox("Mute it on screen: no indicator or text (except when it asks you something)")
+        g.addWidget(self.mute_audio)
+        g.addWidget(self.mute_visual)
         g.addWidget(label("To let friends in a call hear an agent: set Speaks through to Microphone or Both, "
                           "then pick “Jeeves-Microphone” as your microphone in Discord (it carries your "
                           "voice and the agent's)."))
@@ -242,7 +249,7 @@ class AgentsPage(Page):
             sp.wheelEvent = lambda e: e.ignore()
             return sp
         self.v_speed = dspin(0.5, 2.0, 0.05, suffix="×")
-        self.v_pitch = dspin(-12, 12, 0.5, 1, " semitones")
+        self.v_pitch = dspin(-24, 24, 0.5, 1, " semitones")
         self.v_expr = dspin(0.0, 1.2, 0.05)
         g.addWidget(row(label("Speed", False), self.v_speed))
         g.addWidget(row(label("Pitch", False), self.v_pitch))
@@ -286,8 +293,6 @@ class AgentsPage(Page):
                           "else."))
         self.rud_function = combo()
         g.addWidget(row(label("Its function", False), self.rud_function, stretch_last=True))
-        self.rud_mute = CustomCheckBox("Mute: never speaks (no wake-up reply, no spoken answers; text still shows)")
-        g.addWidget(self.rud_mute)
         # Run commands: what's said is the command line
         self.rud_cmd_box = QWidget()
         cb = QVBoxLayout(self.rud_cmd_box)
@@ -383,6 +388,7 @@ class AgentsPage(Page):
     # ------------------------------------------------------------------
     def refresh(self, settings: dict[str, Any], locked: set[str]) -> None:
         self.agents = copy.deepcopy(settings.get("agents") or {})
+        self.global_voice = ((settings.get("models") or {}).get("tts_voice")) or ""
         self.locked = locked
         self.picker.clear()
         for aid, a in self.agents.items():
@@ -451,7 +457,8 @@ class AgentsPage(Page):
         self._voice_changed(load_speakers=True)
 
     def _voice_entry(self) -> dict[str, Any] | None:
-        vid = self.voice_box.currentData()
+        """The voice this agent speaks in -- its own choice, or the global one."""
+        vid = self.voice_box.currentData() or getattr(self, "global_voice", "")
         return next((m for m in self.catalog if m["id"] == vid), None)
 
     def _voice_changed(self, load_speakers: bool = True) -> None:
@@ -460,7 +467,9 @@ class AgentsPage(Page):
         multi = bool(m and engine == "piper" and m.get("speakers", 1) > 1)
         self.speaker_row.setVisible(multi)
         self.expr_row.setVisible(engine in ("piper", ""))
-        self.blend_row.setVisible(engine in ("kokoro", ""))
+        # mixing voices is something Kokoro does (its voices are blendable); shown only for a Kokoro voice --
+        # set on a Piper voice it did nothing at all
+        self.blend_row.setVisible(engine == "kokoro")
         self.download_voice_btn.setVisible(bool(m and not m["installed"]))
         if m:
             extra = f" {m['speakers']} speakers." if multi and str(m["speakers"]) not in m.get("description", "") else ""
@@ -541,7 +550,6 @@ class AgentsPage(Page):
         rud = a.get("rudimentary") or {}
         self.rud_on.setChecked(bool(rud.get("enabled")))
         self._fill_rud_functions(a, rud.get("function") or "")
-        self.rud_mute.setChecked(bool(rud.get("mute")))
         self.rud_program.setText(rud.get("program") or "")
         self.rud_confirm.setCurrentIndex(max(0, self.rud_confirm.findData(rud.get("confirm") or "risky")))
         self.rud_terminal.setChecked(bool(rud.get("terminal")))
@@ -557,6 +565,7 @@ class AgentsPage(Page):
         self.persona.setCurrentIndex(max(0, self.persona.findData(a.get("persona_preset") or "")))
         self.strength.setCurrentIndex(max(0, self.strength.findData(a.get("persona_strength") or "strong")))
         self.persona_check.setChecked(bool(a.get("persona_check", False)))
+        self.every_line.setChecked(bool(a.get("persona_every_line", True)))
         self.listen.setCurrentIndex(max(0, self.listen.findData(a.get("listen_to", "user"))))
         self._want_device = a.get("listen_device", "")
         self._fill_devices()
@@ -576,6 +585,9 @@ class AgentsPage(Page):
         self._fill_out_devices()
         self._device_visibility()
         self.show_output.setChecked(a.get("show_output", True))
+        m = a.get("mute") or {}
+        self.mute_audio.setChecked(bool(m.get("audio")) or bool((a.get("rudimentary") or {}).get("mute")))
+        self.mute_visual.setChecked(bool(m.get("visual")))
         self.color_edit.setText(a.get("indicator_color") or "")
         self.enable_open.setText(", ".join(a.get("enable_when_open", [])))
         self.enable_focus.setText(", ".join(a.get("enable_when_focused", [])))
@@ -628,7 +640,6 @@ class AgentsPage(Page):
         commands do: one of them can be its function)."""
         from ..functions.rudimentary import NAME
         self.rud_function.setEnabled(on)
-        self.rud_mute.setEnabled(on)
         self.rud_cmd_box.setVisible(on and self.rud_function.currentData() == NAME)
         self.func_box.setEnabled(not on)
 
@@ -701,6 +712,7 @@ class AgentsPage(Page):
             "threshold": None if self.threshold_global.isChecked() else round(self.threshold.value(), 2),
             "wake_reply": " | ".join(p.strip() for p in self.wake_reply.text().split("|") if p.strip()),
             "prompt": self.prompt.toPlainText(), "persona_check": self.persona_check.isChecked(),
+            "persona_every_line": self.every_line.isChecked(),
             "persona_preset": self.persona.currentData() or None, "persona_strength": self.strength.currentData(),
             "listen_to": self.listen.currentData(),
             "listen_device": self.device.currentData() or "" if self.listen.currentData() == "device" else
@@ -710,6 +722,7 @@ class AgentsPage(Page):
                        "recent": None if self.mem_recent.value() < 0 else self.mem_recent.value(),
                        "notes": self.mem_notes.value(), "own_only": self.mem_own.isChecked()},
             "output_to": self.output.currentData(), "show_output": self.show_output.isChecked(),
+            "mute": {"audio": self.mute_audio.isChecked(), "visual": self.mute_visual.isChecked()},
             "output_device": self.out_device.currentData() or "" if self.output.currentData() in
             ("device", "device_mic") else a.get("output_device", ""),
             "indicator_color": self.color_edit.text().strip() or None,
@@ -720,7 +733,7 @@ class AgentsPage(Page):
             "functions": {name: cb.isChecked() for name, cb in self.func_checks.items()},
             "commands": self.commands.value(),
             "rudimentary": {"enabled": self.rud_on.isChecked(), "function": self.rud_function.currentData() or "",
-                            "mute": self.rud_mute.isChecked(), "program": self.rud_program.text().strip(),
+                            "mute": False, "program": self.rud_program.text().strip(),
                             "confirm": self.rud_confirm.currentData() or "risky",
                             "terminal": self.rud_terminal.isChecked()},
             "jeenius": self.jeenius.currentData() or None,

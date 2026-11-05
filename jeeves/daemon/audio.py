@@ -210,6 +210,27 @@ def _player(raw: bool, rate: int, target: str) -> list[str]:
     raise RuntimeError("no audio player (pw-play, paplay or aplay)")
 
 
+LIVE: "set[Playback]" = set()          # every voice playing right now (Abort / switching off stops them all)
+_live_lock = threading.Lock()
+
+
+def _die_with_parent() -> None:
+    """In a player process: it goes when Jeeves goes (killed or crashed), mid-sentence or not."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, 15)     # PR_SET_PDEATHSIG, SIGTERM
+    except (OSError, AttributeError):
+        pass
+
+
+def stop_all() -> int:
+    with _live_lock:
+        live = list(LIVE)
+    for pb in live:
+        pb.stop()
+    return len(live)
+
+
 class Playback:
     """Plays PCM to one or more targets; ``pause``/``resume``/``stop`` work while
     playing (clicking the 'responding' indicator toggles pause)."""
@@ -227,9 +248,12 @@ class Playback:
         procs = []
         errs: dict[int, list[bytes]] = {}
         try:
+            with _live_lock:
+                LIVE.add(self)
             try:
                 procs = [subprocess.Popen(_player(True, self.rate, t), stdin=subprocess.PIPE,
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) for t in self.targets]
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                          preexec_fn=_die_with_parent) for t in self.targets]
             except (RuntimeError, OSError) as exc:     # no player installed, or it can't start: say why
                 self.error = str(exc)
                 log.warning("can't play audio: %s", exc)
@@ -280,6 +304,8 @@ class Playback:
                     self.error = err.decode(errors="replace").strip()[-300:] or f"exit {p.returncode}"
                     log.warning("audio player %s failed: %s", p.args[0], self.error)
         finally:
+            with _live_lock:
+                LIVE.discard(self)
             self.done.set()
 
     def seconds(self) -> float:

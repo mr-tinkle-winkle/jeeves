@@ -517,6 +517,7 @@ class Sidebar(QWidget):
     talk_to = Signal(str)             # right-click > Talk
     make_main = Signal(str)           # right-click > Main agent ("" = none)
     lobotomize = Signal(str)          # right-click > Lobotomize
+    set_mute = Signal(str, str, bool)  # right-click > Mute voice / Mute on screen: (agent, "audio"|"visual", on)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -572,6 +573,7 @@ class Sidebar(QWidget):
                 row = SideRow(aid, a.get("name") or aid, "agent", agent_color(a, i))
                 row.on = bool(a.get("enabled", True))
                 row.main = aid == main
+                row.mute = dict(a.get("mute") or {})
                 row.clicked.connect(lambda _c=False, k=aid: self.pick("agent", k))
                 row.setContextMenuPolicy(Qt.CustomContextMenu)
                 row.customContextMenuRequested.connect(lambda pos, r=row: self._menu(r, pos))
@@ -591,6 +593,11 @@ class Sidebar(QWidget):
         main = m.addAction("Main agent ✓" if row.main else "Make main agent")
         main.setToolTip("Manual requests that don't name an agent go to the Main agent")
         main.triggered.connect(lambda: self.make_main.emit("" if row.main else row.key))
+        m.addSeparator()
+        mute = getattr(row, "mute", {}) or {}
+        for kind, text in (("audio", "Mute voice"), ("visual", "Mute on screen")):
+            act = m.addAction(("✓ " if mute.get(kind) else "") + text)
+            act.triggered.connect(lambda _c=False, k=kind: self.set_mute.emit(row.key, k, not mute.get(k)))
         m.addSeparator()
         lob = m.addAction(f"Lobotomize {name}…")
         lob.triggered.connect(lambda: self.lobotomize.emit(row.key))

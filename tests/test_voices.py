@@ -18,7 +18,7 @@ def test_lots_of_voices_and_presets_share_downloads():
 def test_style_is_clamped():
     from jeeves.models.voicefx import style_of
     st = style_of({"voice_style": {"speed": 9, "pitch": -40, "effect": "nonsense", "blend_amount": 3}})
-    assert st["speed"] == 2.0 and st["pitch"] == -12 and st["effect"] == "none" and st["blend_amount"] == 1.0
+    assert st["speed"] == 2.0 and st["pitch"] == -24 and st["effect"] == "none" and st["blend_amount"] == 1.0
     assert style_of({})["speed"] == 1.0
 
 
