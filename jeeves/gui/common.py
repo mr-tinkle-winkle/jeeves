@@ -55,6 +55,28 @@ _theme_cache = _ThemeCache()
 
 def install_theme() -> None:
     set_settings_provider(_theme_cache.get)
+    apply_app_font()
+
+
+def apply_app_font() -> None:
+    """The theme's body font for every widget (bundled faces loaded first). Called again when the
+    theme changes, before the window is rebuilt."""
+    from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is None:
+        return
+    from .themes import load_fonts
+    load_fonts()
+    t = _theme_cache.get()
+    if not hasattr(apply_app_font, "_desktop"):
+        apply_app_font._desktop = QFont(app.font())          # type: ignore[attr-defined]
+    f = QFont(apply_app_font._desktop)                       # type: ignore[attr-defined]
+    if t.font_body:
+        f.setFamily(t.font_body)
+    if t.font_size:
+        f.setPointSize(int(t.font_size))
+    app.setFont(f)
 
 
 def theme_palette(widget: QWidget) -> None:

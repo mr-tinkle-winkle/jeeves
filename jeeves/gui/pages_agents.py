@@ -20,10 +20,20 @@ OUTPUT = [("Speakers", "speakers"), ("Microphone (Jeeves-Microphone source)", "m
           ("A specific device…", "device"), ("A specific device + Jeeves-Microphone", "device_mic")]
 
 
+# Which agent tab each section of the form is on (the window shows one tab of an agent at a time).
+TAB_OF = {"Identity": "personality", "Conversation": "personality", "Memory": "personality",
+          "When this agent is active": "personality", "Listening and speaking": "voice", "Voice": "voice",
+          "Model overrides (empty = global choice)": "brain", "Functions": "abilities", "Commands": "abilities",
+          "Handoff": "abilities", "Custom sources": "sources"}
+
+
 class AgentsPage(Page):
-    def __init__(self, daemon: Any) -> None:
+    def __init__(self, daemon: Any, embedded: bool = False) -> None:
         super().__init__("Agents", "Each agent has its own call names, voice, models, personality and functions. "
-                                   "Several agents can be active at once.")
+                                   "Several agents can be active at once.", show_heading=not embedded)
+        self.embedded = embedded
+        self.tab_groups: dict[str, list[QWidget]] = {}
+        self.on_loaded: Any = None          # called when functions/models arrive (the overview's numbers)
         self.daemon = daemon
         self.agents: dict[str, dict[str, Any]] = {}
         self.functions: list[dict[str, Any]] = []
@@ -42,6 +52,11 @@ class AgentsPage(Page):
         top.addWidget(self.picker, 1)
         top.addWidget(add)
         top.addWidget(self.delete_btn)
+        if embedded:                         # (the window's sidebar picks and adds agents)
+            for w in (self.picker, add):
+                w.hide()
+            top.itemAt(0).widget().hide()
+            top.insertStretch(0, 1)
         self.body_layout.addLayout(top)
 
         self.form = QWidget()
@@ -80,6 +95,20 @@ class AgentsPage(Page):
                                 "research and hard questions; 3 thinks unless the request is simple; 4 always "
                                 "thinks.")
         g.addWidget(row(label("Jeenius", False), self.jeenius, stretch_last=True))
+        from ..personas import PERSONAS, STRENGTHS
+        self.persona = combo()
+        self.persona.addItem("Your own (write it below)", "")
+        for pk, pv in PERSONAS.items():
+            self.persona.addItem(f"{pv.name} — {pv.blurb}", pk)
+        self.strength = combo()
+        for st in STRENGTHS:
+            self.strength.addItem(st.capitalize(), st)
+        self.strength.setToolTip("Light: a touch of the character, mostly plain answers (a butler who doesn't keep "
+                                 "offering tea). Medium: clearly the character, the answer first. Strong: fully in "
+                                 "character.")
+        self.persona.activated.connect(lambda _i: self._apply_persona())
+        self.strength.activated.connect(lambda _i: self._apply_persona())
+        g.addWidget(row(label("Start from", False), self.persona, label("Strength", False), self.strength, stretch=1))
         self.prompt = CustomPlainTextEdit()
         self.prompt.setPlaceholderText("Default prompt: personality, tone, things to always keep in mind")
         self.prompt.setMinimumHeight(90)
@@ -290,11 +319,29 @@ class AgentsPage(Page):
         self.body_layout.addWidget(save, alignment=Qt.AlignRight)
         self.finish()
 
+    def _apply_persona(self) -> None:
+        """A built-in personality at a strength: its text goes into the box (Ctrl+Z brings yours back)."""
+        from ..personas import PERSONAS
+        p = PERSONAS.get(self.persona.currentData() or "")
+        if p is None:
+            return
+        cur = self.prompt.textCursor()
+        cur.select(cur.SelectionType.Document)
+        cur.insertText(p.prompt(self.strength.currentData()))
+
     def _group(self, layout: QVBoxLayout, title: str) -> QVBoxLayout:
         box = CustomGroupBox(title)
         lay = box.make_layout(QVBoxLayout)
         layout.addWidget(box)
+        self.tab_groups.setdefault(TAB_OF.get(title, "personality"), []).append(box)
         return lay
+
+    def show_tab(self, tab: str | None) -> None:
+        """Only this tab's sections (None: all of them)."""
+        for key, boxes in self.tab_groups.items():
+            for b in boxes:
+                b.setVisible(tab is None or key == tab)
+        self.relayout()
 
     # ------------------------------------------------------------------
     def refresh(self, settings: dict[str, Any], locked: set[str]) -> None:
@@ -319,6 +366,8 @@ class AgentsPage(Page):
             self.func_checks[f["name"]] = cb
             self.func_layout.addWidget(cb)
         self.select(self.current)
+        if self.on_loaded:
+            self.on_loaded()
 
     def _got_models(self, st: Any) -> None:
         self.catalog = (st or {}).get("catalog", [])
@@ -338,6 +387,8 @@ class AgentsPage(Page):
                 self.v_blend.addItem(m["name"], m["id"])
         self._fill_voices()
         self.select(self.current)
+        if self.on_loaded:
+            self.on_loaded()
 
     # ---- voice ----------------------------------------------------------------
     ENGINE_NAMES = {"piper": "Piper", "kokoro": "Kokoro", "espeak-ng": "eSpeak"}
@@ -458,6 +509,8 @@ class AgentsPage(Page):
         reply = a.get("wake_reply") or ""
         self.wake_reply.setText(" | ".join(reply) if isinstance(reply, list) else str(reply))
         self.prompt.setPlainText(a.get("prompt", ""))
+        self.persona.setCurrentIndex(max(0, self.persona.findData(a.get("persona_preset") or "")))
+        self.strength.setCurrentIndex(max(0, self.strength.findData(a.get("persona_strength") or "strong")))
         self.persona_check.setChecked(bool(a.get("persona_check", False)))
         self.listen.setCurrentIndex(max(0, self.listen.findData(a.get("listen_to", "user"))))
         self._want_device = a.get("listen_device", "")
@@ -569,6 +622,7 @@ class AgentsPage(Page):
             "threshold": None if self.threshold_global.isChecked() else round(self.threshold.value(), 2),
             "wake_reply": " | ".join(p.strip() for p in self.wake_reply.text().split("|") if p.strip()),
             "prompt": self.prompt.toPlainText(), "persona_check": self.persona_check.isChecked(),
+            "persona_preset": self.persona.currentData() or None, "persona_strength": self.strength.currentData(),
             "listen_to": self.listen.currentData(),
             "listen_device": self.device.currentData() or "" if self.listen.currentData() == "device" else
             a.get("listen_device", ""),

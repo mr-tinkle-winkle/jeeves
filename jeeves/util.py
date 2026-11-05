@@ -132,16 +132,23 @@ def desktop() -> str:
     return "other"
 
 
+_session_env: tuple[float, str] = (-1e9, "")
+
+
 def graphical_env() -> dict[str, str]:
     """The current env plus the graphical session's display variables from the
     systemd user manager (the daemon may start before the desktop)."""
     env = dict(os.environ)
     if env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"):
         return env
-    try:
-        out = run(["systemctl", "--user", "show-environment"], timeout=3).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return env
+    global _session_env
+    now = time.monotonic()
+    if now - _session_env[0] > 10:          # (asked every 2 s while there's no desktop: a program each time)
+        try:
+            _session_env = (now, run(["systemctl", "--user", "show-environment"], timeout=3).stdout)
+        except (OSError, subprocess.TimeoutExpired):
+            _session_env = (now, "")
+    out = _session_env[1]
     for ln in out.splitlines():
         k, _, v = ln.partition("=")
         if k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP",

@@ -41,11 +41,13 @@ def identity_block(agent: dict[str, Any]) -> str:
     name = name_of(agent)
     prompt = agent["prompt"].strip()
     lead = "" if re.match(r"^\s*(you are|you're|you play|act as)\b", prompt, re.I) else f"You are {name}. "
-    return (f"{lead}{prompt}\nStay in character in every reply, short and factual ones included, and never call "
-            "yourself an AI unless the character would.")
+    from ..personas import stay_line
+    return f"{lead}{prompt}\n{stay_line(agent.get('persona_strength'))}"
 
 
 def reminder(agent: dict[str, Any]) -> str:
+    if agent.get("persona_strength") == "light":
+        return f"(Reply as {name_of(agent)}.)"
     return f"(Reply as {name_of(agent)}, fully in character.)"
 
 

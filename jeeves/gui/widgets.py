@@ -36,7 +36,7 @@ def is_locked(locked: set[str], path: str) -> bool:
 class Page(QWidget):
     """A top-level page: own background, 3 px outline, always scrollable."""
 
-    def __init__(self, title: str, subtitle: str = "") -> None:
+    def __init__(self, title: str, subtitle: str = "", show_heading: bool = True) -> None:
         super().__init__()
         self._theme = Theme()
         outer = QVBoxLayout(self)
@@ -50,13 +50,17 @@ class Page(QWidget):
         pad = self._theme.padding
         self.body_layout.setContentsMargins(pad, pad, pad, pad)
         self.body_layout.setSpacing(pad)
-        heading = QLabel(title)
-        heading.setStyleSheet(f"QLabel {{ color: {self._theme.text().name()}; font-size: 20px; font-weight: bold; }}")
-        self.body_layout.addWidget(heading)
+        self.heading = QLabel(self._theme.heading(title))
+        self.heading.setFont(self._theme.display_font(17))
+        self.heading.setStyleSheet(f"QLabel {{ color: {self._theme.text().name()}; }}")
+        self.body_layout.addWidget(self.heading)
+        self.heading.setVisible(show_heading)
         if subtitle:
             sub = QLabel(subtitle)
             sub.setWordWrap(True)
+            sub.setStyleSheet(f"QLabel {{ color: {self._theme.muted().name()}; }}")
             self.body_layout.addWidget(sub)
+            sub.setVisible(show_heading)
         scroll.setWidget(self.body)
         self.body.setAutoFillBackground(False)
         scroll.viewport().setAutoFillBackground(False)
@@ -65,6 +69,7 @@ class Page(QWidget):
     def paintEvent(self, _e: Any) -> None:
         p = QPainter(self)
         p.fillRect(self.rect(), self._theme.page_background())
+        paint_pattern(p, self.rect(), self._theme)
         p.end()
         paint_page_outline(self, self._theme.page_background())
 
@@ -108,6 +113,26 @@ class Page(QWidget):
 
     def refresh(self, settings: dict[str, Any], locked: set[str]) -> None:
         """Called with fresh settings whenever they change."""
+
+
+def paint_pattern(p: QPainter, rect: Any, theme: Theme) -> None:
+    """The theme's page background pattern: Blueprint's grid paper, Arcade's scanlines."""
+    pattern = theme.settings.pattern
+    if not pattern:
+        return
+    w, h = rect.width(), rect.height()
+    if pattern == "grid":
+        fine, major = QColor(255, 255, 255, 14), QColor(255, 255, 255, 30)
+        for step, color in ((16, fine), (80, major)):
+            p.setPen(color)
+            for x in range(0, w, step):
+                p.drawLine(x, 0, x, h)
+            for y in range(0, h, step):
+                p.drawLine(0, y, w, y)
+    elif pattern == "scanlines":
+        p.setPen(QColor(255, 255, 255, 10))
+        for y in range(0, h, 4):
+            p.drawLine(0, y, w, y)
 
 
 def _hint_style() -> str:

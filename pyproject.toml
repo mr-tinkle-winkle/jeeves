@@ -27,7 +27,7 @@ include = ["jeeves*"]
 
 [tool.setuptools.package-data]
 "jeeves.gui.ui_kit.resources" = ["*.png"]
-"jeeves.resources" = ["icons/*.png", "silero_vad.onnx", "silero_vad.LICENSE"]
+"jeeves.resources" = ["icons/*.png", "silero_vad.onnx", "silero_vad.LICENSE", "fonts/*.ttf", "fonts/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

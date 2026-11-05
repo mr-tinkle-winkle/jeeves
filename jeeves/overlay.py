@@ -364,6 +364,13 @@ def main(popups: bool = False) -> int:
                 if not self.visible_states() and time.time() > max(self.transcript_until, self.response_until):
                     self.hide()
                 self.update()
+            else:
+                self.anim.stop()            # (30 wake-ups a second for nothing on screen otherwise)
+
+        def showEvent(self, e: Any) -> None:
+            super().showEvent(e)
+            if not self.anim.isActive():
+                self.anim.start()
 
         # -------------------------------------------------------------- painting
         def paintEvent(self, _e: Any) -> None:
@@ -661,7 +668,7 @@ def main(popups: bool = False) -> int:
             self.received = time.time()
             t = QTimer(self)
             t.setInterval(250)
-            t.timeout.connect(self.update)
+            t.timeout.connect(lambda: self.update() if self.isVisible() else None)
             t.start()
 
         def set_items(self, items: list[dict[str, Any]]) -> None:
@@ -713,10 +720,9 @@ def main(popups: bool = False) -> int:
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setAttribute(Qt.WA_ShowWithoutActivating)
             self.marks: list[dict[str, Any]] = []
-            t = QTimer(self)
-            t.setInterval(33)
-            t.timeout.connect(self._tick)
-            t.start()
+            self.tick = QTimer(self)
+            self.tick.setInterval(33)
+            self.tick.timeout.connect(self._tick)
 
         def add(self, m: dict[str, Any]) -> None:
             # the monitor the point is on (desktop coordinates), not the one the indicator uses
@@ -728,12 +734,14 @@ def main(popups: bool = False) -> int:
             m = dict(m, until=time.time() + float(m.get("seconds", 4)), born=time.time())
             self.marks.append(m)
             present(self, ["top", "bottom", "left", "right"], on=scr)
+            self.tick.start()
 
         def _tick(self) -> None:
             now = time.time()
             self.marks = [m for m in self.marks if m["until"] > now]
             if not self.marks:
                 self.hide()
+                self.tick.stop()
             else:
                 self.update()
 

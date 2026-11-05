@@ -116,6 +116,13 @@ def main(argv: list[str] | None = None) -> int:
             checks = ipc.call("doctor", move_test=not a.no_move, timeout=120)
             _print(checks if a.json else format_report(checks))
             return 0 if all(c["ok"] for c in checks) else 1
+        if cmd == "cpu":
+            from .daemon.cpuwatch import format_report as cpu_report
+            secs = float(a.args[0]) if a.args else 60.0
+            print(f"Watching the daemon's CPU for {secs:.0f} s… (use Jeeves as usual meanwhile)", file=sys.stderr)
+            rep = ipc.call("debug.cpu", seconds=secs, timeout=secs + 60)
+            _print(rep if a.json else cpu_report(rep))
+            return 0
         if cmd in ("say", "request"):
             _print(ipc.call("request.text", text=" ".join(a.args), agent=a.agent))
         elif cmd in ("dry-run", "dry_run"):

@@ -30,8 +30,8 @@ def test_gui_builds_every_page_without_unscoped_stylesheets(qapp):
     assert not bad, f"unscoped stylesheets on {bad}"
     # every page scrolls, so the window can shrink (UI guide pitfall 4)
     assert w.minimumSizeHint().height() < 400
-    for i in range(len(w.pages)):
-        w.nav.button(i).click()
+    for _title, page in w.pages:
+        w.show_page(page)
         qapp.processEvents()
     w.close()
     w.daemon.stop()

@@ -225,6 +225,7 @@ class Server:
             "puppetry.macros": e.puppetry.macro_names,
             "desktop.apps": lambda: {"open": dk.open_apps(), "processes": dk.processes()[:400]},
             "audio.devices": audio_devices,
+            "debug.cpu": lambda seconds=30: __import__("jeeves.daemon.cpuwatch", fromlist=["profile"]).profile(seconds),
             "keyboard.record": lambda seconds=10: keyboard_call("record", seconds=seconds),
             "keyboard.recorded": lambda: keyboard_call("recorded"),
             "keyboard.state": lambda: keyboard_call("state"),
@@ -311,6 +312,12 @@ class Server:
         self.engine.on_exit = lambda: loop.call_soon_threadsafe(stop.set)
         self.engine.start()
         log.info("jeeves daemon listening on %s", sock)
+        # Everything loaded at startup lives as long as the daemon: out of the garbage collector's way
+        # (its full sweeps went over all of it every few seconds -- the audio makes a lot of garbage).
+        import gc
+        gc.collect()
+        gc.freeze()
+        loop.call_later(90, lambda: (gc.collect(), gc.freeze()))     # (and what the model preload made)
         async with server:
             await stop.wait()
         self.engine.stop()

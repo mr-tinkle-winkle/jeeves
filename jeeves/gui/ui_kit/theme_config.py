@@ -60,6 +60,23 @@ class ThemeSettings:
     color_text_outline: str = "#101010"    # OutlinedLabel stroke color
     text_outline_width: float = 1.0        # OutlinedLabel stroke width, px
 
+    # ---- the rest of a whole look (a preset, see the app's themes) -------
+    color_pop: str = "#e0483e"             # the signature color: live states, the active tab, the main button
+    color_muted: str = "#a3a3a3"           # secondary text
+    color_shadow: str = "#000000"          # hard offset shadow behind boxes (used when shadow_offset > 0)
+    shadow_offset: int = 0                 # px; 0 = no shadow
+    border_width: float = 2.0              # box outlines, px
+    preset: str = "classic"                # which look this came from
+    font_body: str = ""                    # family; "" = the desktop's font
+    font_display: str = ""                 # headings and names; "" = font_body
+    font_mono: str = ""                    # logs and code; "" = the desktop's monospace
+    font_size: int = 0                     # body size, pt; 0 = the desktop's
+    display_upper: bool = False            # headings in capitals
+    pattern: str = ""                      # page background: "", "grid", "scanlines", "ruled"
+    tab_style: str = "underline"           # "underline", "pill", "block", "brackets"
+    motion: str = "fade"                   # how things move: fade, glide, spring, type, slam, step, draw
+    vocab: str = ""                        # names for things ("ledger", "arcade"); "" = plain
+
 
 # Field groups, used by the theme editor's "Revert" buttons.
 COLOR_FIELDS = tuple(f.name for f in fields(ThemeSettings) if f.name.startswith("color_"))

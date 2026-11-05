@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -37,10 +38,16 @@ class Window:
         return asdict(self)
 
 
+_KDO_READS = {"search", "getactivewindow", "getwindowclassname", "getwindowname", "getwindowgeometry",
+              "get_desktop_for_window", "getmouselocation", "getwindowpid", "get_desktop", "get_num_desktops"}
+
+
 def _hypr(*args: str) -> Any:
     if not which("hyprctl"):
         raise DesktopUnavailable("hyprctl isn't installed")
     sync_graphical_env()
+    if args and args[0] == "dispatch":
+        _cache.clear()
     out = run(["hyprctl", "-j", *args], timeout=3)
     if out.returncode != 0:
         raise DesktopUnavailable(out.stderr.strip() or "hyprctl failed")
@@ -51,13 +58,59 @@ def _kdo(*args: str) -> str:
     if not which("kdotool"):
         raise DesktopUnavailable("kdotool isn't installed (needed on KDE Plasma)")
     sync_graphical_env()
+    if args and args[0] not in _KDO_READS:
+        _cache.clear()                 # it changes windows: the shared answers are stale
     out = run(["kdotool", *args], timeout=4)
     if out.returncode != 0:
         raise DesktopUnavailable(out.stderr.strip() or "kdotool failed")
     return out.stdout.strip()
 
 
+# On KDE every query is a kdotool run, and each run has KWin load and run a script: listing every
+# window took 2 + 4 per window of them, and "which app is focused" listed every window too. Asked
+# every second or two (agents that only work while an app is open, app triggers, unloading models
+# for a game), that was a burst of dozens of programs -- and KWin busy -- every few seconds.
+# So: answers are shared for a moment, the focused window is looked up alone, and "which apps are
+# open" only asks each window's class.
+_CACHE_SECONDS = 1.5
+_cache: dict[str, tuple[float, Any]] = {}
+
+
+def _cached(key: str, fn: Any) -> Any:
+    now = time.monotonic()
+    hit = _cache.get(key)
+    if hit is not None and now - hit[0] < _CACHE_SECONDS:
+        return hit[1]
+    val = fn()
+    _cache[key] = (now, val)
+    return val
+
+
+def _kde_window(wid: str, active: str) -> Window | None:
+    try:
+        cls = _kdo("getwindowclassname", wid)
+        title = _kdo("getwindowname", wid)
+        geo = _kdo("getwindowgeometry", wid)
+    except DesktopUnavailable:
+        return None
+    pos = re.search(r"Position:\s*(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)", geo)
+    size = re.search(r"Geometry:\s*(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)", geo)
+    ws = ""
+    try:
+        ws = _kdo("get_desktop_for_window", wid)
+    except DesktopUnavailable:
+        pass
+    return Window(id=wid, app=cls.lower(), title=title,
+                  x=int(float(pos.group(1))) if pos else 0, y=int(float(pos.group(2))) if pos else 0,
+                  w=int(float(size.group(1))) if size else 0, h=int(float(size.group(2))) if size else 0,
+                  workspace=ws, focused=wid == active)
+
+
 def windows() -> list[Window]:
+    return list(_cached("windows", _windows))
+
+
+def _windows() -> list[Window]:
     d = desktop()
     if d == "hyprland":
         active = (_hypr("activewindow") or {}).get("address")
@@ -74,30 +127,15 @@ def windows() -> list[Window]:
         except DesktopUnavailable:
             active = ""
         ids = [i for i in _kdo("search", "--class", ".").splitlines() if i.strip()]
-        out = []
-        for wid in ids:
-            try:
-                cls = _kdo("getwindowclassname", wid)
-                title = _kdo("getwindowname", wid)
-                geo = _kdo("getwindowgeometry", wid)
-            except DesktopUnavailable:
-                continue
-            pos = re.search(r"Position:\s*(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)", geo)
-            size = re.search(r"Geometry:\s*(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)", geo)
-            ws = ""
-            try:
-                ws = _kdo("get_desktop_for_window", wid)
-            except DesktopUnavailable:
-                pass
-            out.append(Window(id=wid, app=cls.lower(), title=title,
-                              x=int(float(pos.group(1))) if pos else 0, y=int(float(pos.group(2))) if pos else 0,
-                              w=int(float(size.group(1))) if size else 0, h=int(float(size.group(2))) if size else 0,
-                              workspace=ws, focused=wid == active))
-        return out
+        return [w for w in (_kde_window(wid, active) for wid in ids) if w is not None]
     raise DesktopUnavailable("window queries need KDE Plasma (kdotool) or Hyprland")
 
 
 def focused() -> Window | None:
+    return _cached("focused", _focused)
+
+
+def _focused() -> Window | None:
     d = desktop()
     if d == "hyprland":
         c = _hypr("activewindow") or {}
@@ -107,6 +145,12 @@ def focused() -> Window | None:
         return Window(id=c.get("address", ""), app=(c.get("class") or "").lower(), title=c.get("title", ""),
                       x=x, y=y, w=w, h=h, workspace=str((c.get("workspace") or {}).get("name", "")),
                       pid=int(c.get("pid") or 0), focused=True)
+    if d == "kde" or which("kdotool"):
+        try:
+            active = _kdo("getactivewindow")
+        except DesktopUnavailable:
+            return None
+        return _kde_window(active, active) if active else None
     return next((w for w in windows() if w.focused), None)
 
 
@@ -130,9 +174,24 @@ def processes() -> list[str]:
 
 def open_apps() -> list[str]:
     try:
-        return sorted({w.app for w in windows() if w.app})
+        return list(_cached("apps", _open_apps))
     except DesktopUnavailable:
         return []
+
+
+def _open_apps() -> list[str]:
+    hit = _cache.get("windows")
+    if hit is not None and time.monotonic() - hit[0] < _CACHE_SECONDS:
+        return sorted({w.app for w in hit[1] if w.app})
+    if desktop() != "hyprland" and (desktop() == "kde" or which("kdotool")):
+        apps = set()
+        for wid in [i for i in _kdo("search", "--class", ".").splitlines() if i.strip()]:
+            try:
+                apps.add(_kdo("getwindowclassname", wid).lower())
+            except DesktopUnavailable:
+                continue
+        return sorted(a for a in apps if a)
+    return sorted({w.app for w in windows() if w.app})
 
 
 def find_window(app: str) -> Window | None:

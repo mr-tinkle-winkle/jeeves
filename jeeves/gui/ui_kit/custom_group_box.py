@@ -30,7 +30,7 @@ rendered content.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QPainter, QColor
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 from .theme_config import get_settings
@@ -95,7 +95,9 @@ class CustomGroupBox(QWidget):
     def _apply_layout_margins(self) -> None:
         lay = self.layout()
         if lay is not None:
-            lay.setContentsMargins(12, _TITLE_HEIGHT + 6, 12, 12)
+            sh = (self._theme.shadow() or (0, None))[0]
+            bw = int(self._theme.border_width)
+            lay.setContentsMargins(10 + bw, _TITLE_HEIGHT + 4 + bw, 10 + bw + sh, 10 + bw + sh)
 
     def setTitle(self, title: str) -> None:
         self._title = title
@@ -107,15 +109,29 @@ class CustomGroupBox(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        rect = QRectF(self.rect()).adjusted(1, _TITLE_HEIGHT / 2, -1, -1)
-        radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 8
+        theme = self._theme
+        bw = theme.border_width
+        shadow = theme.shadow()
+        sh = shadow[0] if shadow else 0
+        rect = QRectF(self.rect()).adjusted(bw / 2, _TITLE_HEIGHT / 2, -bw / 2 - sh, -bw / 2 - sh)
+        radius = theme.corner_radius(8)
         radius = min(radius, rect.height() / 2, rect.width() / 2) if radius else 0
         path = rounded_rect_path(rect, radius) if radius else None
 
+        if shadow:                     # a hard offset shadow (Arcade): the same box, shifted, filled
+            sr = rect.translated(sh, sh)
+            if path is not None:
+                painter.fillPath(rounded_rect_path(sr, radius), shadow[1])
+            else:
+                painter.fillRect(sr, shadow[1])
+            bg = self.palette().window().color()
+            if path is not None:
+                painter.fillPath(path, bg)
+            else:
+                painter.fillRect(rect, bg)
         pen = painter.pen()
-        pen.setColor(self._theme.accent())
-        pen.setWidthF(2)
+        pen.setColor(theme.accent())
+        pen.setWidthF(bw)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         if path is not None:
@@ -130,15 +146,15 @@ class CustomGroupBox(QWidget):
             # here as the parent widget's own palette window color,
             # since these boxes sit directly on a plain settings page)
             # so the border line doesn't visibly run behind the text.
-            font = painter.font()
-            font.setBold(True)
-            painter.setFont(font)
             from PySide6.QtGui import QFontMetrics
+            font = theme.display_font(max(8.0, self.font().pointSizeF()))
+            painter.setFont(font)
+            title = theme.heading(self._title)
             fm = QFontMetrics(font)
-            text_width = fm.horizontalAdvance(self._title)
+            text_width = fm.horizontalAdvance(title)
             gap_rect = QRectF(rect.x() + 8, 0, text_width + 8, _TITLE_HEIGHT)
             bg = self.palette().window().color()
             painter.fillRect(gap_rect, bg)
-            painter.setPen(QColor(self._appearance.color_text))
-            painter.drawText(gap_rect.adjusted(4, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, self._title)
+            painter.setPen(theme.text())
+            painter.drawText(gap_rect.adjusted(4, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, title)
         painter.end()

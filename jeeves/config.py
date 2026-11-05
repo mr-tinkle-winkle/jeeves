@@ -69,6 +69,8 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         # None -> global model choice
         "models": {"stt": None, "intent": None, "tts": None, "tts_voice": None, "local_response": None},
         "prompt": prompt,
+        "persona_preset": None,       # the built-in personality it started from (personas.py), if any
+        "persona_strength": None,     # light / medium / strong; None = strong (stay fully in character)
         "persona_check": False,       # grade each reply against the prompt and rewrite it once if it's off
         # function name -> bool; missing -> the function's own default
         "functions": {},
