@@ -41,7 +41,7 @@ _look("ledger", "The butler's ledger",
       color_page_background="#16130f", color_highlight="#3a3226", color_text="#ece4d6",
       color_text_outline="#0d0b08", color_pop="#d9b56c", color_muted="#b3a68f",
       rounded_corners_enabled=True, rounded_corner_radius=4, ui_padding=16, border_width=1.0,
-      font_body="Manrope", font_display="Cormorant Garamond", font_mono="JetBrains Mono", font_size=10,
+      font_body="Manrope", font_display="Cormorant Garamond", font_mono="JetBrains Mono", font_size=10, font_weight=500,
       pattern="", tab_style="underline", motion="glide", vocab="ledger")
 
 _look("alive", "Alive",
@@ -50,7 +50,7 @@ _look("alive", "Alive",
       color_page_background="#17141a", color_highlight="#2c2732", color_text="#f1f1f4",
       color_text_outline="#000000", color_pop="#ff6b57", color_muted="#a6a6b3",
       rounded_corners_enabled=True, rounded_corner_radius=22, ui_padding=16, border_width=1.0,
-      font_body="Sora", font_display="Sora", font_mono="JetBrains Mono", font_size=10,
+      font_body="Sora", font_display="Sora", font_mono="JetBrains Mono", font_size=10, font_weight=420,
       pattern="", tab_style="pill", motion="spring")
 
 _look("console", "Console",
@@ -59,7 +59,7 @@ _look("console", "Console",
       color_page_background="#050505", color_highlight="#1a1a1a", color_text="#d8d8d8",
       color_text_outline="#000000", color_pop="#ffb000", color_muted="#9a9a9a",
       rounded_corners_enabled=True, rounded_corner_radius=0, ui_padding=14, border_width=1.0,
-      font_body="JetBrains Mono", font_display="Space Grotesk", font_mono="JetBrains Mono", font_size=10,
+      font_body="JetBrains Mono", font_display="Space Grotesk", font_mono="JetBrains Mono", font_size=10, font_weight=460,
       pattern="", tab_style="brackets", motion="type")
 
 _look("brutalist", "Brutalist",
@@ -69,7 +69,7 @@ _look("brutalist", "Brutalist",
       color_text_outline="#ffffff", color_pop="#ffe600", color_muted="#3d3d3d",
       color_shadow="#000000", shadow_offset=0,
       rounded_corners_enabled=True, rounded_corner_radius=0, ui_padding=14, border_width=4.0,
-      font_body="Archivo", font_display="Archivo Black", font_mono="JetBrains Mono", font_size=10,
+      font_body="Archivo", font_display="Archivo Black", font_mono="JetBrains Mono", font_size=10, font_weight=460,
       display_upper=True, pattern="", tab_style="block", motion="slam")
 
 _look("arcade", "Arcade",
@@ -89,7 +89,7 @@ _look("blueprint", "Blueprint",
       color_text_outline="#0b2649", color_pop="#ffffff", color_muted="#c4d6ee",
       rounded_corners_enabled=True, rounded_corner_radius=0, ui_padding=16, border_width=1.5,
       font_body="IBM Plex Mono", font_display="IBM Plex Sans Condensed", font_mono="IBM Plex Mono",
-      font_size=10, display_upper=True, pattern="grid", tab_style="brackets", motion="draw")
+      font_size=10, font_weight=500, display_upper=True, pattern="grid", tab_style="brackets", motion="draw")
 
 
 # What things are called, per vocabulary (the ledger's butler, the arcade's game).

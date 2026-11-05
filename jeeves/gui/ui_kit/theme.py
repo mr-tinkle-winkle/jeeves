@@ -33,6 +33,22 @@ def contrast_text(bg: QColor) -> QColor:
 
 
 _WIDE_FACES = {"Press Start 2P": 0.6, "Archivo Black": 0.9}
+_THIN_DISPLAY = {"Cormorant Garamond": 600}
+# Variable faces register only their default instance with Qt -- for Manrope and Cormorant that's
+# ExtraLight/Light, so "regular" text came out hairline-thin, and asking for bold only smeared it
+# (synthetic bold). Their weight is set on the font's own weight axis instead.
+VARIABLE_FACES = {"Manrope", "Cormorant Garamond", "JetBrains Mono", "Sora", "Space Grotesk", "Archivo"}
+
+
+def set_weight(f: "QFont", weight: int) -> "QFont":
+    """The weight, the right way for the face (see VARIABLE_FACES)."""
+    weight = int(weight or 400)
+    if f.family() in VARIABLE_FACES and hasattr(f, "setVariableAxis"):
+        f.setWeight(QFont.Weight.Normal)
+        f.setVariableAxis(QFont.Tag("wght"), float(weight))
+    else:
+        f.setWeight(QFont.Weight(weight))
+    return f
 
 
 class Theme:
@@ -114,9 +130,7 @@ class Theme:
             f.setFamily(self._s.font_body)
         if size:
             f.setPointSizeF(size)
-        if weight:
-            f.setWeight(QFont.Weight(weight))
-        return f
+        return set_weight(f, weight or int(getattr(self._s, "font_weight", 0) or 0) or 400)
 
     def display_font(self, size: float = 0, weight: int = 700) -> "QFont":
         """Headings and names. Pixel and display faces read big, so callers give the size they want
@@ -126,8 +140,9 @@ class Theme:
             f.setFamily(self._s.font_display)
             if self._s.font_display in _WIDE_FACES:       # a pixel face is far wider at the same size
                 f.setPointSizeF(max(6.0, f.pointSizeF() * _WIDE_FACES[self._s.font_display]))
-        f.setWeight(QFont.Weight(weight))
-        return f
+        if self._s.font_display in _THIN_DISPLAY:          # a delicate face: never thinner than this
+            weight = max(weight, _THIN_DISPLAY[self._s.font_display])
+        return set_weight(f, weight)
 
     def mono_font(self, size: float = 0) -> "QFont":
         from PySide6.QtGui import QFontDatabase
@@ -135,7 +150,7 @@ class Theme:
         if self._s.font_mono:
             f.setFamily(self._s.font_mono)
         f.setPointSizeF(size or QApplication.font().pointSizeF())
-        return f
+        return set_weight(f, int(getattr(self._s, "font_weight", 0) or 0) or 400)
 
     def heading(self, text: str) -> str:
         return text.upper() if self._s.display_upper else text

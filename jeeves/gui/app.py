@@ -106,6 +106,9 @@ class MainWindow(QMainWindow):
         self.header.switched.connect(lambda on: self.set_agent_on(self.aid, on))
         self.sidebar.switch_agent.connect(self.set_agent_on)
         self.sidebar.talk_to.connect(self._talk_to)
+        self.sidebar.make_main.connect(lambda aid: self.send({"general.main_agent": aid}))
+        self.sidebar.lobotomize.connect(self.lobotomize)
+        self.agents_page.lobotomize = self.lobotomize
         av.addWidget(self.header)
         self.agent_tabs = ThemedTabs([(k, w[k]) for k in self.AGENT_TABS])
         self.agent_tabs.picked.connect(self._agent_tab)
@@ -268,6 +271,23 @@ class MainWindow(QMainWindow):
     def _talk_to(self, aid: str) -> None:
         self.daemon.call("request.voice", None, lambda e: self._show_message(self, "Talk", e), agent=aid)
 
+    def lobotomize(self, aid: str) -> None:
+        """Wipe what an agent remembers (after asking)."""
+        from .ui_kit import ask_yes
+        name = ((self.settings.get("agents") or {}).get(aid) or {}).get("name", aid)
+        if not ask_yes(self, f"Lobotomize {name}?", f"{name} forgets everything: its notes, its requests and the "
+                       "conversation (and their ratings), and stops what it's doing. Its settings -- name, voice, "
+                       "personality, functions -- stay. This can't be undone.", ok="Lobotomize", cancel="Keep"):
+            return
+
+        def done(res: Any) -> None:
+            if isinstance(res, dict):
+                self._show_message(self, name, f"{name} starts afresh: {res.get('notes', 0)} notes and "
+                                   f"{res.get('requests', 0)} requests forgotten.")
+            self._refresh_current()
+            self.overview.refresh_recent()
+        self.daemon.call("agents.lobotomize", done, lambda e: self._show_message(self, name, str(e)), id=aid)
+
     def set_agent_on(self, aid: str, on: bool) -> None:
         """Switch one agent on or off (its header switch, or its right-click menu in the list)."""
         if not aid or aid not in (self.settings.get("agents") or {}):
@@ -334,7 +354,7 @@ class MainWindow(QMainWindow):
             self.power.setEnabled("general.enabled" not in self.locked)
             self.power.blockSignals(False)
             agents = self.settings.get("agents") or {}
-            self.sidebar.set_agents(agents)
+            self.sidebar.set_agents(agents, (self.settings.get("general") or {}).get("main_agent") or "")
             for aid in agents:
                 self.sidebar.set_stage(aid, self._stage(aid))
             self.agents_page.refresh(self.settings, self.locked)

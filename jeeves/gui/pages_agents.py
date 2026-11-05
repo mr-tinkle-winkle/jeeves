@@ -36,6 +36,7 @@ class AgentsPage(Page):
         self.on_loaded: Any = None          # called when functions/models arrive (the overview's numbers)
         self.daemon = daemon
         self.agents: dict[str, dict[str, Any]] = {}
+        self.lobotomize: Any = None              # set by the window: (agent id) -> asks, then wipes
         self.functions: list[dict[str, Any]] = []
         self.catalog: list[dict[str, Any]] = []
         self.locked: set[str] = set()
@@ -194,6 +195,10 @@ class AgentsPage(Page):
                           "replies on small models. Off: the agent starts fresh every time and can't remember "
                           "anything. Default uses the global count (Listening & Keys)."))
         self.mem_enabled.toggled.connect(self._memory_enabled)
+        lob = CustomButton("Lobotomize…")
+        lob.setToolTip("Forget everything this agent remembers and start it afresh (its settings stay)")
+        lob.clicked.connect(lambda: self.lobotomize(self.current) if self.current and self.lobotomize else None)
+        g.addWidget(row(label("Start it afresh: its notes, requests and conversation are forgotten.", False), lob))
 
         # --- when active
         g = self._group(f, "When this agent is active")
@@ -281,7 +286,28 @@ class AgentsPage(Page):
                           "else."))
         self.rud_function = combo()
         g.addWidget(row(label("Its function", False), self.rud_function, stretch_last=True))
+        self.rud_mute = CustomCheckBox("Mute: never speaks (no wake-up reply, no spoken answers; text still shows)")
+        g.addWidget(self.rud_mute)
+        # Run commands: what's said is the command line
+        self.rud_cmd_box = QWidget()
+        cb = QVBoxLayout(self.rud_cmd_box)
+        cb.setContentsMargins(0, 0, 0, 0)
+        cb.addWidget(label("Run commands: “Box, firefox” runs firefox; “Box, systemctl dash dash user restart "
+                           "pipewire” runs systemctl --user restart pipewire (spoken dash → -, dot → ., slash → /, "
+                           "tilde → ~; typed requests run exactly as typed; no shell)."))
+        self.rud_program = CustomLineEdit()
+        self.rud_program.setPlaceholderText("e.g. playerctl  (empty: the first word said is the program)")
+        cb.addWidget(row(label("Always run this program, with what I say as its arguments", False),
+                         self.rud_program, stretch_last=True))
+        self.rud_confirm = combo()
+        for text, key in (("Only for risky ones (rm, dd, kill, reboot, sudo…)", "risky"), ("Always", "always"),
+                          ("Never", "never")):
+            self.rud_confirm.addItem(text, key)
+        self.rud_terminal = CustomCheckBox("Run in a terminal window (to watch it, or for sudo)")
+        cb.addWidget(row(label("Ask before running", False), self.rud_confirm, self.rud_terminal))
+        g.addWidget(self.rud_cmd_box)
         self.rud_on.toggled.connect(self._rudimentary)
+        self.rud_function.currentIndexChanged.connect(lambda _i: self._rudimentary(self.rud_on.isChecked()))
 
         # --- functions
         g = self._group(f, "Functions")
@@ -515,6 +541,10 @@ class AgentsPage(Page):
         rud = a.get("rudimentary") or {}
         self.rud_on.setChecked(bool(rud.get("enabled")))
         self._fill_rud_functions(a, rud.get("function") or "")
+        self.rud_mute.setChecked(bool(rud.get("mute")))
+        self.rud_program.setText(rud.get("program") or "")
+        self.rud_confirm.setCurrentIndex(max(0, self.rud_confirm.findData(rud.get("confirm") or "risky")))
+        self.rud_terminal.setChecked(bool(rud.get("terminal")))
         self._rudimentary(self.rud_on.isChecked())
         from ..functions.custom_sources import to_text
         cs = a.get("custom_sources") or {}
@@ -596,7 +626,10 @@ class AgentsPage(Page):
     def _rudimentary(self, on: bool) -> None:
         """A rudimentary agent has just its one function: the function list doesn't apply (its own
         commands do: one of them can be its function)."""
+        from ..functions.rudimentary import NAME
         self.rud_function.setEnabled(on)
+        self.rud_mute.setEnabled(on)
+        self.rud_cmd_box.setVisible(on and self.rud_function.currentData() == NAME)
         self.func_box.setEnabled(not on)
 
     def _fill_rud_functions(self, agent: dict[str, Any] | None = None, want: str | None = None) -> None:
@@ -614,7 +647,9 @@ class AgentsPage(Page):
                 items.append((f"{spec['name']} (its command)", name))
         self.rud_function.blockSignals(True)
         self.rud_function.clear()
+        from ..functions.rudimentary import NAME
         self.rud_function.addItem("— pick one —", "")
+        self.rud_function.addItem("Run commands (what I say is the command)", NAME)
         for text, key in items:
             self.rud_function.addItem(text, key)
         if want and self.rud_function.findData(want) < 0:
@@ -684,7 +719,10 @@ class AgentsPage(Page):
             "voice_style": self._style(),
             "functions": {name: cb.isChecked() for name, cb in self.func_checks.items()},
             "commands": self.commands.value(),
-            "rudimentary": {"enabled": self.rud_on.isChecked(), "function": self.rud_function.currentData() or ""},
+            "rudimentary": {"enabled": self.rud_on.isChecked(), "function": self.rud_function.currentData() or "",
+                            "mute": self.rud_mute.isChecked(), "program": self.rud_program.text().strip(),
+                            "confirm": self.rud_confirm.currentData() or "risky",
+                            "terminal": self.rud_terminal.isChecked()},
             "jeenius": self.jeenius.currentData() or None,
             "custom_sources": {"enabled": self.sources_on.isChecked(),
                                "sites": parse_sources(self.sources_edit.toPlainText())[0]},

@@ -124,14 +124,19 @@ class Registry:
         f = self.functions.get(name)
         if f is None and agent is not None:
             f = next((c for c in self.agent_commands(agent) if c.name == name), None)
+        if f is None and agent is not None:
+            one = self.rudimentary(agent)              # (Run commands lives only on its agent)
+            f = one if one is not None and one.name == name else None
         return f
 
     def rudimentary(self, agent: dict[str, Any] | None) -> FunctionDef | None:
         """A rudimentary agent's one function (functions/rudimentary.py), or None."""
-        from .rudimentary import function_name
-        name = function_name(agent)
+        from . import rudimentary
+        name = rudimentary.function_name(agent)
         if not name:
             return None
+        if name == rudimentary.NAME:                 # "Run commands"
+            return rudimentary.function_def(agent)
         f = self.functions.get(name)
         if f is None:
             from .commands import command_defs

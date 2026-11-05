@@ -66,6 +66,14 @@ class History:
             if len(self.entries) > limit * 1.5:
                 self._persist_all()
 
+    def forget_agent(self, agent: str) -> int:
+        """Every request to this agent, its ratings with them (Lobotomize)."""
+        with self._lock:
+            before = len(self.entries)
+            self.entries = [e for e in self.entries if e.get("agent") != agent]
+            self._persist_all()
+            return before - len(self.entries)
+
     def get(self, entry_id: str) -> dict[str, Any] | None:
         return next((e for e in self.entries if e["id"] == entry_id), None)
 

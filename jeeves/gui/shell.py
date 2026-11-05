@@ -372,6 +372,7 @@ class SideRow(QAbstractButton):
         self.stage = ""
         self.pulse = 0.0
         self.on = True                       # an agent that's switched off is dimmed and says so
+        self.main = False                    # the Main agent: a small star
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         fm = QFontMetricsF(self.theme.body_font())
@@ -436,6 +437,13 @@ class SideRow(QAbstractButton):
             prefix = "> " if (s.motion == "type" and on) else ("  " if s.motion == "type" else "")
             name = t.heading(self.title) if s.display_upper else self.title
             p.drawText(QPointF(x, r.center().y() - 2), prefix + name)
+            if self.main:                      # the Main agent
+                mx = x + fm.horizontalAdvance(prefix + name) + 6
+                p.setFont(t.body_font(max(7.0, t.body_font().pointSizeF() - 2), 700))
+                p.setPen(text_c if on and s.motion in ("type", "slam", "step") else t.pop())
+                p.drawText(QPointF(mx, r.center().y() - 2), "MAIN" if s.motion in ("type", "slam", "step", "draw")
+                           else "★")
+                p.setFont(name_f)
             status = stage_word(self.stage, w) if self.on else w["off"]
             small = t.body_font(max(7.0, t.body_font().pointSizeF() - 1))
             p.setFont(small)
@@ -507,6 +515,8 @@ class Sidebar(QWidget):
     add_agent = Signal()
     switch_agent = Signal(str, bool)  # right-click > on/off
     talk_to = Signal(str)             # right-click > Talk
+    make_main = Signal(str)           # right-click > Main agent ("" = none)
+    lobotomize = Signal(str)          # right-click > Lobotomize
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -552,7 +562,8 @@ class Sidebar(QWidget):
         lab.setStyleSheet(f"QLabel {{ color: {t.muted().name()}; padding: 4px 8px 0 8px; }}")
         return lab
 
-    def set_agents(self, agents: dict[str, dict[str, Any]]) -> None:
+    def set_agents(self, agents: dict[str, dict[str, Any]], main: str = "") -> None:
+        self.main = main
         for key in [k for k in self.rows if k[0] == "agent"]:
             self.rows.pop(key)
         with bulk(self.agent_box):
@@ -560,6 +571,7 @@ class Sidebar(QWidget):
             for i, (aid, a) in enumerate(agents.items()):
                 row = SideRow(aid, a.get("name") or aid, "agent", agent_color(a, i))
                 row.on = bool(a.get("enabled", True))
+                row.main = aid == main
                 row.clicked.connect(lambda _c=False, k=aid: self.pick("agent", k))
                 row.setContextMenuPolicy(Qt.CustomContextMenu)
                 row.customContextMenuRequested.connect(lambda pos, r=row: self._menu(r, pos))
@@ -576,6 +588,12 @@ class Sidebar(QWidget):
         m.addSeparator()
         flip = m.addAction(f"Turn {name} off" if row.on else f"Turn {name} on")
         flip.triggered.connect(lambda: self.switch_agent.emit(row.key, not row.on))
+        main = m.addAction("Main agent ✓" if row.main else "Make main agent")
+        main.setToolTip("Manual requests that don't name an agent go to the Main agent")
+        main.triggered.connect(lambda: self.make_main.emit("" if row.main else row.key))
+        m.addSeparator()
+        lob = m.addAction(f"Lobotomize {name}…")
+        lob.triggered.connect(lambda: self.lobotomize.emit(row.key))
         m.addSeparator()
         show = m.addAction(f"Open {name}")
         show.triggered.connect(lambda: self.pick("agent", row.key))
@@ -1094,7 +1112,8 @@ class OverviewPage(Page):
         some = ", ".join(f["title"] for f in on[:3])
         rud = agent.get("rudimentary") or {}
         if rud.get("enabled") and rud.get("function"):     # one function: only how to run it
-            title = next((f["title"] for f in functions if f["name"] == rud["function"]), rud["function"])
+            title = "Run commands" if rud["function"] == "run_what_i_say" else \
+                next((f["title"] for f in functions if f["name"] == rud["function"]), rud["function"])
             self.cards["abilities"].set(title, "rudimentary: its only function")
             self.cards["brain"].set(names.get(intent, intent or "—"), f"just fills in {title}")
         else:
@@ -1226,7 +1245,8 @@ class LookCard(QAbstractButton):
         inner = r.adjusted(18, 14, -18, -14)
         df = QFont(s.font_display or s.font_body or self.font().family())
         df.setPointSizeF(15 * (0.6 if s.font_display == "Press Start 2P" else 1.0))
-        df.setWeight(QFont.Bold)
+        from .ui_kit.theme import set_weight
+        set_weight(df, 700)
         p.setFont(df)
         p.setPen(QColor(s.color_text))
         name = self.look.name.upper() if s.display_upper else self.look.name
@@ -1321,11 +1341,6 @@ class LookPage(Page):
 EDGE = 7
 
 
-def frame_radius(theme: Theme) -> float:
-    from .ui_kit import skin
-    return {"fade": 14.0, "spring": 22.0, "glide": 10.0, "type": 6.0, "draw": 4.0}.get(skin.kind(theme), 0.0)
-
-
 class WindowFrame(QWidget):
     """The window's background. With its own frame (Look > Rounded window) the window has no system
     frame: this paints its rounded (Arcade: pixel-stepped) outline and lets its edges resize it."""
@@ -1340,51 +1355,11 @@ class WindowFrame(QWidget):
         w = self.window()
         return bool(w.windowState() & (Qt.WindowMaximized | Qt.WindowFullScreen))
 
-    def outline(self) -> QPainterPath:
-        from .ui_kit import skin
-        r = QRectF(self.rect())
-        if not self.own or self._full():
-            path = QPainterPath()
-            path.addRect(r)
-            return path
-        if skin.kind(self.theme) == "step":             # pixel corners: three steps
-            s = 4.0
-            pts = [QPointF(r.left() + 3 * s, r.top()), QPointF(r.right() - 3 * s, r.top()),
-                   QPointF(r.right() - 3 * s, r.top() + s), QPointF(r.right() - s, r.top() + s),
-                   QPointF(r.right() - s, r.top() + 3 * s), QPointF(r.right(), r.top() + 3 * s),
-                   QPointF(r.right(), r.bottom() - 3 * s), QPointF(r.right() - s, r.bottom() - 3 * s),
-                   QPointF(r.right() - s, r.bottom() - s), QPointF(r.right() - 3 * s, r.bottom() - s),
-                   QPointF(r.right() - 3 * s, r.bottom()), QPointF(r.left() + 3 * s, r.bottom()),
-                   QPointF(r.left() + 3 * s, r.bottom() - s), QPointF(r.left() + s, r.bottom() - s),
-                   QPointF(r.left() + s, r.bottom() - 3 * s), QPointF(r.left(), r.bottom() - 3 * s),
-                   QPointF(r.left(), r.top() + 3 * s), QPointF(r.left() + s, r.top() + 3 * s),
-                   QPointF(r.left() + s, r.top() + s), QPointF(r.left() + 3 * s, r.top() + s)]
-            path = QPainterPath()
-            path.moveTo(pts[0])
-            for pt in pts[1:]:
-                path.lineTo(pt)
-            path.closeSubpath()
-            return path
-        return _path(r, frame_radius(self.theme))
-
     def paintEvent(self, _e: Any) -> None:
         from .ui_kit import skin
-        t = self.theme
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, skin.kind(t) != "step")
-        path = self.outline()
-        p.fillPath(path, t.app_background())
-        if self.own and not self._full():
-            k = skin.kind(t)
-            pen = {"slam": QPen(t.text(), 3), "step": QPen(t.accent(), 2), "draw": QPen(QColor(255, 255, 255, 140), 1),
-                   "glide": QPen(QColor(t.pop().red(), t.pop().green(), t.pop().blue(), 110), 1),
-                   "type": QPen(QColor(t.pop().red(), t.pop().green(), t.pop().blue(), 90), 1)}.get(
-                k, QPen(QColor(255, 255, 255, 22), 1))
-            pen.setWidthF(pen.widthF() * 2)           # drawn clipped to the shape: the inner half shows
-            p.setPen(pen)
-            p.setBrush(Qt.NoBrush)
-            p.setClipPath(path)
-            p.drawPath(path)
+        skin.paint_frame(p, QRectF(self.rect()), self.theme, self.theme.app_background(),
+                         square=not self.own or self._full())
         p.end()
 
     # -- resizing from the edges (no system frame to do it)

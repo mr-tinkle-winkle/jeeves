@@ -16,7 +16,6 @@ from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QListWi
 from .custom_button import CustomButton
 from .custom_line_edit import CustomLineEdit
 from .custom_text import CustomListWidget
-from .rounded_rect import rounded_rect_path
 from .theme import Theme
 from .theme_config import get_settings
 
@@ -72,15 +71,17 @@ class KitDialog(QDialog):
         return o
 
     def paintEvent(self, event) -> None:
+        from .skin import paint_frame
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect())
-        radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 16
-        if radius:
-            p.fillPath(rounded_rect_path(rect, radius), self._theme.page_background())
-        else:
-            p.fillRect(rect, self._theme.page_background())
+        paint_frame(p, QRectF(self.rect()), self._theme, self._theme.page_background())
         p.end()
+
+    def mousePressEvent(self, event) -> None:          # no title bar: drag it by any empty spot
+        handle = self.windowHandle()
+        if event.button() == Qt.LeftButton and handle is not None:
+            handle.startSystemMove()
+            return
+        super().mousePressEvent(event)
 
 
 def ask_text(parent, title: str, prompt: str, text: str = "", placeholder: str = "") -> tuple[str, bool]:
@@ -96,6 +97,15 @@ def ask_text(parent, title: str, prompt: str, text: str = "", placeholder: str =
     edit.setFocus()
     ok = d.exec() == QDialog.Accepted
     return edit.text(), ok
+
+
+def ask_yes(parent, title: str, text: str, ok: str = "OK", cancel: str = "Cancel") -> bool:
+    """A yes/no question in the kit's look (QMessageBox.question)."""
+    d = KitDialog(title, parent)
+    d.label(text)
+    d.buttons(ok, cancel)
+    fit_to_width(d, 440)
+    return d.exec() == QDialog.Accepted
 
 
 SWATCHES = ["#000000", "#ffffff", "#808080", "#c0c0c0", "#ff2020", "#ff8a00", "#ffcc00", "#20b070", "#00b8d4",

@@ -188,27 +188,34 @@ def find_channel(name: str) -> tuple[str, str]:
         if data and data.get("channel_id"):
             add(data["channel_id"], data.get("channel") or data.get("uploader") or
                 data.get("title", "").removesuffix(" - Videos"), _followers(data))
-    data = _try("--flat-playlist", "--playlist-end", "8",
-                "https://www.youtube.com/results?search_query=" + urllib.parse.quote(name) + "&sp=EgIQAg%3D%3D",
-                errors=errors)
-    for i, e in enumerate((data or {}).get("entries") or []):
-        cid = e.get("channel_id") or (e.get("id") if str(e.get("id", "")).startswith("UC") else "")
-        if cid:
-            add(cid, e.get("channel") or e.get("title") or e.get("uploader") or "", _followers(e), i)
-    vids = [v for v in (_try_search(name, errors) or []) if v.get("channel_id")]
-    for v in vids:
-        add(v["channel_id"], v.get("channel", ""))["videos"] += 1
+    # searched as said and as one word: "moist critikal" and "moistcritikal" found different channels
+    # (the one-word form the right one), so both are asked and the evidence added up
+    spellings = list(dict.fromkeys([name] + ([handle] if handle and handle != name.strip().lower() else [])))
+    for q in spellings:
+        data = _try("--flat-playlist", "--playlist-end", "8",
+                    "https://www.youtube.com/results?search_query=" + urllib.parse.quote(q) + "&sp=EgIQAg%3D%3D",
+                    errors=errors)
+        for i, e in enumerate((data or {}).get("entries") or []):
+            cid = e.get("channel_id") or (e.get("id") if str(e.get("id", "")).startswith("UC") else "")
+            if cid:
+                add(cid, e.get("channel") or e.get("title") or e.get("uploader") or "", _followers(e), i)
+        vids = [v for v in (_try_search(q, errors) or []) if v.get("channel_id")]
+        for v in vids:
+            add(v["channel_id"], v.get("channel", ""))["videos"] += 1
     if not cands:
-        if errors and len(errors) == (3 if handle else 2):
+        if errors and len(errors) == (1 if handle else 0) + 2 * len(spellings):
             # every way of looking failed (no yt-dlp, no connection, YouTube refusing): say that, not
             # that the channel doesn't exist
             raise FunctionError(str(errors[-1])) from errors[-1]
         raise FunctionError(f"I couldn't find a YouTube channel called {name}")
-    most = max(c["followers"] for c in cands.values()) or 1
+    import math
+    most = math.log10(max(c["followers"] for c in cands.values()) + 1) or 1.0
 
     def score(c: dict[str, Any]) -> float:
-        return (_name_score(name, c["name"]) + 0.5 * min(1.0, c["videos"] / 3) +
-                0.4 * c["followers"] / most + (0.3 if c["rank"] == 0 else 0.1 if c["rank"] is not None else 0))
+        # subscribers on a log scale, steeply: a channel a thousand times bigger is the one people mean
+        # even when a small one's name matches better (clip channels, fan reuploads, an abandoned namesake)
+        big = (math.log10(c["followers"] + 1) / most) ** 4
+        return (_name_score(name, c["name"]) + 0.5 * min(1.0, c["videos"] / (3 * len(spellings))) + 0.9 * big + (0.3 if c["rank"] == 0 else 0.1 if c["rank"] is not None else 0))
     cid, best = max(cands.items(), key=lambda kv: score(kv[1]))
     if score(best) < 0.6:
         raise FunctionError(f"I couldn't find a YouTube channel called {name}")

@@ -15,6 +15,7 @@ import os
 import random
 import re
 import shutil
+from pathlib import Path
 import subprocess
 import sys
 import threading
@@ -146,7 +147,7 @@ class Engine:
         self.puppetry = Puppetry(self.settings)
         self.online = Online(self.settings)
         self.wikipedia = Wikipedia(self.settings, self.publish)
-        self.timers = Timers(self._timer_fired, self.publish)
+        self.timers = Timers(self._timer_fired, self.publish, self.settings)
         self.triggers = Triggers(self.settings, self._trigger_fired)
         self.imports = Imports(self.registry, self.publish)
         from .jumpin import JumpIn
@@ -697,7 +698,7 @@ class Engine:
             if not s.retried:
                 log.info("  heard only '%s': still listening for the request", text)
                 again = self.open_session(s.source, s.agent_id, "request")
-                again.retried = True
+                again.retried, again.manual = True, s.manual
                 self.apply_settings()
                 return
             log.info("  heard only '%s' again; giving up", text)
@@ -711,7 +712,8 @@ class Engine:
             self._didnt_catch(s)
             return
         log.info("  heard: %s", text)
-        self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id)
+        self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id,
+                         manual=s.manual)
 
     def strip_name(self, text: str, agent_id: str | None, within: int = 10) -> tuple[bool, str]:
         """(was the agent's name said, the rest after it): "Okay so, Jeeves, set a timer" -> (True,
@@ -914,6 +916,10 @@ class Engine:
         self.run_async(self._play_wake_reply, s, agent, random.choice(phrases))
 
     def _play_wake_reply(self, s: Session, agent: dict[str, Any], phrase: str) -> None:
+        rud = agent.get("rudimentary") or {}
+        if rud.get("enabled") and rud.get("mute"):       # a muted rudimentary agent says nothing
+            s.deaf_until = 0.0
+            return
         try:
             pcm, rate = self._wake_reply_audio(agent, phrase)
             # it's for you: where you hear it, even if the agent's answers go into the call (Jeeves-Microphone)
@@ -1213,8 +1219,11 @@ class Engine:
         if "stt" in self.models.suspended:
             self.flash_unavailable(agent_id, f"speech recognition is unloaded while {self.models.suspended['stt']} is open")
         s = self.open_session("microphone", agent_id, "request")
+        s.manual = True                          # (naming nobody: the Main agent, if there is one)
         if agent_id is None:
-            self.set_indicator(s.request_id, None, "listening", "say an agent's name first",
+            main = self.agents().get(self.main_agent() or "", {}).get("name")
+            self.set_indicator(s.request_id, None, "listening",
+                               f"for {main} (or say another agent's name)" if main else "say an agent's name first",
                                source="microphone", mode="request")
         else:
             self.wake_reply(s)
@@ -1420,20 +1429,32 @@ class Engine:
     def thoughts(self, request_id: str) -> dict[str, Any]:
         ctx = self.active.get(request_id)
         if ctx is None:
-            entry = self.history.get(request_id)
-            return {"thoughts": [], "looking_at": "", "trace": entry["trace"] if entry else []}
-        return {"thoughts": ctx.thoughts, "looking_at": ctx.looking_at, "trace": ctx.entry["trace"]}
+            entry = self.history.get(request_id) or {}
+            return {"thoughts": [], "looking_at": "", "trace": entry.get("trace", []), "text": entry.get("text", ""),
+                    "source": entry.get("source", "")}
+        return {"thoughts": ctx.thoughts, "looking_at": ctx.looking_at, "trace": ctx.entry["trace"],
+                "text": ctx.entry.get("text", ""), "source": ctx.entry.get("source", "")}
 
     # ------------------------------------------------------------------ requests
+    def main_agent(self) -> str | None:
+        """The Main agent (right-click an agent > Main agent): who a manual request goes to when it
+        doesn't name one."""
+        m = self.settings.get("general.main_agent", "") or ""
+        a = self.agents().get(m)
+        return m if a is not None and a.get("enabled", True) else None
+
     def handle_text(self, text: str, agent_id: str | None = None, source: str = "text",
                     request_id: str | None = None, skip_functions: set[str] | None = None,
-                    dry_run: bool = False, wait: bool = False) -> dict[str, Any]:
+                    dry_run: bool = False, wait: bool = False, manual: bool = False) -> dict[str, Any]:
         text = text.strip()
         if not dry_run and self._refuse_if_off():
             return {"error": "Jeeves is turned off"}
         if agent_id is None:
             heard_on = source.split(":", 1)[1] if source.startswith("voice:") else None
             agent_id, rest, _ = self.split_agent(text, heard_on)
+            if agent_id is None and (manual or source.split(":", 1)[0] in ("text", "cli", "dry_run")) and \
+                    self.main_agent():
+                agent_id, rest = self.main_agent(), text      # a manual request naming nobody: the Main agent
             if agent_id is None:
                 if dry_run:
                     raise ValueError("start with an agent's name, e.g. 'Jeeves, set a timer for 5 minutes'")
@@ -1679,6 +1700,9 @@ class Engine:
                       flags=re.I) or text                # "Jeeves: Certainly" -> "Certainly"
         text = speakable(text) or text               # no "asterisk asterisk", URLs or [2] read out
         self.jump_in.spoke(ctx.agent_id, text)       # part of the conversation even if TTS fails
+        if (agent.get("rudimentary") or {}).get("enabled") and (agent.get("rudimentary") or {}).get("mute"):
+            ctx.trace("muted")                       # a muted rudimentary agent: on screen only
+            return
         try:
             pcm, rate = self._synth(agent, text)
         except Exception as exc:   # speech failing must never lose the answer
@@ -1686,6 +1710,20 @@ class Engine:
             self._tts_problem(f"Text to speech failed: {exc}")
             return
         pb = Playback(pcm, rate, self.voice_targets(agent))
+        peak = pb.peak()
+        if peak < 40 and text.strip():               # the voice came out silent: say it in eSpeak NG instead
+            log.warning("speech for %r came out silent (peak %d); using eSpeak NG", text[:60], peak)
+            ctx.trace("speech_silent", peak=peak)
+            try:
+                from ..models import voicefx
+                from ..models.backends import EspeakTTS
+                pcm, rate = EspeakTTS().synth(text, None, voicefx.style_of(agent))
+                pb = Playback(pcm, rate, self.voice_targets(agent))
+            except Exception as exc:  # noqa: BLE001
+                self._tts_problem(f"The voice came out silent and eSpeak NG failed too: {exc}")
+        log.info("  speaking %.1f s to %s (peak %d)", pb.seconds(), ", ".join(t or "default output"
+                                                                              for t in pb.targets), pb.peak())
+        ctx.trace("speech", seconds=round(pb.seconds(), 2), targets=pb.targets, peak=pb.peak())
         ctx.playback = pb
         ctx.saying = text
         ctx.saying_since, ctx.saying_for = time.time(), len(pcm) / (2 * rate)
@@ -1705,7 +1743,80 @@ class Engine:
         if pb.error:
             ctx.trace("playback_failed", reason=pb.error)
             self._tts_problem(f"Couldn't play speech: {pb.error}")
+        if pb.stopped.is_set():
+            log.info("  speech stopped early (the request was closed or replaced)")
+            ctx.trace("speech_stopped")
         ctx.check_cancelled()
+
+    def lobotomize(self, agent_id: str) -> dict[str, Any]:
+        """Start an agent afresh: what it was doing stops, and everything it remembers goes -- its notes,
+        its requests (the conversation it would look back on, and their ratings), what it said in the
+        conversation Jump in follows, a screen watch, extended prompt mode and its prepared replies. Its
+        settings (name, voice, personality, functions) stay."""
+        agent = self.agents().get(agent_id)
+        if agent is None:
+            raise ValueError(f"no agent '{agent_id}'")
+        with self._lock:
+            ctxs = [c for c in self.active.values() if c.agent_id == agent_id]
+            sessions = [s for s in self.sessions.values() if s.agent_id == agent_id]
+        for c in ctxs:
+            c.cancel()
+        for s in sessions:
+            s.ended = True
+            self.set_indicator(s.request_id, agent_id, "idle")
+        self.extended.pop(agent_id, None)
+        self.watchers.pop(agent_id, None)
+        notes = self.memory.forget_agent(agent_id)
+        requests = self.history.forget_agent(agent_id)
+        name = agent.get("name", agent_id)
+        lines = getattr(self.jump_in, "lines", None)
+        if lines is not None:
+            keep = [ln for ln in lines if ln[1] != name and ln[3] != f"agent:{agent_id}"]
+            lines.clear()
+            lines.extend(keep)
+        self._reply_cache.clear()
+        self._just_said = []
+        self.publish("history", {"forgot": agent_id})
+        log.info("lobotomized %s: %d notes, %d requests forgotten", agent_id, notes, requests)
+        return {"notes": notes, "requests": requests, "stopped": len(ctxs)}
+
+    def speak_test(self, agent_id: str | None = None, text: str = "") -> dict[str, Any]:
+        """`jeeves speak-test`: say something the way an answer is said, and report every step."""
+        aid = agent_id or self.main_agent() or next(iter(self.agents()), None)
+        agent = self.agents().get(aid or "")
+        if agent is None:
+            raise ValueError("no such agent")
+        text = text or f"This is {agent.get('name', aid)}, testing my voice."
+        out: dict[str, Any] = {"agent": aid, "text": text, "output_to": agent.get("output_to", "speakers"),
+                               "targets": self.voice_targets(agent)}
+        try:
+            tts, voice = self.models.tts(agent)
+            out["tts"] = f"{type(tts).__name__} {getattr(voice, 'id', '') or ''}".strip()
+        except Exception as exc:  # noqa: BLE001
+            out["tts"] = f"unavailable: {exc}"
+        t0 = time.time()
+        try:
+            pcm, rate = self._synth(agent, text)
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = f"text to speech failed: {exc}"
+            return out
+        out["synth_seconds"] = round(time.time() - t0, 2)
+        pb = Playback(pcm, rate, out["targets"])
+        out.update(seconds=round(pb.seconds(), 2), rate=rate, peak=pb.peak())
+        from .audio import _player
+        out["player"] = " ".join(_player(True, rate, out["targets"][0] if out["targets"] else ""))
+        with self._lock:
+            self.speaking += 1
+        try:
+            pb.play()
+        finally:
+            with self._lock:
+                self.speaking -= 1
+                self.speaking_until = time.time() + 0.5
+        out["played"] = pb.error is None and not pb.stopped.is_set()
+        if pb.error:
+            out["error"] = f"the player failed: {pb.error}"
+        return out
 
     def test_virtual_mic(self) -> dict[str, Any]:
         """Says a sentence into Jeeves-Microphone only and listens to it at the same time:
@@ -1990,6 +2101,15 @@ class Engine:
             return [exe, "overlay", *extra]
         return [sys.executable, "-m", "jeeves.overlay", *extra]
 
+    @staticmethod
+    def _overlay_env(env: dict[str, str]) -> dict[str, str]:
+        """The child finds this same jeeves package: started as `python -m jeeves.overlay` from another
+        folder, it couldn't ("No module named 'jeeves'") and died, over and over."""
+        root = str(Path(__file__).resolve().parent.parent.parent)
+        env = dict(env)
+        env["PYTHONPATH"] = os.pathsep.join([root] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
+        return env
+
     def _ensure_overlay(self) -> None:
         """Keep both overlay processes running while there's a display: the indicator
         process (layer-shell) and the popups process (Review, Text Request, imports)."""
@@ -2015,7 +2135,12 @@ class Engine:
                     continue
                 if proc.returncode != 0 or lived < 10:      # crashed, or quit straight away (even "cleanly")
                     fails += 1
-                    retry_at = now + min(60, 2 ** fails)
+                    # keeps failing: back off to every 10 minutes and say so once -- restarting a process that
+                    # dies at once every few seconds kept the CPU busy (and warm) with nothing on screen
+                    retry_at = now + (min(60, 2 ** fails) if fails < 6 else 600)
+                    if fails == 6:
+                        self.publish("notice", {"text": f"The on-screen {name} keep failing to start; trying again "
+                                                        "every 10 minutes. See `journalctl --user -u jeeves`."})
                     try:
                         tail = logfile.read_text(errors="replace").strip().splitlines()[-6:]
                     except OSError:
@@ -2033,7 +2158,7 @@ class Engine:
             try:
                 logfile.parent.mkdir(parents=True, exist_ok=True)
                 out = open(logfile, "wb")
-                proc = subprocess.Popen(self._overlay_argv(popups), env=env, stdin=subprocess.DEVNULL,
+                proc = subprocess.Popen(self._overlay_argv(popups), env=self._overlay_env(env), stdin=subprocess.DEVNULL,
                                         stdout=out, stderr=subprocess.STDOUT)
                 out.close()
                 proc.started_at = now                       # type: ignore[attr-defined]

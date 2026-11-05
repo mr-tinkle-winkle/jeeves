@@ -39,12 +39,18 @@ class _ThemeCache:
         key_t = tuple(key)
         if key_t != self._key:
             merged: dict[str, Any] = asdict(JEEVES_THEME_DEFAULTS)
+            saved: set[str] = set()
             for f in files:
                 try:
                     data = json.loads(f.read_text()).get("theme") or {}
                 except (OSError, ValueError):
                     data = {}
                 merged.update({k: v for k, v in data.items() if k in {fl.name for fl in fields(ThemeSettings)}})
+                saved |= set(data)
+            from .themes import LOOKS                 # a look saved before a setting existed gets the look's value
+            look = LOOKS.get(merged.get("preset") or "")
+            if look is not None:
+                merged.update({k: v for k, v in look.values.items() if k not in saved})
             self._theme = ThemeSettings(**merged)
             self._key = key_t
         return self._theme
@@ -76,6 +82,8 @@ def apply_app_font() -> None:
         f.setFamily(t.font_body)
     if t.font_size:
         f.setPointSize(int(t.font_size))
+    from .ui_kit.theme import set_weight
+    set_weight(f, int(getattr(t, "font_weight", 0) or 400))
     app.setFont(f)
 
 

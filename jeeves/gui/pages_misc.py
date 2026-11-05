@@ -81,6 +81,12 @@ class GeneralPage(Page):
                           "key that turns it back on too, add a shortcut for the command “jeeves --toggle” in "
                           "System Settings > Keyboard > Shortcuts."))
 
+        tm = self.section("Timers")
+        self.b.check(tm, "Tick like a clock while a timer runs", "timers.tick")
+        self.b.check(tm, "Only near the end", "timers.tick_only_under",
+                     hint="On: the ticking starts when this much time is left; off: it ticks the whole time.")
+        self.b.number(tm, "Tick for the last", "timers.tick_under_seconds", 5, 3600, 5, suffix=" s")
+
         y = self.section("YouTube")
         self.b.choice(y, "Sign in with", "youtube.cookies_from_browser",
                       [("Automatic (a browser's YouTube login, only when YouTube asks)", "auto"),

@@ -222,7 +222,10 @@ class Playback:
         self.error: str | None = None
 
     def play(self) -> None:
+        """Feeds the players at about real time (a little ahead), so pause and stop act at once and a
+        player's own messages can't fill its error pipe and stall it."""
         procs = []
+        errs: dict[int, list[bytes]] = {}
         try:
             try:
                 procs = [subprocess.Popen(_player(True, self.rate, t), stdin=subprocess.PIPE,
@@ -233,12 +236,22 @@ class Playback:
                 for p in procs:
                     p.kill()
                 return
-            step = self.rate * 2 // 20   # 50 ms chunks so pause/stop react quickly
+            for p in procs:
+                errs[p.pid] = []
+                threading.Thread(target=_drain, args=(p, errs[p.pid]), daemon=True).start()
+            step = self.rate * 2 // 20   # 50 ms chunks
+            ahead = 0.4                  # seconds fed ahead of what's playing
+            start = time.monotonic()
+            fed = 0.0
             for i in range(0, len(self.pcm), step):
                 if self.stopped.is_set():
                     break
                 while self.paused.is_set() and not self.stopped.is_set():
                     self.stopped.wait(0.05)
+                    start += 0.05
+                lag = fed - (time.monotonic() - start) - ahead
+                if lag > 0:
+                    self.stopped.wait(lag)
                 chunk = self.pcm[i:i + step]
                 for p in procs:
                     try:
@@ -247,6 +260,7 @@ class Playback:
                         p.stdin.flush()
                     except (BrokenPipeError, OSError):
                         pass
+                fed += len(chunk) / (2 * self.rate)
             for p in procs:
                 try:
                     assert p.stdin is not None
@@ -261,12 +275,25 @@ class Playback:
                 except subprocess.TimeoutExpired:
                     p.kill()
                     continue
-                err = p.stderr.read() if p.stderr else b""
+                err = b"".join(errs.get(p.pid, []))
                 if p.returncode not in (0, None) and not self.stopped.is_set():
-                    self.error = (err or b"").decode(errors="replace").strip()[-300:] or f"exit {p.returncode}"
+                    self.error = err.decode(errors="replace").strip()[-300:] or f"exit {p.returncode}"
                     log.warning("audio player %s failed: %s", p.args[0], self.error)
         finally:
             self.done.set()
+
+    def seconds(self) -> float:
+        return len(self.pcm) / (2 * self.rate) if self.rate else 0.0
+
+    def peak(self) -> int:
+        """The loudest sample (0 = silence)."""
+        try:
+            import numpy as np
+            a = np.frombuffer(self.pcm[: len(self.pcm) // 2 * 2], dtype="<i2")
+            return int(np.abs(a.astype("int32")).max()) if a.size else 0
+        except ImportError:
+            a = array.array("h", self.pcm[: len(self.pcm) // 2 * 2])
+            return max((abs(x) for x in a), default=0)
 
     def toggle_pause(self) -> bool:
         if self.paused.is_set():
@@ -278,6 +305,16 @@ class Playback:
     def stop(self) -> None:
         self.stopped.set()
         self.paused.clear()
+
+
+def _drain(p: subprocess.Popen, into: list[bytes]) -> None:
+    try:
+        assert p.stderr is not None
+        for line in p.stderr:
+            into.append(line)
+            del into[:-20]
+    except (OSError, ValueError):
+        pass
 
 
 def play_file(path: Path, target: str = "") -> None:

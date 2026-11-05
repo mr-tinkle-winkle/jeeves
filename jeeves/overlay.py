@@ -119,8 +119,9 @@ def main(popups: bool = False) -> int:
 
     from .gui.common import Daemon, flags_overlay, install_theme, theme_palette
     from .gui.ui_kit import (CustomButton, CustomCheckBox, CustomLineEdit, CustomPlainTextEdit, CustomTextBrowser,
-                             SmoothScrollArea, Theme, fit_to_width, paint_page_outline)
+                             SmoothScrollArea, Theme, fit_to_width)
     from . import overlay_skin as ovs
+    from .gui.ui_kit import skin
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
@@ -713,25 +714,48 @@ def main(popups: bool = False) -> int:
 
     # ------------------------------------------------------------------ themed popups
     class Popup(QDialog):
+        """Every popup: the theme's own rounded frame and border (no system frame), dragged by any
+        empty spot, with a close button in the corner."""
+
         def __init__(self, title: str) -> None:
-            super().__init__(None, Qt.Dialog | Qt.WindowStaysOnTopHint)
+            super().__init__(None, Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
             self.setWindowTitle(title)
             theme_palette(self)
+            self.setAutoFillBackground(False)
             self.theme = Theme()
             self.lay = QVBoxLayout(self)
             pad = self.theme.padding
-            self.lay.setContentsMargins(pad, pad, pad, pad)
+            edge = int(skin.frame_pen(self.theme).widthF()) + 6
+            self.lay.setContentsMargins(pad + edge, pad + edge, pad + edge, pad + edge)
             self.lay.setSpacing(pad)
+            from .gui.shell import WinButton
+            self.close_btn = WinButton("close", self)
+            self.close_btn.clicked.connect(self.close)
+
+        def resizeEvent(self, e: Any) -> None:
+            super().resizeEvent(e)
+            edge = int(skin.frame_pen(self.theme).widthF()) + 6
+            self.close_btn.move(self.width() - self.close_btn.width() - edge, edge)
+            self.close_btn.raise_()
 
         def paintEvent(self, _e: Any) -> None:
             p = QPainter(self)
-            p.fillRect(self.rect(), self.theme.page_background())
+            skin.paint_frame(p, QRectF(self.rect()), self.theme, self.theme.page_background())
             p.end()
-            paint_page_outline(self, self.theme.page_background())
+
+        def mousePressEvent(self, e: Any) -> None:
+            handle = self.windowHandle()
+            if e.button() == Qt.LeftButton and handle is not None:
+                handle.startSystemMove()
+                return
+            super().mousePressEvent(e)
 
         def heading(self, text: str) -> QLabel:
-            lab = QLabel(text)
-            lab.setStyleSheet(f"QLabel {{ font-size: 16px; font-weight: bold; color: {self.theme.text().name()}; }}")
+            lab = QLabel(self.theme.heading(text))
+            pixel = self.theme.settings.font_display in ("Press Start 2P",)     # wraps onto itself: body face
+            lab.setFont(self.theme.body_font(16, 700) if pixel else self.theme.display_font(14, 700))
+            lab.setStyleSheet(f"QLabel {{ color: {self.theme.text().name()}; padding-right: 30px; }}")
             lab.setWordWrap(True)
             self.lay.addWidget(lab)
             return lab
@@ -750,6 +774,12 @@ def main(popups: bool = False) -> int:
             super().__init__(f"{st.get('agent_name', 'Agent')} — thoughts")
             self.rid = rid
             self.title = self.heading(f"{st.get('agent_name', 'Agent')} is {st.get('stage', 'thinking')}")
+            self.said = QLabel("")                  # what it was asked, as in the ledger
+            self.said.setWordWrap(True)
+            self.said.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.said.setStyleSheet(f"QLabel {{ color: {self.theme.text().name()}; }}")
+            self.said.hide()
+            self.lay.addWidget(self.said)
             self.looking = QLabel("")
             self.looking.setWordWrap(True)
             self.lay.addWidget(self.looking)
@@ -762,6 +792,13 @@ def main(popups: bool = False) -> int:
         def _fill(self, res: Any) -> None:
             if not isinstance(res, dict):
                 return
+            if res.get("text"):
+                import html as _h
+                how = {"voice": "You said", "text": "You typed", "schedule": "Scheduled", "trigger": "Triggered by",
+                       "handoff": "Handed over"}.get(str(res.get("source", "text")).split(":", 1)[0], "Asked")
+                self.said.setText(f"<span style='color:{self.theme.muted().name()}'>{how}:</span> "
+                                  f"“{_h.escape(res['text'])}”")
+                self.said.show()
             self.text.setPlainText("".join(t if t.endswith("\n") else t + "\n" for t in res.get("thoughts", [])))
             if res.get("looking_at"):
                 self.looking.setText(f"Looking at: {res['looking_at']}")
@@ -841,7 +878,15 @@ def main(popups: bool = False) -> int:
 
         def __init__(self) -> None:
             super().__init__("Jeeves — Text Request")
-            self.heading("Type a request (start with the agent's name)")
+            self.title = self.heading("Type a request (start with the agent's name)")
+
+            def got(res: Any) -> None:                # with a Main agent, it's who a request naming nobody goes to
+                v = (res or {}).get("value") if isinstance(res, dict) else None
+                agents, main = (v or {}).get("agents") or {}, ((v or {}).get("general") or {}).get("main_agent")
+                if main in agents:
+                    self.title.setText(self.theme.heading(f"Type a request (start with an agent's name, or it goes "
+                                                          f"to {agents[main].get('name', main)})"))
+            daemon.call("settings.get", got, lambda _e: None)
             self.edit = CustomLineEdit()
             self.edit.setPlaceholderText("Jeeves, set a timer for 10 minutes")
             self.edit.returnPressed.connect(self._send)

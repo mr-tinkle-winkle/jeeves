@@ -36,7 +36,8 @@ def font(theme: Theme, size: float, mono: bool = False) -> QFont:
         return f
     f = theme.body_font(size)
     if k == "slam":
-        f.setWeight(QFont.Weight(800))
+        from .gui.ui_kit.theme import set_weight
+        set_weight(f, 800)
     return f
 
 

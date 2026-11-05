@@ -13,7 +13,6 @@ from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel
 
 from .theme_config import get_settings
 from .theme import Theme
-from .rounded_rect import rounded_rect_path
 from .custom_button import CustomButton
 
 
@@ -51,15 +50,17 @@ class CustomMessageDialog(QDialog):
         fit_to_width(self, max(340, min(560, 220 + len(text) * 2)))
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect())
-        radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 16
-        if radius:
-            painter.fillPath(rounded_rect_path(rect, radius), self._theme.page_background())
-        else:
-            painter.fillRect(rect, self._theme.page_background())
-        painter.end()
+        from .skin import paint_frame
+        p = QPainter(self)
+        paint_frame(p, QRectF(self.rect()), self._theme, self._theme.page_background())
+        p.end()
+
+    def mousePressEvent(self, event) -> None:          # no title bar: drag it by any empty spot
+        handle = self.windowHandle()
+        if event.button() == Qt.LeftButton and handle is not None:
+            handle.startSystemMove()
+            return
+        super().mousePressEvent(event)
 
 
 def show_message(parent, title: str, text: str) -> None:

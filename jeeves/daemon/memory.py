@@ -45,6 +45,15 @@ class Memory:
                 limit = int(self.settings.get("memory.long_term_limit", 200))
                 del self.long_term[:-limit]
 
+    def forget_agent(self, agent: str) -> int:
+        """Every note this agent made (Lobotomize)."""
+        with self._lock:
+            before = len(self.permanent) + len(self.long_term)
+            self.permanent = [n for n in self.permanent if n.get("agent") != agent]
+            self.long_term = [n for n in self.long_term if n.get("agent") != agent]
+            self._save()
+            return before - len(self.permanent) - len(self.long_term)
+
     def all(self) -> list[dict[str, Any]]:
         with self._lock:
             return list(self.permanent) + list(self.long_term)

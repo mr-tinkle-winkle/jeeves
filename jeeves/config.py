@@ -54,8 +54,11 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         # [{name, description, required, choices}], confirm, terminal, timeout}]
         "commands": [],
         # a rudimentary agent (functions/rudimentary.py): just this one function (any full function, or
-        # one of its commands); it only works out how you want it done, so it answers faster
-        "rudimentary": {"enabled": False, "function": ""},
+        # one of its commands, or "run_what_i_say" = Run commands: program / confirm (never | risky |
+        # always) / terminal for those); it only works out how you want it done, so it answers faster;
+        # mute = never speaks
+        "rudimentary": {"enabled": False, "function": "", "mute": False, "program": "", "confirm": "risky",
+                        "terminal": False},
         "jeenius": None,              # 1-4 (see models.jeenius); None -> the global setting
         # sites its research reads first when a question fits them (Agents > Custom sources):
         # [{url, about: what the site is for}]
@@ -104,6 +107,7 @@ def agent_memory(agent: dict[str, Any] | None, settings: Any = None) -> dict[str
 DEFAULTS: dict[str, Any] = {
     "general": {
         "enabled": True,                  # master switch: off = no listening, no models, no requests
+        "main_agent": "",                 # who a manual request (Text / Voice Request: Unknown) naming nobody goes to
         "end_of_speech_seconds": 1.2,     # silence before listening stops
         "mic_click_extend_seconds": 5.0,  # clicking the onscreen mic adds this
         "mic_hold_release_seconds": 1.0,  # after letting go of a held mic
@@ -210,6 +214,9 @@ DEFAULTS: dict[str, Any] = {
         "online_agent": "codex",          # codex | gemini | claude | grok
     },
     "memory": {"recent_count": 3, "long_term_limit": 200},
+    # a clock ticking while a timer runs (off by default); only_under: just for its last
+    # under_seconds (on, 60 s by default)
+    "timers": {"tick": False, "tick_only_under": True, "tick_under_seconds": 60},
     "research": {"engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000,
                  "depth": "normal",            # quick (1 round, 3 pages) | normal (2 rounds, 5) | deep (3, 8)
                  "auto_for_facts": True,       # factual questions (games, products, people...) get researched

@@ -71,6 +71,7 @@ class Session:
     suspended: bool = False       # right-click > Suspend: stop taking audio until resumed
     interrupting: list[str] = field(default_factory=list)   # requests paused because their agent was called
     retried: bool = False         # reopened because only the name was heard the first time
+    manual: bool = False          # a manual Voice Request (naming nobody: the Main agent)
     # opened by a wake word: the audio of the name itself (transcribed with the request, so a
     # false wake -- "geez", "believes" -- can be told apart), and whether the wake was clear enough
     # to trust even when speech recognition doesn't spell the name out

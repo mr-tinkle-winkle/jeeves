@@ -123,6 +123,20 @@ def main(argv: list[str] | None = None) -> int:
             rep = ipc.call("debug.cpu", seconds=secs, timeout=secs + 60)
             _print(rep if a.json else cpu_report(rep))
             return 0
+        if cmd in ("speak-test", "speak_test"):
+            rep = ipc.call("debug.speak", agent=a.agent, text=" ".join(a.args), timeout=180)
+            if a.json:
+                _print(rep)
+                return 0
+            print(f"Agent: {rep.get('agent')}  (speaks through: {rep.get('output_to')} -> "
+                  f"{', '.join(t or 'default output' for t in rep.get('targets', []))})")
+            print(f"Voice: {rep.get('tts')}")
+            if "seconds" in rep:
+                print(f"Made {rep['seconds']} s of speech at {rep.get('rate')} Hz in {rep.get('synth_seconds')} s; "
+                      f"loudest sample {rep['peak']} of 32767" + ("  <- SILENT" if rep["peak"] < 40 else ""))
+                print(f"Played with: {rep.get('player')}")
+            print("Played." if rep.get("played") else f"Problem: {rep.get('error', 'not played')}")
+            return 0 if rep.get("played") else 1
         if cmd in ("say", "request"):
             _print(ipc.call("request.text", text=" ".join(a.args), agent=a.agent))
         elif cmd in ("dry-run", "dry_run"):

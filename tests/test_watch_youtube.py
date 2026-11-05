@@ -261,3 +261,25 @@ def test_youtube_says_why_it_cant_look_rather_than_that_the_channel_doesnt_exist
     import pytest
     with pytest.raises(FunctionError, match="yt-dlp isn't installed"):
         yt.find_channel("moist critikal")
+
+
+def test_a_spoken_channel_name_with_a_space_finds_the_same_channel_as_one_word(monkeypatch):
+    """'moist critikal' (as speech recognition writes it) found a clips channel; 'moistcritikal' the real one."""
+    from jeeves.functions.partials import youtube as yt
+    main = {"channel_id": "UCmain", "channel": "penguinz0", "channel_follower_count": 17_000_000}
+    clips = {"channel_id": "UCclips", "channel": "Moist Critikal Clips", "channel_follower_count": 9_000}
+
+    def fake_try(*args, errors=None, **kw):
+        url = args[-1]
+        if "/@" in url:
+            return None
+        q = yt.urllib.parse.unquote(url.split("search_query=")[1].split("&")[0])
+        return {"entries": [main, clips] if q == "moistcritikal" else [clips, main]}
+
+    def fake_search(q, errors=None):
+        owners = [main] * 5 if q == "moistcritikal" else [clips, clips, clips, main, main]
+        return [{"id": f"v{i}", "channel_id": o["channel_id"], "channel": o["channel"]} for i, o in enumerate(owners)]
+    monkeypatch.setattr(yt, "_try", fake_try)
+    monkeypatch.setattr(yt, "_try_search", fake_search)
+    assert yt.find_channel("moistcritikal")[0] == "UCmain"
+    assert yt.find_channel("moist critikal")[0] == "UCmain"

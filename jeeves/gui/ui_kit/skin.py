@@ -691,3 +691,62 @@ def combo_stylesheet(theme: Theme) -> str:
             selection-background-color: {sel_bg}; selection-color: {sel_fg}; outline: none; padding: 4px;
         }}
     """
+
+
+# ---------------------------------------------------------------------------- windows and popups
+def frame_radius(theme: Theme) -> float:
+    return {"fade": 14.0, "spring": 22.0, "glide": 10.0, "type": 6.0, "draw": 4.0}.get(kind(theme), 0.0)
+
+
+def frame_pen(theme: Theme) -> QPen:
+    k = kind(theme)
+    pop = theme.pop()
+    pen = {"slam": QPen(theme.text(), 3), "step": QPen(theme.accent(), 3),
+           "draw": QPen(_alpha(QColor("#ffffff"), 0.6), 1.5), "glide": QPen(_alpha(pop, 0.55), 1.5),
+           "type": QPen(_alpha(pop, 0.5), 1.5), "spring": QPen(_alpha(theme.text(), 0.14), 1.5)}.get(
+        k, QPen(_alpha(QColor("#ffffff"), 0.14), 1.5))
+    pen.setJoinStyle(Qt.MiterJoin if k in ("slam", "step", "draw") else Qt.RoundJoin)
+    return pen
+
+
+def frame_path(rect: QRectF, theme: Theme, inset: float = 0.0) -> QPainterPath:
+    """The window's (or a popup's) outline; Arcade's corners are pixel steps."""
+    r = rect.adjusted(inset, inset, -inset, -inset)
+    if kind(theme) == "step":
+        s = 4.0
+        L, T, R, B = r.left(), r.top(), r.right(), r.bottom()
+        pts = [(L + 3 * s, T), (R - 3 * s, T), (R - 3 * s, T + s), (R - s, T + s), (R - s, T + 3 * s), (R, T + 3 * s),
+               (R, B - 3 * s), (R - s, B - 3 * s), (R - s, B - s), (R - 3 * s, B - s), (R - 3 * s, B), (L + 3 * s, B),
+               (L + 3 * s, B - s), (L + s, B - s), (L + s, B - 3 * s), (L, B - 3 * s), (L, T + 3 * s),
+               (L + s, T + 3 * s), (L + s, T + s), (L + 3 * s, T + s)]
+        path = QPainterPath()
+        path.moveTo(*pts[0])
+        for pt in pts[1:]:
+            path.lineTo(*pt)
+        path.closeSubpath()
+        return path
+    rad = max(0.0, frame_radius(theme) - inset)
+    return _rr(r, rad)
+
+
+def paint_frame(p: QPainter, rect: QRectF, theme: Theme, fill: QColor, square: bool = False) -> None:
+    """A window or popup: fill, then the border drawn inside the edge at its full width all round
+    (stroked on the edge itself, half of it was cut off -- and more at the round corners)."""
+    k = kind(theme)
+    p.setRenderHint(QPainter.Antialiasing, k != "step")
+    if square:
+        p.fillRect(rect, fill)
+        return
+    pen = frame_pen(theme)
+    w = pen.widthF()
+    p.fillPath(frame_path(rect, theme), fill)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawPath(frame_path(rect, theme, w / 2))
+    if k == "draw":                                   # crop marks in the corners
+        r = rect.adjusted(5, 5, -5, -5)
+        p.setPen(QPen(_alpha(QColor("#ffffff"), 0.9), 1))
+        for cx, cy, dx, dy in ((r.left(), r.top(), 1, 1), (r.right(), r.top(), -1, 1), (r.left(), r.bottom(), 1, -1),
+                               (r.right(), r.bottom(), -1, -1)):
+            p.drawLine(QPointF(cx, cy), QPointF(cx + 8 * dx, cy))
+            p.drawLine(QPointF(cx, cy), QPointF(cx, cy + 8 * dy))
