@@ -167,6 +167,12 @@ class VideoPlayer(QWidget):
         self.sync = QTimer(self)
         self.sync.setInterval(500)
         self.sync.timeout.connect(self._sync)
+        # where you are, now and then, for sources that keep track (Jellyfin's "continue watching")
+        self.reporting = False
+        self.report_timer = QTimer(self)
+        self.report_timer.setInterval(30_000)
+        self.report_timer.timeout.connect(lambda: self.reporting and self.call(
+            "video.position", position=int(self._master().position())))
         # controls hide after a while without input
         self.idle = QTimer(self)
         self.idle.setSingleShot(True)
@@ -233,6 +239,9 @@ class VideoPlayer(QWidget):
             self.video_out.setMuted(False)
             self.sync.stop()
         self.pending_seek = int(d["start"]) if d.get("start") else None
+        if d.get("fullscreen", True) is not None:
+            self.reporting = bool(d.get("report"))
+        self.report_timer.start() if self.reporting else self.report_timer.stop()
         self.set_speed(self.rate)                 # a new source (quality change) keeps the speed
         self._volume(self.vol.value())
         self.video.play()
@@ -477,12 +486,14 @@ class VideoPlayer(QWidget):
             super().keyPressEvent(e)
 
     def closeEvent(self, e: Any) -> None:
+        position = int(self._master().position())
+        self.report_timer.stop()
         self.video.stop()
         self.audio.stop()
         self.sync.stop()
         self.idle.stop()
         self.unsetCursor()
-        self.call("video.closed")
+        self.call("video.closed", position=position)
         super().closeEvent(e)
 
     def control(self, d: dict[str, Any]) -> None:

@@ -203,7 +203,7 @@ def test_player_controls(monkeypatch):
     p.video.pause()
     p.hide_controls()
     p.close()
-    assert calls[-1] == ("video.closed", {})
+    assert calls[-1] == ("video.closed", {"position": 0})
 
 
 def test_youtube_signs_in_with_a_browser_login_when_asked(monkeypatch, tmp_path):

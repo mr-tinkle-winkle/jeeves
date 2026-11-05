@@ -1384,6 +1384,24 @@ class Engine:
                 return True
         return False
 
+    def video_position(self, position: int) -> bool:
+        """The player's position now and then: told to Jellyfin when it's playing something from there."""
+        item = self.video_state.get("jellyfin")
+        if item:
+            self.run_async(lambda: self._jellyfin().report(item, int(position)))
+        return True
+
+    def video_closed(self, position: int | None = None) -> bool:
+        item = self.video_state.get("jellyfin")
+        self.video_state.update(playing=False, jellyfin=None)
+        if item and position is not None:
+            self.run_async(lambda: self._jellyfin().report(item, int(position), stopped=True))
+        return True
+
+    def _jellyfin(self) -> Any:
+        from ..functions.partials import jellyfin
+        return jellyfin.from_settings(self.settings)
+
     def video_quality(self, height: int, position: int = 0) -> bool:
         """The player asked for another quality: fetch those streams and carry on from position."""
         page = self.video_state.get("page")

@@ -619,6 +619,62 @@ def youtube(ctx, action="play", query="", channel="", newest=False, seconds=None
 
 
 @full(
+    "jellyfin",
+    "Plays a show, movie, audiobook or music from your Jellyfin server, or opens a book from it.",
+    args=[Arg("title", "string", "The show, movie or book, as said"),
+          Arg("kind", "string", "What it is", required=False, default="any",
+              choices=["any", "show", "movie", "book", "audiobook", "music"]),
+          Arg("season", "number", "For a show: which season", required=False, default=None),
+          Arg("episode", "number", "For a show: which episode", required=False, default=None)],
+    how="Jellyfin's search finds it (the Jellyfin settings: the server's address, an API key, your user). "
+        "A show plays the episode you named, else the next one to watch; shows and movies continue where you "
+        "left off, in Jeeves' player, and Jellyfin is told how far you got. Books are downloaded once and "
+        "opened in your book reader.",
+    keywords=["jellyfin", "put on", "watch", "next episode", "season", "episode", "read the book", "movie"],
+    examples=["Jeeves, put on The Office on Jellyfin.", "Jeeves, play Breaking Bad season 2 episode 5.",
+              "Jeeves, play the movie Dune.", "Jeeves, read Project Hail Mary."],
+    default_enabled=True, category="media",
+)
+def jellyfin(ctx, title, kind="any", season=None, episode=None):
+    from .partials import jellyfin as jf
+    if not str(title or "").strip():
+        raise FunctionError("what should I put on?")
+    if ctx.dry_run:
+        return f"<jellyfin {kind} {title!r}" + (f" S{season}" if season else "") + (f"E{episode}" if episode else "") + ">"
+    j = jf.from_settings(ctx.settings)
+    ctx.state("researching", "Looking on Jellyfin")
+    want = "show" if (season or episode) and kind == "any" else str(kind or "any")
+    item = j.find(str(title), want)
+    if item.get("Type") == "Series":
+        item = j.episode(item, int(season) if season is not None else None,
+                         int(episode) if episode is not None else None)
+    ctx.think(f"Found: {jf.label(item)} ({item.get('Type')})", looking_at=j.web_page(item))
+    ctx.entry["sources"] = [{"n": 1, "title": jf.label(item), "url": j.web_page(item), "text": "Jellyfin"}]
+    if item.get("Type") == "Book":
+        import subprocess
+        from ..paths import cache_dir
+        path = j.download(item, str(cache_dir() / "jellyfin"))
+        subprocess.Popen(["xdg-open", path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return ctx.say(f"Opening {jf.label(item)}.")
+    if item.get("Type") in ("MusicAlbum", "Folder", "BoxSet"):
+        raise FunctionError(f"{jf.label(item)} is a collection; ask for one song or one film in it")
+    start = j.resume_ms(item)
+    eng = ctx.engine
+    import time
+    item["_session"] = f"jeeves-{item['Id']}-{int(time.time())}"
+    eng.publish("video", {"action": "play", "title": jf.label(item), "channel": "Jellyfin",
+                          "video": j.stream_url(item), "audio": None, "page": j.web_page(item),
+                          "duration": int(item.get("RunTimeTicks") or 0) / jf.TICKS or None,
+                          "chapters": j.chapters(item), "start": start or None, "report": True,
+                          "agent": ctx.agent_id})
+    eng.video_state.update(playing=True, title=jf.label(item), page=j.web_page(item), jellyfin=item)
+    eng.run_async(lambda: j.report(item, start, started=True))
+    where = f", from {start // 60000} minutes in" if start >= 60000 else ""
+    return ctx.say(f"Here's {jf.label(item)}{where}.")
+
+
+@full(
     "local_response",
     "Talks: answers, explains, jokes, gives opinions -- anything no other function fits.",
     args=[Arg("prompt", "string", "The request, as said", said=True)],

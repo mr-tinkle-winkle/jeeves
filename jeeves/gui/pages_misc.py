@@ -104,6 +104,19 @@ class GeneralPage(Page):
         self.b.text(y, "Or a cookies.txt file", "youtube.cookies_file", placeholder="~/cookies-youtube.txt",
                     hint="Exported from your browser (e.g. with a 'Get cookies.txt' extension); used instead.")
 
+        jf = self.section("Jellyfin")
+        self.b.text(jf, "Server address", "jellyfin.url", placeholder="http://my-server:8096",
+                    hint="Its address as this computer reaches it -- a Tailscale name works.")
+        self.b.text(jf, "Your user", "jellyfin.user", placeholder="blank: the server's administrator",
+                    hint="Whose watch progress and library to use.")
+        self.jf_key = CustomLineEdit()
+        self.jf_key.setEchoMode(CustomLineEdit.Password)
+        self.jf_key.setPlaceholderText("an API key: Jellyfin > Dashboard > API Keys (stored in secrets.json, mode 600)")
+        jf_save = CustomButton("Save key")
+        jf_save.clicked.connect(lambda: daemon.call("accounts.set_key", lambda _r: self.jf_key.clear(), None,
+                                                    name="jellyfin_api_key", value=self.jf_key.text().strip() or None))
+        jf.addWidget(row(self.jf_key, jf_save, stretch=0))
+
         a = self.section("Audio devices")
         self.mic = self.b.choice(a, "Microphone", "audio.microphone", [("Default", "")])
         self.desk = self.b.choice(a, "Desktop audio", "audio.desktop", [("Default output's monitor", "@DEFAULT_MONITOR@")])

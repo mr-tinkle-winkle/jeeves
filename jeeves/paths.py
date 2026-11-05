@@ -24,6 +24,11 @@ def data_dir() -> Path:
     return _xdg("XDG_DATA_HOME", ".local/share") / "jeeves"
 
 
+def cache_dir() -> Path:
+    """Things fetched that can be fetched again (books from Jellyfin)."""
+    return _xdg("XDG_CACHE_HOME", ".cache") / "jeeves"
+
+
 def state_dir() -> Path:
     """Logs (summary transcript, daemon log)."""
     return _xdg("XDG_STATE_HOME", ".local/state") / "jeeves"

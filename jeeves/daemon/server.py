@@ -116,7 +116,7 @@ class Server:
             return {"count": len(e.registry.functions), "problems": e.registry.problems}
 
         def accounts_set_key(name: str, value: str | None) -> Any:
-            if name not in ("gemini_api_key",):
+            if name not in ("gemini_api_key", "jellyfin_api_key"):
                 raise ValueError("unknown secret")
             config.save_secret(name, value)
             return True
@@ -234,7 +234,8 @@ class Server:
             "audio.test_virtual_mic": e.test_virtual_mic,
             "voice.preview": lambda agent, text="": e.preview_voice(_agent(agent), text),
             "persona.test": lambda agent: e.models.test_persona(_agent(agent)),
-            "video.closed": lambda: e.video_state.update(playing=False) or True,
+            "video.closed": lambda position=None: e.video_closed(position),
+            "video.position": lambda position=0: e.video_position(position),
             "video.quality": lambda height, position=0: e.video_quality(height, position),
             "voice.speakers": lambda voice: e.voice_speakers(voice),
             "voice.effects": lambda: {"effects": [[k, v[0]] for k, v in voicefx.EFFECTS.items()],

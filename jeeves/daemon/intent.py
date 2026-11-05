@@ -394,6 +394,11 @@ class IntentProcessor:
         core = self.strip_address(agent, text)
         low = core.lower()
         name = agent.get("name", "Jeeves")
+        if "jellyfin" in by_name and re.search(r"\bjellyfin\b", low):
+            from ..functions.partials.jellyfin import parse_request as jf_parse
+            args = jf_parse(core)
+            if args.get("title"):
+                return Decision("jellyfin", args, 0.95, "", "rules")
         if "youtube" in by_name:
             m = re.match(r"^(pause|resume|unpause|stop|close)\s+(the\s+)?(video|youtube)\b", low)
             if m:
