@@ -93,12 +93,18 @@ def test_summary_keeps_the_wake_word_model(engine, monkeypatch):
 def test_a_call_the_wake_model_heard_isnt_run_twice(engine, monkeypatch):
     engine.settings.set("summary.enabled", True)
     monkeypatch.setattr(engine.models, "wake_spotter", lambda: _Spotter())
-    monkeypatch.setattr(engine.models, "stt", lambda agent=None: STT("Jeeves, set a timer for 3 minutes"))
-    engine._last_wake["microphone"] = time.time()
+
+    class SlowSTT(STT):                                  # Whisper on the CPU: seconds
+        def transcribe(self, pcm, prompt="", language="en"):
+            time.sleep(4)
+            return self.text
+    monkeypatch.setattr(engine.models, "stt", lambda agent=None: SlowSTT("Jeeves, set a timer for 3 minutes"))
+    engine._wakes["microphone"] = [time.time() - 1.5]   # the wake model called while it was being said
     engine.on_utterance("microphone", b"\0" * 32000 * 2)
     time.sleep(0.3)
     assert not engine.timers.list()
-    engine._last_wake["microphone"] = 0.0                # the wake model missed it: the transcript calls
+    monkeypatch.setattr(engine.models, "stt", lambda agent=None: STT("Jeeves, set a timer for 3 minutes"))
+    engine._wakes["microphone"] = []                    # the wake model missed it: the transcript calls
     engine.on_utterance("microphone", b"\0" * 32000 * 2)
     deadline = time.time() + 5
     while time.time() < deadline and not engine.timers.list():

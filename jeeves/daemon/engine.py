@@ -170,7 +170,7 @@ class Engine:
         self.speaking_until = 0.0
         self._reply_cache: dict[tuple, tuple[bytes, int]] = {}      # wake-up replies, synthesized once
         self._why_modes: dict[str, str] = {}
-        self._last_wake: dict[str, float] = {}                         # source -> when the wake model last called
+        self._wakes: dict[str, list[float]] = {}                       # source -> when the wake model called (last minute)
         self._backup_guess: dict[str, str | None] = {}              # source -> the agent a missed call sounded like
         self._just_said: list[tuple[str, float, float]] = []          # (text, started, seconds) just spoken
         self._reply_tried: set[tuple] = set()
@@ -901,7 +901,8 @@ class Engine:
         name_audio: the name itself (speech recognition checks it was really said)."""
         if not self.is_on() or self.previewing():
             return
-        self._last_wake[source] = time.time()
+        now = time.time()
+        self._wakes[source] = [t for t in self._wakes.get(source, []) if now - t < 60] + [now]
         cur = self.sessions.get(source)
         if cur is not None:
             if cur.mode != "request" or time.time() - cur.started < 8:
@@ -1195,15 +1196,16 @@ class Engine:
         if self.previewing():
             may_call = False                        # (a voice preview saying a name calls nobody)
         rid, guess = f"heard-{source}", None
+        ended = time.time()
+        started = ended - len(pcm) / 32000
         if may_call and self.sessions.get(source) is None and self.models.wake_spotter() is not None \
-                and time.time() - self._last_wake.get(source, 0.0) > len(pcm) / 32000 + 3.0 \
-                and self._might_be_a_call(source, pcm):
+                and not self._woken_during(source, started, ended) and self._might_be_a_call(source, pcm):
             # names come from the transcript here: show the spinner while speech recognition works
             guess = self._backup_guess.pop(source, None) or self.main_agent()
             if guess:
                 self.set_indicator(rid, guess, "thinking", "Checking what you said")
         try:
-            self._on_utterance(source, pcm, may_call)
+            self._on_utterance(source, pcm, may_call, started, ended)
         finally:
             if guess:
                 self.set_indicator(rid, guess, "idle")
@@ -1222,7 +1224,18 @@ class Engine:
             return None
         return self.models.wake_spotter()
 
-    def _on_utterance(self, source: str, pcm: bytes, may_call: bool) -> None:
+    def _woken_during(self, source: str, started: float, ended: float) -> bool:
+        """Did the wake word model call an agent while this was being said? Then the call has been handled
+        (or is being): the transcript mustn't start it again. Judged by when it was SAID -- Whisper on the
+        CPU takes seconds, so "a wake in the last few seconds" (the old check) had usually expired by
+        the time the transcript came back, and every call ran twice with Summary on."""
+        return any(started - 1.5 <= t <= ended + 1.0 for t in self._wakes.get(source, []))
+
+    def _on_utterance(self, source: str, pcm: bytes, may_call: bool, started: float = 0.0,
+                      ended: float = 0.0) -> None:
+        if not ended:
+            ended = time.time()
+            started = ended - len(pcm) / 32000
         spotter = self._light_transcripts(source)
         if spotter is not None:
             try:
@@ -1235,7 +1248,7 @@ class Engine:
             # model already handled)
             if not may_call or not self.listens_for_names() or self.sessions.get(source) is not None \
                     or self.answer_pending(source) \
-                    or time.time() - self._last_wake.get(source, 0.0) < len(pcm) / 32000 + 3.0 \
+                    or self._woken_during(source, started, ended) \
                     or not self._might_be_a_call(source, pcm):
                 return
         try:
@@ -1261,8 +1274,7 @@ class Engine:
         if not wake_by_text or not may_call:   # the wake word model handles addressed requests / keys not held
             return
         if by_model:
-            spoken = len(pcm) / (2 * 16000)
-            if time.time() - self._last_wake.get(source, 0.0) < spoken + 3.0:
+            if self._woken_during(source, started, ended) or self._woken_during(source, ended, time.time()):
                 return                         # the wake word model heard this call: it's been handled
             found, rest2 = self.strip_name(text, aid, within=self.BACKUP_WORDS)
             if not found:
