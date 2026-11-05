@@ -125,10 +125,25 @@ def channel_uploads(channel_id: str, count: int = 15) -> list[dict[str, Any]]:
     entries = data.get("entries") or []
     if entries and entries[0].get("_type") == "playlist":       # channel page with tabs
         entries = entries[0].get("entries") or []
-    vids = [_video(e) for e in entries if e.get("id")]
+    playable = [e for e in entries if e.get("id") and watchable(e)]
+    # newest first: the channel page's own order, unless the entries carry their dates
+    if playable and all(e.get("timestamp") or e.get("release_timestamp") for e in playable):
+        playable.sort(key=lambda e: e.get("release_timestamp") or e.get("timestamp") or 0, reverse=True)
+    vids = [_video(e) for e in playable]
     for v in vids:
         v["channel"] = v["channel"] or data.get("channel") or data.get("uploader") or ""
     return vids
+
+
+def watchable(e: dict[str, Any]) -> bool:
+    """Not something that can't be played yet or by you: a scheduled premiere or stream (YouTube puts
+    those at the top of a channel's videos -- "the newest video" was an upcoming one, so an older video
+    played), or a members-only one."""
+    if str(e.get("live_status") or "") in ("is_upcoming",):
+        return False
+    if str(e.get("availability") or "") in ("subscriber_only", "premium_only", "needs_auth"):
+        return False
+    return not (e.get("duration") is None and str(e.get("title", "")).lower().startswith(("premiere", "upcoming")))
 
 
 def _squash(s: str) -> str:

@@ -144,7 +144,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "models": {
         # all "model" values are catalog ids from jeeves.models.catalog
-        "stt": {"model": None, "unload_when_open": [], "language": "en"},
+        "stt": {"model": None, "unload_when_open": [], "language": "en",
+                "gpu": "auto"},          # auto (GPU when there's VRAM for it) | on | off (CPU only)
         "intent": {"model": None, "unload_when_open": []},
         "tts": {"model": "espeak-ng", "unload_when_open": []},
         "tts_voice": "espeak-en",

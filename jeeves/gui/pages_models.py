@@ -97,6 +97,11 @@ class ModelsPage(Page):
                              hint="Using it meanwhile flashes the indicator red and queues the request.")
             if kind == "stt":
                 self.b.text(s, "Language", "models.stt.language", placeholder="en")
+                self.b.choice(s, "Runs on", "models.stt.gpu",
+                              [("Automatic (the graphics card when there's room)", "auto"),
+                               ("Graphics card", "on"), ("CPU only", "off")],
+                              hint="The graphics card is far faster and keeps the CPU cool. If recognition seems "
+                                   "worse on it (some GPU builds of whisper.cpp are), try CPU only to compare.")
             if kind == "local_response":
                 self.b.number(s, "Longest answer (tokens)", "models.local_response.max_tokens", 64, 8192, 64)
 

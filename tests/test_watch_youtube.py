@@ -303,3 +303,13 @@ def test_a_huge_unrelated_channel_in_the_results_is_not_picked(monkeypatch):
     monkeypatch.setattr(yt, "_try", fake_try)
     monkeypatch.setattr(yt, "_try_search", fake_search)
     assert yt.find_channel("moist critikal")[0] == "UCmain"
+
+
+def test_the_newest_video_skips_premieres_and_members_only(monkeypatch):
+    from jeeves.functions.partials import youtube as yt
+    entries = [{"id": "up", "title": "Tomorrow's video", "live_status": "is_upcoming"},
+               {"id": "mem", "title": "Members early access", "availability": "subscriber_only", "duration": 600},
+               {"id": "new", "title": "The real newest", "duration": 700},
+               {"id": "old", "title": "Older", "duration": 800}]
+    monkeypatch.setattr(yt, "_ytdlp", lambda *a, **k: {"entries": entries, "channel": "Moist Critikal"})
+    assert [v["id"] for v in yt.channel_uploads("UCx")] == ["new", "old"]

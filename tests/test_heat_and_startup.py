@@ -113,3 +113,28 @@ def test_ping_is_answered_even_when_every_worker_is_busy():
         await srv.handle(reader, W())
         return out
     assert b'"pong"' in asyncio.run(go())[0]
+
+
+def test_where_speech_recognition_runs_can_be_chosen(engine, monkeypatch):
+    m = engine.models
+    monkeypatch.setattr(m, "budget", lambda: {"whisper_gpu": [], "vram_mb": 24000, "gpu_share": 1.0})
+    from jeeves.models import manager
+    seen = []
+
+    class S:
+        gpu = None
+
+        def loaded(self):
+            return True
+
+        def unload(self):
+            pass
+    monkeypatch.setattr(manager, "make_stt", lambda entry, threads, gpu: S())
+    monkeypatch.setattr(m, "_check", lambda kind, mid: object())
+    monkeypatch.setattr(m, "_instance", lambda entry, make: seen.append(make()) or seen[-1])
+    engine.settings.set("models.stt.gpu", "off")
+    m.stt()
+    assert seen[-1].gpu is False
+    engine.settings.set("models.stt.gpu", "auto")
+    m.stt()
+    assert seen[-1].gpu is True

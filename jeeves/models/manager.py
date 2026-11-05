@@ -211,11 +211,16 @@ class ModelManager:
         # only told not to (-ng) when there's no GPU share for it: looking for its GPU library missed builds
         # that link it in, and it ran large-v3 on 28 CPU threads beside a GPU doing nothing
         b = self.budget()
-        gpu = bool(b.get("whisper_gpu")) or bool(b.get("vram_mb", 0) > 0 and b.get("gpu_share", 1.0) > 0)
+        choice = str(self.settings.get("models.stt.gpu", "auto") or "auto")
+        gpu = choice == "on" or (choice == "auto" and (bool(b.get("whisper_gpu")) or
+                                                       bool(b.get("vram_mb", 0) > 0 and b.get("gpu_share", 1.0) > 0)))
         inst = self._instance(entry, lambda: make_stt(entry, threads, gpu))
         if hasattr(inst, "threads"):
             inst.threads = threads             # Minimum untouched applies on the next load
         if hasattr(inst, "gpu"):
+            if inst.gpu != gpu and inst.loaded():
+                log.info("speech recognition moves to the %s", "graphics card" if gpu else "CPU")
+                inst.unload()                      # (Models > Speech to text > Runs on changed)
             inst.gpu = gpu
         if not inst.loaded():
             try:
