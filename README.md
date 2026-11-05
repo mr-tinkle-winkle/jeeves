@@ -8,7 +8,7 @@ A local-first voice assistant for Linux (NixOS). Named agents respond to spoken 
 
 ## Status
 
-First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (374 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
+First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (380 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
 
 ## Installing (NixOS)
 
@@ -114,6 +114,7 @@ jeeves overlay --popups   -- Review, Text Request, answers, thoughts, import app
 
 ## Decisions and rationale
 
+- **Indicator from the intent step; bounded shutdown.** A voice request's mic turns into the spinner as soon as speech recognition has it (the engine sets "thinking" before the request runs, and the overlay no longer hides itself in the few milliseconds between "transcript" and "thinking", which some compositors didn't map again until the window changed size). The daemon now exits within 6 s of SIGTERM (a still-running request, a model server mid-start or Python joining worker threads used to hold a rebuild up for systemd's 90 s), and the unit has `TimeoutStopSec = 10`, `KillMode = mixed`. YouTube: speech recognition's punctuation is dropped before parsing ("the newest, most critical video"), channel names also match by sound ("most critical" ~ "Moist Critikal"), and a "newest ..." request with no channel tries the leftover words as a channel before a plain search.
 - **Online agents.** Consumer chat services (claude.ai, chatgpt.com, Grok, Gemini web) prohibit automated access and programmatic extraction of output in their terms. Routing is therefore:
   - GPT → Codex CLI (`codex exec`), signed in with a ChatGPT account (free tier included, limited usage).
   - Gemini → free Google AI Studio API key (Flash-class models on the free tier). Gemini CLI's free Google-login path was discontinued in June 2026, and wrapping its OAuth in third-party software is flagged by Google as a policy violation.

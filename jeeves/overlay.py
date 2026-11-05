@@ -318,9 +318,11 @@ def main(popups: bool = False) -> int:
                 y = scr.y() + pad if corner.startswith("top") else scr.y() + scr.height() - h - pad
                 self.setGeometry(int(x), int(y), int(w), int(h))
             if self.visible_states() or time.time() < max(self.transcript_until, self.response_until):
+                self._empty_since = 0.0
                 present(self, layershell.corner_edges(corner), (pad, pad, pad, pad))
-            else:
-                self.hide()
+            # (nothing to show: _tick hides it a moment later. Hiding at once blinked the surface off
+            # between "transcript" and "thinking" -- a few ms apart -- and some compositors didn't map
+            # it again until it changed size, so the spinner only appeared once it started talking.)
 
         def visible_states(self) -> list[dict[str, Any]]:
             out = []
@@ -337,7 +339,8 @@ def main(popups: bool = False) -> int:
             if st.get("stage") == "idle":
                 self.states.pop(rid, None)
             elif st.get("stage") == "transcript":
-                self.states.pop(rid, None)
+                if rid in self.states:              # heard: the mic becomes the spinner straight away
+                    self.states[rid] = dict(st, stage="thinking", detail="")
                 if self.cfg("stt_output", True):
                     self.transcript = st.get("detail", "")
                     self.transcript_until = time.time() + 4
@@ -369,7 +372,13 @@ def main(popups: bool = False) -> int:
             self.phase = (self.phase + 0.033) % 1000
             if self.isVisible():
                 if not self.visible_states() and time.time() > max(self.transcript_until, self.response_until):
-                    self.hide()
+                    if not getattr(self, "_empty_since", 0.0):
+                        self._empty_since = time.time()
+                    elif time.time() - self._empty_since > 0.25:
+                        self._empty_since = 0.0
+                        self.hide()
+                else:
+                    self._empty_since = 0.0
                 self.update()
             else:
                 self.anim.stop()            # (30 wake-ups a second for nothing on screen otherwise)
