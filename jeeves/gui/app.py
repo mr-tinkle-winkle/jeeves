@@ -43,7 +43,8 @@ class MainWindow(QMainWindow):
         from .pages_misc import (AccountsPage, DryRunPage, GeneralPage, HistoryPage, IndicatorsPage, TrainingPage,
                                  WikipediaPage)
         from .pages_models import ModelsPage
-        from .shell import AgentHeader, AgentHistoryPage, LookPage, OverviewPage, Sidebar, ThemedTabs
+        from .shell import (AgentHeader, AgentHistoryPage, LookPage, OverviewPage, Sidebar, ThemedTabs, TitleBar,
+                            WindowFrame)
         from .themes import words
         from .ui_kit import CustomCheckBox, Theme, compute_scale, show_message
         _windows.append(self)
@@ -58,13 +59,25 @@ class MainWindow(QMainWindow):
         theme = self.theme = Theme()
         w = self.words = words(theme.settings.vocab)
 
-        central = QWidget()
+        own = bool(getattr(theme.settings, "own_frame", True))
+        if own:                                  # rounded corners: the window draws its own frame
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+        central = self.frame = WindowFrame(own)
         self.setCentralWidget(central)
         theme_palette(central)
-        rowl = QHBoxLayout(central)
+        central.setAutoFillBackground(False)      # (it paints its own, rounded)
         pad = theme.padding
-        rowl.setContentsMargins(pad, pad, pad, pad)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(pad, 6 if own else pad, pad, pad)
+        outer.setSpacing(0)
+        if own:
+            self.titlebar = TitleBar(self)
+            outer.addWidget(self.titlebar)
+        rowl = QHBoxLayout()
+        rowl.setContentsMargins(0, 0, 0, 0)
         rowl.setSpacing(pad)
+        outer.addLayout(rowl, 1)
 
         # ---- the sidebar
         self.sidebar = Sidebar()
@@ -90,6 +103,9 @@ class MainWindow(QMainWindow):
         av.setSpacing(max(6, pad // 2))
         self.header = AgentHeader()
         self.header.talk.connect(self._talk)
+        self.header.switched.connect(lambda on: self.set_agent_on(self.aid, on))
+        self.sidebar.switch_agent.connect(self.set_agent_on)
+        self.sidebar.talk_to.connect(self._talk_to)
         av.addWidget(self.header)
         self.agent_tabs = ThemedTabs([(k, w[k]) for k in self.AGENT_TABS])
         self.agent_tabs.picked.connect(self._agent_tab)
@@ -247,7 +263,20 @@ class MainWindow(QMainWindow):
 
     def _talk(self) -> None:
         if self.aid:
-            self.daemon.call("request.voice", None, lambda e: self._show_message(self, "Talk", e), agent=self.aid)
+            self._talk_to(self.aid)
+
+    def _talk_to(self, aid: str) -> None:
+        self.daemon.call("request.voice", None, lambda e: self._show_message(self, "Talk", e), agent=aid)
+
+    def set_agent_on(self, aid: str, on: bool) -> None:
+        """Switch one agent on or off (its header switch, or its right-click menu in the list)."""
+        if not aid or aid not in (self.settings.get("agents") or {}):
+            return
+        self.settings["agents"][aid]["enabled"] = on
+        self.sidebar.set_on(aid, on)
+        if aid == self.aid:
+            self.header.set_on(on)
+        self.send({f"agents.{aid}.enabled": on})
 
     # ------------------------------------------------------------------ live state
     def _stage(self, aid: str) -> str:

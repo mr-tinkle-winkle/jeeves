@@ -13,31 +13,15 @@ from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QFrame, QListWidget, QPlainTextEdit, QTextBrowser
 
 from .custom_scrollbar import CustomScrollBar
-from .rounded_rect import rounded_rect_path
 from .theme import Theme, contrast_text
 from .theme_config import get_settings
 
 
 def _paint_box(widget, theme: Theme, appearance) -> None:
+    from .skin import paint_field
     painter = QPainter(widget)
-    painter.setRenderHint(QPainter.Antialiasing)
-    rect = QRectF(widget.rect()).adjusted(1, 1, -1, -1)
-    radius = appearance.rounded_corner_radius if appearance.rounded_corners_enabled else 8
-    radius = min(radius, 14) if radius else 0
-    path = rounded_rect_path(rect, radius) if radius else None
-    if path is not None:
-        painter.fillPath(path, theme.surface())
-    else:
-        painter.fillRect(rect, theme.surface())
-    pen = painter.pen()
-    pen.setColor(theme.accent())
-    pen.setWidthF(2)
-    painter.setPen(pen)
-    painter.setBrush(Qt.NoBrush)
-    if path is not None:
-        painter.drawPath(path)
-    else:
-        painter.drawRect(rect)
+    focus = widget.hasFocus() and not getattr(widget, "isReadOnly", lambda: False)()
+    paint_field(painter, QRectF(widget.rect()), theme, focus, False, multiline=True)
     painter.end()
 
 
@@ -48,7 +32,8 @@ class _BoxMixin:
     def _setup_box(self, selector: str) -> None:
         self._appearance = get_settings()
         self._theme = Theme(self._appearance)
-        text = contrast_text(self._theme.surface()).name()
+        from .skin import field_text_color
+        text = field_text_color(self._theme).name()
         accent = self._theme.accent().name()
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet(
@@ -65,6 +50,8 @@ class _BoxMixin:
         if event.type() == QEvent.Paint:          # the box itself; the text and scroll bar paint on top
             _paint_box(self, self._theme, self._appearance)
             return True
+        if event.type() in (QEvent.FocusIn, QEvent.FocusOut):
+            self.update()
         return super().event(event)
 
 

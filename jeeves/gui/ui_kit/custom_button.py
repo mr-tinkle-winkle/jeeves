@@ -78,7 +78,49 @@ class CustomButton(QToolButton):
         self.setFixedSize(diameter, diameter)
         self.update()
 
+    def _skinned(self) -> bool:
+        """Plain text buttons take the theme's own look (ui_kit/skin.py); icon, round and recolored ones
+        keep the kit's."""
+        return (self._icon_pixmap is None and not self._circular and self._fill_override is None
+                and self._outline_override is None)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        if self._skinned() and self.text():
+            from PySide6.QtCore import QSize
+            from PySide6.QtGui import QFontMetricsF
+            from . import skin
+            f = skin.button_font(self._theme, self.font())
+            fm = QFontMetricsF(f)
+            ex, ey = skin.button_extra(self._theme)
+            text = skin.button_label(self._theme, self.text().replace("&&", "&"))
+            return QSize(max(hint.width(), int(fm.horizontalAdvance(text) + 2 * ex)),
+                         max(hint.height(), int(fm.height() + 2 * ey)))
+        return hint
+
+    def minimumSizeHint(self):
+        return self.sizeHint() if self._skinned() else super().minimumSizeHint()
+
+    def _paint_skinned(self, painter: QPainter) -> None:
+        from . import skin
+        rect = QRectF(self.rect())
+        self._pulse.apply(painter)
+        if not self.isEnabled():
+            painter.setOpacity(0.4)
+        down = self.isDown()
+        fg = skin.paint_button(painter, rect, self._theme, down, self.underMouse() and self.isEnabled())
+        painter.setPen(fg)
+        painter.setFont(skin.button_font(self._theme, self.font()))
+        text = self.text()
+        label = skin.button_label(self._theme, text)
+        painter.drawText(skin.button_text_rect(self._theme, rect, down), Qt.AlignCenter | Qt.TextShowMnemonic, label)
+
     def paintEvent(self, event) -> None:
+        if self._skinned():
+            painter = QPainter(self)
+            self._paint_skinned(painter)
+            painter.end()
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)

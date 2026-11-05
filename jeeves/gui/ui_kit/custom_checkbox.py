@@ -43,13 +43,64 @@ class CustomCheckBox(QAbstractButton):
         # popover) alongside the checkbox itself, not just on the
         # video card.
         self._leading_icon = leading_icon
+        # the indicator moves between off and on the theme's way (a sliding/springing knob, a cross
+        # that draws itself, a ring that fills); 0..1
+        self._on = 0.0
+        self._on_anim = None
+        self.toggled.connect(self._animate_to)
+
+    def _skinned(self) -> bool:
+        return type(self)._icon_for_state is CustomCheckBox._icon_for_state
+
+    def _animate_to(self, checked: bool) -> None:
+        from PySide6.QtCore import QEasingCurve, QVariantAnimation
+        from . import skin
+        target = 1.0 if checked else 0.0
+        if self._on_anim is not None:
+            self._on_anim.stop()
+        if not self.isVisible():
+            self._on = target
+            self.update()
+            return
+        k = skin.kind(self._theme)
+        ms, curve = {"spring": (420, QEasingCurve.OutBack), "glide": (260, QEasingCurve.OutCubic),
+                     "draw": (320, QEasingCurve.InOutCubic), "fade": (180, QEasingCurve.OutCubic)}.get(
+            k, (1, QEasingCurve.Linear))
+        a = QVariantAnimation(self)
+        a.setDuration(ms)
+        a.setStartValue(self._on)
+        a.setEndValue(target)
+        ec = QEasingCurve(curve)
+        if curve == QEasingCurve.OutBack:
+            ec.setOvershoot(2.2)
+        a.setEasingCurve(ec)
+        a.valueChanged.connect(self._set_on)
+        self._on_anim = a
+        a.start()
+
+    def _set_on(self, v) -> None:
+        self._on = float(v)
+        self.update()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._on_anim is None or self._on_anim.state() != self._on_anim.State.Running:
+            self._on = 1.0 if self.isChecked() else 0.0
+
+    def _box(self):
+        from PySide6.QtGui import QFontMetricsF
+        from . import skin
+        if not self._skinned():
+            return float(_BOX_SIZE), float(_BOX_SIZE)
+        return skin.check_size(self._theme, QFontMetricsF(self._theme.mono_font()))
 
     def sizeHint(self) -> QSize:
         fm = self.fontMetrics()
+        bw, bh = self._box()
         text_w = fm.horizontalAdvance(self.text()) if self.text() else 0
         icon_w = _BOX_SIZE + _TEXT_GAP if self._has_leading_icon() else 0
-        width = _BOX_SIZE + icon_w + (_TEXT_GAP + text_w if self.text() else 0)
-        height = max(_BOX_SIZE, fm.height()) + 4
+        width = int(bw + icon_w + (_TEXT_GAP + text_w if self.text() else 0)) + 2
+        height = int(max(bh, fm.height())) + 4
         return QSize(width, height)
 
     def _has_leading_icon(self) -> bool:
@@ -66,6 +117,24 @@ class CustomCheckBox(QAbstractButton):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
+        bw, bh = self._box()
+        if self._skinned():
+            from . import skin
+            if not (self._on_anim and self._on_anim.state() == self._on_anim.State.Running):
+                self._on = 1.0 if self.isChecked() else 0.0
+            box = QRectF(0, (self.height() - bh) / 2, bw, bh)
+            painter.save()
+            self._pulse.apply(painter, box.center())
+            skin.paint_check(painter, box, self._theme, self._on, self.underMouse(), self.isEnabled())
+            painter.restore()
+            if not self.isEnabled():
+                painter.setOpacity(0.45)
+            if self.text():
+                painter.setPen(QColor(self._appearance.color_text))
+                painter.drawText(self.rect().adjusted(int(bw) + _TEXT_GAP, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                                 self.text())
+            painter.end()
+            return
         box_rect = QRectF(0, (self.height() - _BOX_SIZE) / 2, _BOX_SIZE, _BOX_SIZE)
         # Pulse only the indicator box (restored before the label is
         # drawn) so the text doesn't slide around as the box scales.

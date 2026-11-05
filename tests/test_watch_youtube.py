@@ -81,7 +81,9 @@ def test_newest_video_from_a_channel(monkeypatch):
     assert yt.pick(channel="moist critikal", newest=True)["id"] == "new1"
     assert yt.pick(query="elden ring", channel="moist critikal")["id"] == "old2"    # topic within the channel
     s = yt.streams("https://www.youtube.com/watch?v=new1")
-    assert s["video"].endswith("1080.mp4") and s["audio"].endswith("a.m4a")
+    from jeeves.daemon import streamproxy                    # the player opens them through the local proxy
+    real = {k: v["url"] for k, v in streamproxy._streams.items()}
+    assert real[s["video"].rsplit("/", 1)[1]].endswith("1080.mp4") and real[s["audio"].rsplit("/", 1)[1]].endswith("a.m4a")
 
 
 def test_youtube_function_opens_the_player(engine, monkeypatch):

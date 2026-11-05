@@ -126,8 +126,17 @@ class Registry:
             f = next((c for c in self.agent_commands(agent) if c.name == name), None)
         return f
 
+    @staticmethod
+    def rudimentary(agent: dict[str, Any] | None) -> FunctionDef | None:
+        """A rudimentary agent's one function (functions/rudimentary.py), or None."""
+        from . import rudimentary
+        return rudimentary.function_def(agent) if rudimentary.settings_of(agent) else None
+
     def agent_commands(self, agent: dict[str, Any]) -> list[FunctionDef]:
-        """The agent's own commands (Agents > Commands), as functions."""
+        """The agent's own commands (Agents > Commands), as functions -- or a rudimentary agent's one."""
+        rud = self.rudimentary(agent)
+        if rud is not None:
+            return [rud]
         from .commands import command_defs
         return command_defs(agent, set(self.functions))
 
@@ -148,7 +157,10 @@ class Registry:
         return f.default_enabled if override is None else bool(override)
 
     def enabled_for(self, agent: dict[str, Any]) -> list[FunctionDef]:
-        """Full functions this agent may run."""
+        """Full functions this agent may run (a rudimentary agent: just its one)."""
+        rud = self.rudimentary(agent)
+        if rud is not None:
+            return [rud]
         out = []
         per_agent = agent.get("functions", {}) or {}
         for f in self.all("full"):

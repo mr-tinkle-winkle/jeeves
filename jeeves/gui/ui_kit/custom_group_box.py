@@ -29,12 +29,10 @@ rendered content.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 from .theme_config import get_settings
-from .rounded_rect import rounded_rect_path
 from .theme import Theme
 
 _TITLE_HEIGHT = 26
@@ -92,12 +90,31 @@ class CustomGroupBox(QWidget):
         super().showEvent(event)
         self._apply_layout_margins()
 
+    def _title_h(self) -> int:
+        from PySide6.QtGui import QFontMetricsF
+        from . import skin
+        k = skin.kind(self._theme)
+        if k == "glide":
+            f = self._theme.display_font(15, 600)
+            return int(QFontMetricsF(f).height() + 2)
+        if k == "draw":
+            return int(QFontMetricsF(self._theme.display_font(12, 600)).height() + 2)
+        return _TITLE_HEIGHT
+
     def _apply_layout_margins(self) -> None:
+        from . import skin
         lay = self.layout()
         if lay is not None:
-            sh = (self._theme.shadow() or (0, None))[0]
-            bw = int(self._theme.border_width)
-            lay.setContentsMargins(10 + bw, _TITLE_HEIGHT + 4 + bw, 10 + bw + sh, 10 + bw + sh)
+            lay.setContentsMargins(*skin.group_margins(self._theme, self._title_h()))
+
+    def _number(self) -> int:
+        """Its place among the section boxes next to it (Blueprint numbers them)."""
+        par = self.parentWidget()
+        if par is None:
+            return 0
+        boxes = [w for w in par.findChildren(CustomGroupBox) if w.parentWidget() is par]
+        boxes.sort(key=lambda w: (w.y(), w.x()))
+        return boxes.index(self) + 1 if self in boxes else 0
 
     def setTitle(self, title: str) -> None:
         self._title = title
@@ -107,54 +124,8 @@ class CustomGroupBox(QWidget):
         return self._title
 
     def paintEvent(self, event) -> None:
+        from . import skin
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        theme = self._theme
-        bw = theme.border_width
-        shadow = theme.shadow()
-        sh = shadow[0] if shadow else 0
-        rect = QRectF(self.rect()).adjusted(bw / 2, _TITLE_HEIGHT / 2, -bw / 2 - sh, -bw / 2 - sh)
-        radius = theme.corner_radius(8)
-        radius = min(radius, rect.height() / 2, rect.width() / 2) if radius else 0
-        path = rounded_rect_path(rect, radius) if radius else None
-
-        if shadow:                     # a hard offset shadow (Arcade): the same box, shifted, filled
-            sr = rect.translated(sh, sh)
-            if path is not None:
-                painter.fillPath(rounded_rect_path(sr, radius), shadow[1])
-            else:
-                painter.fillRect(sr, shadow[1])
-            bg = self.palette().window().color()
-            if path is not None:
-                painter.fillPath(path, bg)
-            else:
-                painter.fillRect(rect, bg)
-        pen = painter.pen()
-        pen.setColor(theme.accent())
-        pen.setWidthF(bw)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        if path is not None:
-            painter.drawPath(path)
-        else:
-            painter.drawRect(rect)
-
-        if self._title:
-            # A small punched-out gap behind the title text, same idea
-            # as a native QGroupBox's title notch in its own top border
-            # -- filled with the WINDOW/page background (approximated
-            # here as the parent widget's own palette window color,
-            # since these boxes sit directly on a plain settings page)
-            # so the border line doesn't visibly run behind the text.
-            from PySide6.QtGui import QFontMetrics
-            font = theme.display_font(max(8.0, self.font().pointSizeF()))
-            painter.setFont(font)
-            title = theme.heading(self._title)
-            fm = QFontMetrics(font)
-            text_width = fm.horizontalAdvance(title)
-            gap_rect = QRectF(rect.x() + 8, 0, text_width + 8, _TITLE_HEIGHT)
-            bg = self.palette().window().color()
-            painter.fillRect(gap_rect, bg)
-            painter.setPen(theme.text())
-            painter.drawText(gap_rect.adjusted(4, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, title)
+        skin.paint_group(painter, self, self._theme.heading(self._title) if self._title else "", self._theme,
+                         self._title_h(), self._number())
         painter.end()

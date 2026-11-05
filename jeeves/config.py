@@ -53,6 +53,10 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         # its own commands (Agents > Commands): [{name, description, command with {placeholders}, args:
         # [{name, description, required, choices}], confirm, terminal, timeout}]
         "commands": [],
+        # a rudimentary agent (functions/rudimentary.py): no AI, what you say after its name is run as a
+        # command; program = always run this one, with what you say as its arguments; confirm = never |
+        # risky | always
+        "rudimentary": {"enabled": False, "program": "", "confirm": "risky", "terminal": False},
         "jeenius": None,              # 1-4 (see models.jeenius); None -> the global setting
         # sites its research reads first when a question fits them (Agents > Custom sources):
         # [{url, about: what the site is for}]

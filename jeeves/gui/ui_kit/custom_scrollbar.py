@@ -18,7 +18,6 @@ from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QScrollBar, QStyleOptionSlider, QStyle, QApplication
 
 from .theme_config import get_settings
-from .rounded_rect import rounded_rect_path
 from .theme import Theme
 
 
@@ -52,27 +51,13 @@ class CustomScrollBar(QScrollBar):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        track_rect = QRectF(self.rect())
-        radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 0
-        radius = min(radius, track_rect.width() / 2, track_rect.height() / 2) if radius else 0
-        if radius:
-            painter.fillPath(rounded_rect_path(track_rect, radius), self._theme.surface())
-        else:
-            painter.fillRect(track_rect, self._theme.surface())
-
+        from .skin import paint_scrollbar
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
         handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
-        if handle_rect.isValid() and handle_rect.width() > 0 and handle_rect.height() > 0:
-            handle_qrectf = QRectF(handle_rect)
-            handle_radius = min(radius, handle_qrectf.width() / 2, handle_qrectf.height() / 2) if radius else 0
-            bg = self._theme.accent()
-            if self.isSliderDown():
-                bg = bg.darker(125)
-            if handle_radius:
-                painter.fillPath(rounded_rect_path(handle_qrectf, handle_radius), bg)
-            else:
-                painter.fillRect(handle_rect, bg)
+        handle = QRectF(handle_rect) if handle_rect.isValid() and handle_rect.width() > 0 and \
+            handle_rect.height() > 0 else None
+        paint_scrollbar(painter, QRectF(self.rect()), handle, self._theme, self.isSliderDown())
         painter.end()
         # Deliberately NOT calling super().paintEvent() -- this fully
         # replaces the native scroll bar's painting; QScrollBar's own

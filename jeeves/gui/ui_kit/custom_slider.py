@@ -19,7 +19,7 @@ class CustomSlider(QSlider):
         super().__init__(orientation, parent)
         self._theme = Theme(get_settings())
         self._colors = colors                  # (track, fill) when it lives on a fixed dark surface
-        self.setMinimumHeight(18)
+        self.setMinimumHeight(22)
         self.setCursor(Qt.PointingHandCursor)
 
     def _track(self) -> QRectF:
@@ -47,6 +47,11 @@ class CustomSlider(QSlider):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         t = self._track()
+        if not self._colors:                      # the theme's own slider (ui_kit/skin.py)
+            from .skin import paint_slider
+            paint_slider(p, t, self.handle_x(), self._theme, self.underMouse(), self.isSliderDown())
+            p.end()
+            return
         track = QColor(self._colors[0]) if self._colors else self._theme.surface()
         fill = QColor(self._colors[1]) if self._colors else self._theme.accent()
         p.setPen(Qt.NoPen)

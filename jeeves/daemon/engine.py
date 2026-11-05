@@ -1509,6 +1509,9 @@ class Engine:
             time.sleep(0.2)
 
     def _decide(self, ctx: FunctionContext, text: str, skip: set[str]) -> Decision:
+        if self.registry.rudimentary(ctx.agent) is not None:      # no AI: what was said is the command
+            from ..functions.rudimentary import NAME
+            return Decision(NAME, {"command": text}, 1.0, method="rules")
         agent = dict(ctx.agent)
         if skip:
             agent["functions"] = dict(agent.get("functions") or {}, **{s: False for s in skip})

@@ -11,13 +11,12 @@ rendering, same layering trick CustomButton and _InfoBox already use.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import QRectF
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QLineEdit
 
 from .theme_config import get_settings
-from .rounded_rect import rounded_rect_path
-from .theme import Theme, contrast_text
+from .theme import Theme
 
 
 class CustomLineEdit(QLineEdit):
@@ -26,7 +25,8 @@ class CustomLineEdit(QLineEdit):
         appearance = get_settings()
         self._appearance = appearance
         self._theme = Theme(appearance)
-        text_color = contrast_text(self._theme.surface()).name()
+        from .skin import field_text_color
+        text_color = field_text_color(self._theme).name()
         accent = self._theme.accent().name()
         # Scoped to QLineEdit specifically (not a bare "background-color:
         # ..." with no type selector) -- deliberately avoiding the exact
@@ -37,26 +37,16 @@ class CustomLineEdit(QLineEdit):
         )
 
     def paintEvent(self, event) -> None:
+        from .skin import paint_field
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect())
-        radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 8
-        radius = min(radius, rect.height() / 2) if radius else 0
-        if radius:
-            path = rounded_rect_path(rect, radius)
-            painter.fillPath(path, self._theme.surface())
-            pen = painter.pen()
-            pen.setColor(self._theme.accent())
-            pen.setWidthF(2)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawPath(path)
-        else:
-            painter.fillRect(self.rect(), self._theme.surface())
-            pen = painter.pen()
-            pen.setColor(self._theme.accent())
-            pen.setWidthF(2)
-            painter.setPen(pen)
-            painter.drawRect(self.rect().adjusted(1, 1, -1, -1))
+        paint_field(painter, QRectF(self.rect()), self._theme, self.hasFocus(), self.underMouse())
         painter.end()
         super().paintEvent(event)
+
+    def enterEvent(self, event) -> None:
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.update()
+        super().leaveEvent(event)

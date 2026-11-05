@@ -185,8 +185,54 @@ class bulk:
         return False
 
 
+class ThemedComboBox(QComboBox):
+    """A combo box in the theme's look (the box itself is the stylesheet, ui_kit/skin.py) with the
+    theme's own arrow: a chevron, Console's 'v', Arcade's pixel triangle, Brutalist's black block."""
+
+    def paintEvent(self, e: Any) -> None:
+        super().paintEvent(e)
+        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtGui import QPainter, QPainterPath, QPen
+        from .ui_kit import skin
+        t = Theme()
+        k = skin.kind(t)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        h = self.height()
+        cx, cy = self.width() - 14.0, h / 2
+        color = t.pop() if (self.hasFocus() or self.underMouse()) and k != "slam" else skin.field_text_color(t)
+        if k == "type":
+            p.setFont(t.mono_font())
+            p.setPen(color)
+            p.drawText(QRectF(cx - 8, 0, 16, h), Qt.AlignCenter, "v")
+        elif k == "step":
+            p.setRenderHint(QPainter.Antialiasing, False)
+            for i, w in enumerate((8, 6, 4, 2)):
+                p.fillRect(QRectF(cx - w / 2, cy - 3 + i * 2, w, 2), color)
+        elif k == "slam":
+            p.fillRect(QRectF(self.width() - 26, 3, 23, h - 6), t.text())
+            tri = QPainterPath()
+            tri.moveTo(cx - 6 - 1.5, cy - 3)
+            tri.lineTo(cx + 6 - 1.5, cy - 3)
+            tri.lineTo(cx - 1.5, cy + 4)
+            tri.closeSubpath()
+            p.fillPath(tri, t.pop())
+        else:
+            p.setPen(QPen(color, 1.6 if k != "glide" else 1.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPolyline([QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2.5), QPointF(cx + 4, cy - 2)])
+        p.end()
+
+    def enterEvent(self, e: Any) -> None:
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e: Any) -> None:
+        self.update()
+        super().leaveEvent(e)
+
+
 def combo() -> QComboBox:
-    c = QComboBox()
+    c = ThemedComboBox()
     c.setStyleSheet(combo_box_stylesheet(get_settings()))
     c.setFocusPolicy(Qt.StrongFocus)
     c.wheelEvent = lambda e: e.ignore()        # don't change values while scrolling the page

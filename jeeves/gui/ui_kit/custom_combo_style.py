@@ -11,22 +11,7 @@ from __future__ import annotations
 
 
 def combo_box_stylesheet(appearance) -> str:
-    return f"""
-        QComboBox {{
-            background-color: {appearance.color_surface};
-            color: {appearance.color_text};
-            border: 1px solid {appearance.color_accent};
-            border-radius: 6px;
-            padding: 4px 8px;
-        }}
-        QComboBox::drop-down {{
-            border: none;
-        }}
-        QComboBox QAbstractItemView {{
-            background-color: {appearance.color_surface};
-            color: {appearance.color_text};
-            border: 1px solid {appearance.color_accent};
-            selection-background-color: {appearance.color_accent};
-            outline: none;
-        }}
-    """
+    """The theme's own combo box (ui_kit/skin.py); the arrow is painted by ThemedComboBox."""
+    from .skin import combo_stylesheet
+    from .theme import Theme
+    return combo_stylesheet(Theme(appearance))

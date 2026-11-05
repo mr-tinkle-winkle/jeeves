@@ -98,18 +98,18 @@ VOCAB: dict[str, dict[str, str]] = {
          "abilities": "Abilities", "sources": "Sources", "history": "History", "talk": "Talk",
          "new_agent": "+ New agent", "activity": "Activity", "models": "Models", "settings": "Settings",
          "agents": "Agents", "shared": "Shared", "idle": "Idle", "listening": "Listening",
-         "thinking": "Thinking", "speaking": "Speaking", "working": "Working", "off": "Off",
+         "thinking": "Thinking", "speaking": "Speaking", "working": "Working", "off": "Off", "on_switch": "On",
          "recent": "Recently"},
     "ledger": {"personality": "Character", "brain": "Mind", "abilities": "Duties", "sources": "Library",
                "history": "Ledger", "talk": "Ring for {name}", "new_agent": "+ Engage a new agent",
                "activity": "The ledger", "models": "Model library", "settings": "House rules",
                "agents": "The household", "shared": "Below stairs", "idle": "Resting",
                "listening": "At your service", "thinking": "Considering", "speaking": "Speaking",
-               "recent": "From the ledger"},
+               "recent": "From the ledger", "off": "Off duty", "on_switch": "On duty"},
     "arcade": {"overview": "Stats", "personality": "Persona", "abilities": "Skills", "history": "Log",
                "talk": "Press start", "new_agent": "+ Insert coin", "settings": "Options",
                "agents": "Select agent", "idle": "Idle", "listening": "Ready", "thinking": "Loading",
-               "speaking": "Speaking", "recent": "Quest log"},
+               "speaking": "Speaking", "recent": "Quest log", "off": "Paused", "on_switch": "Player on"},
 }
 
 

@@ -41,15 +41,26 @@ class _SpinArrowButton(QAbstractButton):
         self._pulse.apply(painter)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect())
-        bg = self._theme.accent()
-        if self.isDown():
-            bg = bg.darker(125)
-        elif self.underMouse():
-            bg = bg.lighter(115)
-        radius = min(6.0, rect.height() / 2, rect.width() / 2)
-        painter.fillPath(rounded_rect_path(rect, radius), bg)
-
-        fg = contrast_text(bg)
+        from . import skin
+        k = skin.kind(self._theme)
+        bg = {"fade": self._theme.highlight(), "spring": self._theme.pop(), "slam": self._theme.pop(),
+              "step": self._theme.accent()}.get(k)
+        if bg is not None:
+            if self.isDown():
+                bg = bg.darker(125)
+            elif self.underMouse():
+                bg = bg.lighter(115)
+            radius = {"fade": 5.0, "spring": rect.width() / 2}.get(k, 0.0)
+            radius = min(radius, rect.height() / 2, rect.width() / 2)
+            if k == "spring":
+                bg.setAlphaF(0.55 if self.underMouse() or self.isDown() else 0.3)
+            if radius:
+                painter.fillPath(rounded_rect_path(rect, radius), bg)
+            else:
+                painter.fillRect(rect, bg)
+            fg = contrast_text(bg) if k != "spring" else self._theme.text()
+        else:                                    # Ledger, Console, Blueprint: just the arrow
+            fg = self._theme.pop() if (self.underMouse() or self.isDown()) else self._theme.text()
         painter.setBrush(fg)
         painter.setPen(Qt.NoPen)
         cx, cy = rect.center().x(), rect.center().y()
@@ -89,7 +100,8 @@ class _CustomSpinBoxMixin:
         self._appearance = appearance
         self._theme = Theme(appearance)
         self.setButtonSymbols(QAbstractSpinBox.NoButtons)  # hide the native up/down arrows entirely
-        text_color = contrast_text(self._theme.surface()).name()
+        from .skin import field_text_color
+        text_color = field_text_color(self._theme).name()
         self.setStyleSheet(
             f"QAbstractSpinBox {{ background: transparent; border: none; color: {text_color}; "
             f"padding: 2px 26px 2px 8px; }}"
@@ -151,23 +163,18 @@ class _CustomSpinBoxMixin:
         super().showEvent(event)
         self._place_edit()
 
+    def enterEvent(self, event) -> None:          # the hover look (ui_kit/skin.py)
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.update()
+        super().leaveEvent(event)
+
     def paintEvent(self, event) -> None:
+        from .skin import paint_field
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(self.rect())
-        radius = self._appearance.rounded_corner_radius if self._appearance.rounded_corners_enabled else 8
-        radius = min(radius, rect.height() / 2) if radius else 0
-        if radius:
-            path = rounded_rect_path(rect, radius)
-            painter.fillPath(path, self._theme.surface())
-            pen = painter.pen()
-            pen.setColor(self._theme.accent())
-            pen.setWidthF(2)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawPath(path)
-        else:
-            painter.fillRect(self.rect(), self._theme.surface())
+        paint_field(painter, QRectF(self.rect()), self._theme, self.hasFocus(), self.underMouse())
         painter.end()
         # Deliberately calling QAbstractSpinBox's OWN paintEvent (not
         # skipping it) so the embedded line-edit text/cursor still

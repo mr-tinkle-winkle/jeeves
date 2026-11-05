@@ -76,6 +76,7 @@ class ThemeSettings:
     tab_style: str = "underline"           # "underline", "pill", "block", "brackets"
     motion: str = "fade"                   # how things move: fade, glide, spring, type, slam, step, draw
     vocab: str = ""                        # names for things ("ledger", "arcade"); "" = plain
+    own_frame: bool = True                 # the window draws its own frame and title bar (rounded corners)
 
 
 # Field groups, used by the theme editor's "Revert" buttons.

@@ -23,7 +23,7 @@ OUTPUT = [("Speakers", "speakers"), ("Microphone (Jeeves-Microphone source)", "m
 # Which agent tab each section of the form is on (the window shows one tab of an agent at a time).
 TAB_OF = {"Identity": "personality", "Conversation": "personality", "Memory": "personality",
           "When this agent is active": "personality", "Listening and speaking": "voice", "Voice": "voice",
-          "Model overrides (empty = global choice)": "brain", "Functions": "abilities", "Commands": "abilities",
+          "Model overrides (empty = global choice)": "brain", "Rudimentary agent": "abilities", "Functions": "abilities", "Commands": "abilities",
           "Handoff": "abilities", "Custom sources": "sources"}
 
 
@@ -66,9 +66,7 @@ class AgentsPage(Page):
         self.body_layout.addWidget(self.form)
 
         # --- identity
-        g = self._group(f, "Identity")
-        self.enabled = CustomCheckBox("Enabled")
-        g.addWidget(self.enabled)
+        g = self._group(f, "Identity")          # (on/off is on the agent itself: its header and right-click)
         self.name = CustomLineEdit()
         g.addWidget(row(label("Display name", False), self.name, stretch_last=True))
         self.call_names = CustomLineEdit()
@@ -271,6 +269,25 @@ class AgentsPage(Page):
             c = combo()
             self.model_boxes[kind] = c
             g.addWidget(row(label(title, False), c, stretch_last=True))
+
+        # --- a rudimentary agent: one function, no AI
+        g = self._group(f, "Rudimentary agent")
+        self.rud_on = CustomCheckBox("Rudimentary: no AI, whatever I say after its name is run as a command")
+        g.addWidget(self.rud_on)
+        g.addWidget(label("“Box, firefox” runs firefox; “Box, systemctl dash dash user restart pipewire” runs "
+                          "systemctl --user restart pipewire. Spoken words are tidied: dash → -, dot → ., "
+                          "slash → /, tilde → ~. Typed requests run exactly as typed. No shell (no pipes or ;)."))
+        self.rud_program = CustomLineEdit()
+        self.rud_program.setPlaceholderText("e.g. playerctl  (empty: the first word said is the program)")
+        g.addWidget(row(label("Always run this program, with what I say as its arguments", False),
+                        self.rud_program, stretch_last=True))
+        self.rud_confirm = combo()
+        for text, key in (("Only for risky ones (rm, dd, kill, reboot, sudo…)", "risky"), ("Always", "always"),
+                          ("Never", "never")):
+            self.rud_confirm.addItem(text, key)
+        self.rud_terminal = CustomCheckBox("Run in a terminal window (to watch it, or for sudo)")
+        g.addWidget(row(label("Ask before running", False), self.rud_confirm, self.rud_terminal))
+        self.rud_on.toggled.connect(self._rudimentary)
 
         # --- functions
         g = self._group(f, "Functions")
@@ -494,13 +511,18 @@ class AgentsPage(Page):
             return
         i = self.picker.findData(aid)
         self.picker.setCurrentIndex(max(0, i))
-        self.enabled.setChecked(a.get("enabled", True))
         self.name.setText(a.get("name", ""))
         self.call_names.setText(", ".join(a.get("call_names", [])))
         self.threshold_global.setChecked(a.get("threshold") is None)
         self.threshold.setValue(a.get("threshold") or 0.6)
         self.jeenius.setCurrentIndex(max(0, self.jeenius.findData(int(a.get("jeenius") or 0))))
         self.commands.load(a.get("commands") or [])
+        rud = a.get("rudimentary") or {}
+        self.rud_on.setChecked(bool(rud.get("enabled")))
+        self.rud_program.setText(rud.get("program") or "")
+        self.rud_confirm.setCurrentIndex(max(0, self.rud_confirm.findData(rud.get("confirm") or "risky")))
+        self.rud_terminal.setChecked(bool(rud.get("terminal")))
+        self._rudimentary(self.rud_on.isChecked())
         from ..functions.custom_sources import to_text
         cs = a.get("custom_sources") or {}
         self.sources_on.setChecked(bool(cs.get("enabled", True)))
@@ -578,6 +600,13 @@ class AgentsPage(Page):
         self.sources_status.setText("; ".join(problems).capitalize() if problems else
                                     f"{n} site{'s' if n != 1 else ''}." if n else "")
 
+    def _rudimentary(self, on: bool) -> None:
+        """A rudimentary agent has just its one function: the rest of Abilities doesn't apply."""
+        for w in (self.rud_program, self.rud_confirm, self.rud_terminal):
+            w.setEnabled(on)
+        for w in (self.func_box, self.commands):
+            w.setEnabled(not on)
+
     def _memory_enabled(self, on: bool) -> None:
         for w in (self.mem_recent, self.mem_notes, self.mem_own):
             w.setEnabled(on)
@@ -617,7 +646,7 @@ class AgentsPage(Page):
         a = copy.deepcopy(self.agents.get(self.current or "", {}))
         split = lambda w: [x.strip() for x in w.text().split(",") if x.strip()]  # noqa: E731
         a.update({
-            "enabled": self.enabled.isChecked(), "name": self.name.text().strip() or self.current,
+            "name": self.name.text().strip() or self.current,
             "call_names": split(self.call_names) or [self.name.text().strip() or self.current],
             "threshold": None if self.threshold_global.isChecked() else round(self.threshold.value(), 2),
             "wake_reply": " | ".join(p.strip() for p in self.wake_reply.text().split("|") if p.strip()),
@@ -639,7 +668,11 @@ class AgentsPage(Page):
             "models": {k: c.currentData() for k, c in self.model_boxes.items()},
             "voice_style": self._style(),
             "functions": {name: cb.isChecked() for name, cb in self.func_checks.items()},
-            "commands": self.commands.value(), "jeenius": self.jeenius.currentData() or None,
+            "commands": self.commands.value(),
+            "rudimentary": {"enabled": self.rud_on.isChecked(), "program": self.rud_program.text().strip(),
+                            "confirm": self.rud_confirm.currentData() or "risky",
+                            "terminal": self.rud_terminal.isChecked()},
+            "jeenius": self.jeenius.currentData() or None,
             "custom_sources": {"enabled": self.sources_on.isChecked(),
                                "sites": parse_sources(self.sources_edit.toPlainText())[0]},
             "handoff_to": ["*"] if self.any_handoff.isChecked() else

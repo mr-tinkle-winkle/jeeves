@@ -114,13 +114,13 @@ def main(popups: bool = False) -> int:
             os.environ["QT_QPA_PLATFORM"] = "xcb" if os.environ.get("DISPLAY") else "wayland"
 
     from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-    from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
-    from PySide6.QtGui import QFontMetrics
+    from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPainterPath
     from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
     from .gui.common import Daemon, flags_overlay, install_theme, theme_palette
     from .gui.ui_kit import (CustomButton, CustomCheckBox, CustomLineEdit, CustomPlainTextEdit, CustomTextBrowser,
                              SmoothScrollArea, Theme, fit_to_width, paint_page_outline)
+    from . import overlay_skin as ovs
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
@@ -219,6 +219,10 @@ def main(popups: bool = False) -> int:
             if isinstance(res, dict):
                 settings.clear()
                 settings.update(res.get("value", {}))
+                if indicator is not None:
+                    indicator.theme = Theme()
+                    timers_w.theme = indicator.theme
+                    marks.theme = indicator.theme
                 indicator.relayout()
                 timers_w.relayout()
         daemon.call("settings.get", got, lambda _e: None)
@@ -253,6 +257,7 @@ def main(popups: bool = False) -> int:
             self.hold_timer.setSingleShot(True)
             self.hold_timer.setInterval(350)
             self.hold_timer.timeout.connect(self._start_hold)
+            self.theme = Theme()                   # the window's theme (overlay_skin.py); renewed with settings
 
         def cfg(self, key: str, default: Any = None) -> Any:
             return (settings.get("indicators") or {}).get(key, default)
@@ -267,8 +272,7 @@ def main(popups: bool = False) -> int:
         def bubble_size(self, text: str) -> tuple[str, int]:
             """(the text as it fits, its bubble height): measured the same way it's painted, so the window
             is always tall enough -- a long answer used to run off the bottom of it."""
-            f = QFont()
-            f.setPointSize(11)
+            f = ovs.font(self.theme, 11)
             fm = QFontMetrics(f)
             width = max(420, int(self.cfg("size", 56)) * 8) - 32
             limit = int(target_screen().availableGeometry().height() * 0.5)
@@ -300,7 +304,7 @@ def main(popups: bool = False) -> int:
             if self.response and time.time() < self.response_until + 1:
                 h += self.bubble_size(self.response)[1] + 12
             if self.sources:
-                h += (QFontMetrics(QFont()).height() + 6) * (len(self.sources.get("sources", [])) + 1) + 30
+                h += (QFontMetrics(ovs.font(self.theme, 10)).height() + 6) * (len(self.sources.get("sources", [])) + 1) + 30
             corner = self.cfg("corner", "top-right")
             pad = 16
             if use_layer:
@@ -399,9 +403,9 @@ def main(popups: bool = False) -> int:
                 self._label(p, rect, text, right)
                 y += size + 8
             if time.time() < self.transcript_until and self.transcript:
-                y = self._bubble(p, y, f"“{self.transcript}”", right, QColor(30, 30, 30, 220)) + 6
+                y = self._bubble(p, y, f"“{self.transcript}”", right, None) + 6
             if time.time() < self.response_until and self.response:
-                y = self._bubble(p, y, self.response, right, QColor(0, 0, 0, 230)) + 6
+                y = self._bubble(p, y, ovs.text_prefix(self.theme) + self.response, right, None) + 6
                 if self.sources:
                     self._sources(p, y, right)
             self._paint_menu(p, right)
@@ -426,19 +430,22 @@ def main(popups: bool = False) -> int:
             w, ih = 170.0, 32.0
             x = anchor.left() - w - 8 if right else anchor.right() + 8
             box = QRectF(x, anchor.top(), w, ih * len(items) + 8)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(24, 24, 24, 245))
-            p.drawRoundedRect(box, 10, 10)
-            f = QFont()
-            f.setPointSize(11)
-            p.setFont(f)
+            c = ovs.colors(self.theme)
+            ovs.box(p, box, self.theme, QColor(c["bg"].red(), c["bg"].green(), c["bg"].blue(), 245), big=True)
+            p.setFont(ovs.font(self.theme, 11))
             for i, (action, text) in enumerate(items):
                 r = QRectF(box.left() + 4, box.top() + 4 + i * ih, w - 8, ih)
+                p.setPen(c["text"])
                 if self.menu.get("hover") == action:
-                    p.setBrush(QColor(255, 255, 255, 40))
-                    p.drawRoundedRect(r, 7, 7)
-                p.setPen(QColor("#ffffff"))
-                p.drawText(r.adjusted(12, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
+                    sel = QColor(255, 255, 255, 40) if c["edge"].alpha() == 0 else self.theme.pop()
+                    rad = ovs.radius(self.theme, r.height()) * 0.7
+                    path = QPainterPath()
+                    path.addRoundedRect(r, rad, rad)
+                    p.fillPath(path, sel)
+                    if c["edge"].alpha():
+                        from .gui.ui_kit import contrast_text
+                        p.setPen(contrast_text(sel))
+                p.drawText(r.adjusted(12, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, self.theme.heading(text))
                 p.setPen(Qt.NoPen)
                 self.hits.insert(0, (r, f"menu:{action}", m["rid"]))
 
@@ -446,33 +453,8 @@ def main(popups: bool = False) -> int:
             return 0.5 + 0.5 * math.sin(self.phase * 2 * math.pi / period)
 
         def _mic(self, p: QPainter, r: QRectF, st: dict[str, Any]) -> None:
-            p.setPen(Qt.NoPen)
-            glow = QColor(255, 255, 255, int(60 + 80 * self._flash(1.2)))
-            p.setBrush(glow)
-            p.drawEllipse(r)
-            p.setBrush(QColor(20, 20, 20, 235))
-            p.drawEllipse(r.adjusted(4, 4, -4, -4))
-            c = r.center()
-            s = r.width() / 56
-            pen = QPen(QColor("#ffffff"))
-            pen.setWidthF(3 * s)
-            p.setPen(pen)
-            p.setBrush(QColor("#ffffff"))
-            p.drawRoundedRect(QRectF(c.x() - 6 * s, c.y() - 15 * s, 12 * s, 20 * s), 6 * s, 6 * s)
-            p.setBrush(Qt.NoBrush)
-            p.drawArc(QRectF(c.x() - 11 * s, c.y() - 10 * s, 22 * s, 20 * s), 200 * 16, 140 * 16)
-            p.drawLine(QPointF(c.x(), c.y() + 10 * s), QPointF(c.x(), c.y() + 15 * s))
-            if st.get("suspended"):
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(0, 0, 0, 150))
-                p.drawEllipse(r.adjusted(4, 4, -4, -4))
-                p.setBrush(QColor("#ffffff"))
-                c2 = r.center()
-                p.drawRect(QRectF(c2.x() - 7, c2.y() - 8, 5, 16))
-                p.drawRect(QRectF(c2.x() + 2, c2.y() - 8, 5, 16))
-            if st.get("detail") == "held" or self.holding:
-                p.setPen(QPen(QColor("#ffcc00"), 3 * s))
-                p.drawEllipse(r.adjusted(2, 2, -2, -2))
+            ovs.mic(p, r, self.theme, self.phase, st.get("detail") == "held" or self.holding,
+                    bool(st.get("suspended")))
 
         def _spinner(self, p: QPainter, r: QRectF, st: dict[str, Any]) -> None:
             stage = st["stage"]
@@ -485,71 +467,48 @@ def main(popups: bool = False) -> int:
             if stage == "unavailable":
                 alpha = int(60 + 195 * self._flash(0.4))
             base.setAlpha(alpha)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 90))
-            p.drawEllipse(r)
-            width = r.width() * 0.14
-            inner = r.adjusted(width, width, -width, -width)
+            outline = None
             if stage == "responding":
-                outline = QColor((settings.get("indicators") or {}).get("colors", {}).get("responding_outline", "#ffffff"))
-                pen = QPen(outline, width + 4, Qt.SolidLine, Qt.RoundCap)
-                p.setPen(pen)
-                p.drawArc(inner, 0, 360 * 16)
-            pen = QPen(base, width, Qt.SolidLine, Qt.RoundCap)
-            p.setPen(pen)
-            if stage in ("asking", "unavailable", "unclear") or st.get("paused") or st.get("suspended"):
-                p.drawArc(inner, 0, 360 * 16)
-            else:
-                start = int((-self.phase * 360 * 1.4) % 360 * 16)
-                p.drawArc(inner, start, 270 * 16)
-            if st.get("paused") or st.get("suspended"):
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor("#ffffff"))
-                c = r.center()
-                p.drawRect(QRectF(c.x() - 7, c.y() - 8, 5, 16))
-                p.drawRect(QRectF(c.x() + 2, c.y() - 8, 5, 16))
+                outline = QColor((settings.get("indicators") or {}).get("colors", {}).get("responding_outline",
+                                                                                          "#ffffff"))
+            still = stage in ("asking", "unavailable", "unclear") or bool(st.get("paused") or st.get("suspended"))
+            ovs.spinner(p, r, self.theme, base, self.phase, not still, outline,
+                        bool(st.get("paused") or st.get("suspended")))
 
         def _label(self, p: QPainter, r: QRectF, text: str, right: bool) -> None:
             if not text:
                 return
-            f = QFont()
-            f.setPointSize(10)
-            p.setFont(f)
+            p.setFont(ovs.font(self.theme, 10))
             metrics = p.fontMetrics()
-            maxw = self.width() - r.width() - 30
+            maxw = self.width() - r.width() - 40
+            text = self.theme.heading(text)
             shown = metrics.elidedText(text, Qt.ElideRight, int(maxw))
-            tw = metrics.horizontalAdvance(shown) + 16
-            box = QRectF(r.left() - tw - 8 if right else r.right() + 8, r.center().y() - 13, tw, 26)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 200))
-            p.drawRoundedRect(box, 10, 10)
-            p.setPen(QColor("#ffffff"))
+            tw = metrics.horizontalAdvance(shown) + (16 if ovs.radius(self.theme, 26) < 13 else 22)
+            th = max(26, metrics.height() + 8)
+            box = QRectF(r.left() - tw - 10 if right else r.right() + 10, r.center().y() - th / 2, tw, th)
+            ovs.box(p, box, self.theme)
+            p.setPen(ovs.colors(self.theme)["text"])
             p.drawText(box, Qt.AlignCenter, shown)
 
-        def _bubble(self, p: QPainter, y: int, text: str, right: bool, bg: QColor) -> None:
-            f = QFont()
-            f.setPointSize(11)
-            p.setFont(f)
+        def _bubble(self, p: QPainter, y: int, text: str, right: bool, bg: QColor | None) -> int:
+            p.setFont(ovs.font(self.theme, 11))
             w = self.width() - 12
             text, bh = self.bubble_size(text)
             rect = p.fontMetrics().boundingRect(0, 0, w - 20, 10000, Qt.TextWordWrap, text)
             box = QRectF(6, y, min(w, rect.width() + 20), bh)
             if right:
                 box.moveRight(self.width() - 6)
-            p.setPen(Qt.NoPen)
-            p.setBrush(bg)
-            p.drawRoundedRect(box, 12, 12)
-            p.setPen(QColor("#ffffff"))
+            ovs.box(p, box, self.theme, bg, big=True)
+            p.setPen(ovs.colors(self.theme)["text"])
             p.drawText(box.adjusted(10, 7, -10, -7), Qt.TextWordWrap, text)
             return int(box.bottom())
 
         def _sources(self, p: QPainter, y: int, right: bool) -> None:
             from urllib.parse import urlparse
-            f = QFont()
-            f.setPointSize(10)
-            p.setFont(f)
+            p.setFont(ovs.font(self.theme, 10))
             fm = p.fontMetrics()
             line_h = fm.height() + 6
+            c = ovs.colors(self.theme)
             items = (self.sources or {}).get("sources", [])
             rows = [(f"[{s['n']}] {s.get('title', '')}", (urlparse(s.get("url", "")).netloc or s.get("url", "")),
                      "source", s.get("url", "")) for s in items]
@@ -558,18 +517,16 @@ def main(popups: bool = False) -> int:
             box = QRectF(6, y, w, line_h * len(rows) + 10)
             if right:
                 box.moveRight(self.width() - 6)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(20, 20, 30, 225))
-            p.drawRoundedRect(box, 12, 12)
+            ovs.box(p, box, self.theme, QColor(20, 20, 30, 225) if c["edge"].alpha() == 0 else None, big=True)
             yy = box.top() + 5
             for title, host, kind, target in rows:
                 r = QRectF(box.left() + 10, yy, box.width() - 20, line_h)
                 clickable = kind == "sourcetext" or str(target).startswith("http")
-                p.setPen(QColor("#8ab4ff") if clickable else QColor("#cccccc"))
+                p.setPen(c["link"] if clickable else c["text"])
                 text = fm.elidedText(title, Qt.ElideRight, int(r.width() * (0.62 if host else 1.0)))
                 p.drawText(r, Qt.AlignVCenter | Qt.AlignLeft, text)
                 if host:
-                    p.setPen(QColor("#9a9a9a"))
+                    p.setPen(c["muted"])
                     p.drawText(r, Qt.AlignVCenter | Qt.AlignRight, fm.elidedText(host, Qt.ElideLeft, int(r.width() * 0.36)))
                 if clickable:
                     self.hits.append((r, kind, target))
@@ -692,22 +649,19 @@ def main(popups: bool = False) -> int:
         def paintEvent(self, _e: Any) -> None:
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
-            f = QFont()
-            f.setPointSize(12)
-            p.setFont(f)
+            theme = getattr(self, "theme", None) or Theme()
+            p.setFont(ovs.font(theme, 12))
             elapsed = time.time() - self.received
             for i, t in enumerate(self.items):
-                box = QRectF(4, 4 + i * 40, self.width() - 8, 34)
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(0, 0, 0, 200))
-                p.drawRoundedRect(box, 12, 12)
+                box = QRectF(4, 4 + i * 40, self.width() - 12, 32)
+                ovs.box(p, box, theme)
                 remaining = max(0.0, float(t.get("remaining", 0)) - elapsed)
                 total = max(1.0, float(t.get("total", 1)))
                 frac = 1 - remaining / total
-                bar = QRectF(box.left(), box.bottom() - 4, box.width() * frac, 4)
-                p.setBrush(QColor("#2f6fff"))
-                p.drawRoundedRect(bar, 2, 2)
-                p.setPen(QColor("#ffffff"))
+                inset = 0 if ovs.radius(theme, 32) == 0 else 6
+                ovs.timer_bar(p, QRectF(box.left() + inset, box.bottom() - 5, (box.width() - 2 * inset) * frac, 4),
+                              theme, frac)
+                p.setPen(ovs.colors(theme)["text"])
                 label = t.get("label") or ("schedule" if t.get("kind") == "schedule" else "timer")
                 p.drawText(box.adjusted(12, 0, -12, -2), Qt.AlignVCenter | Qt.AlignLeft, label)
                 p.drawText(box.adjusted(12, 0, -12, -2), Qt.AlignVCenter | Qt.AlignRight, format_duration(remaining))
@@ -754,10 +708,7 @@ def main(popups: bool = False) -> int:
                 age = time.time() - m["born"]
                 r = float(m.get("radius", 40)) * (1 + 0.08 * math.sin(age * 6))
                 c = QPointF(m["x"] - geo.x(), m["y"] - geo.y())
-                p.setPen(QPen(QColor(0, 0, 0, 160), 7))
-                p.drawEllipse(c, r, r)
-                p.setPen(QPen(QColor("#ff3b30"), 4))
-                p.drawEllipse(c, r, r)
+                ovs.mark(p, c, r, getattr(self, "theme", None) or Theme(), age)
             p.end()
 
     # ------------------------------------------------------------------ themed popups
@@ -1040,10 +991,9 @@ def main(popups: bool = False) -> int:
         def paintEvent(self, _e: Any) -> None:
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 220))
-            p.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 14, 14)
-            p.setPen(QColor("#ffffff"))
+            theme = Theme()
+            ovs.box(p, QRectF(self.rect()).adjusted(2, 2, -6, -6), theme, big=True)
+            p.setPen(ovs.colors(theme)["text"])
             p.drawText(self.rect().adjusted(14, 0, -14, 0), Qt.AlignCenter | Qt.TextWordWrap, self.text)
             p.end()
 

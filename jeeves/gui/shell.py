@@ -62,6 +62,34 @@ def paint_box(p: QPainter, rect: QRectF, theme: Theme, fill: QColor | None = Non
         p.drawPath(_path(rect, r))
 
 
+def themed_menu(parent: QWidget) -> Any:
+    """A right-click menu in the theme's look."""
+    from PySide6.QtWidgets import QMenu
+
+    from .ui_kit import skin
+    t = Theme()
+    k = skin.kind(t)
+    m = QMenu(parent)
+    m.setWindowFlags(m.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+    m.setAttribute(Qt.WA_TranslucentBackground)
+    radius = {"fade": 10, "spring": 16, "glide": 4}.get(k, 0)
+    border = {"slam": f"3px solid {t.text().name()}", "step": f"3px solid {t.accent().name()}",
+              "glide": f"1px solid {t.pop().name()}"}.get(k, f"1px solid {skin.line_color(t).name()}")
+    bg = t.surface().name() if k not in ("type", "draw") else t.page_background().name()
+    sel = t.pop() if k != "fade" else t.highlight()
+    item_r = {"fade": 6, "spring": 10}.get(k, 0)
+    m.setFont(t.body_font() if k != "type" else t.mono_font())
+    m.setStyleSheet(
+        f"QMenu {{ background: {bg}; color: {t.text().name()}; border: {border}; border-radius: {radius}px; "
+        f"padding: 6px; }}"
+        f"QMenu::item {{ padding: 6px 22px 6px 14px; border-radius: {item_r}px; }}"
+        f"QMenu::item:selected {{ background: {sel.name()}; color: {contrast_text(sel).name()}; }}"
+        f"QMenu::item:disabled {{ color: {t.muted().name()}; }}"
+        f"QMenu::separator {{ height: 1px; background: {skin.line_color(t).name()}; margin: 5px 8px; }}"
+        f"QMenu::indicator {{ width: 0; }}")
+    return m
+
+
 class Ticker(QTimer):
     """One shared clock for the little live animations (pulses, cursors, waveforms); it only runs
     while something asks for it."""
@@ -118,6 +146,8 @@ class PopButton(QAbstractButton):
         p.setRenderHint(QPainter.Antialiasing)
         sh = (t.shadow() or (0, None))[0]
         rect = QRectF(0, 0, self.width() - sh, self.height() - sh)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
         bg = QColor(t.pop())
         if self.isDown():
             bg = bg.darker(120)
@@ -341,6 +371,7 @@ class SideRow(QAbstractButton):
         self.theme = Theme()
         self.stage = ""
         self.pulse = 0.0
+        self.on = True                       # an agent that's switched off is dimmed and says so
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         fm = QFontMetricsF(self.theme.body_font())
@@ -352,6 +383,14 @@ class SideRow(QAbstractButton):
 
     def active(self) -> bool:
         return self.stage in ACTIVE
+
+    def enterEvent(self, e: Any) -> None:            # repaint for the hover highlight (only the window's
+        self.update()                                # first repaint used to show it)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e: Any) -> None:
+        self.update()
+        super().leaveEvent(e)
 
     def paintEvent(self, _e: Any) -> None:
         t = self.theme
@@ -382,6 +421,8 @@ class SideRow(QAbstractButton):
             p.fillPath(_path(r, min(t.corner_radius(), 14)), c)
         w = words(s.vocab)
         x = r.x() + 10
+        if self.kind == "agent" and not self.on:
+            p.setOpacity(0.5)
         if self.kind == "agent":
             av = r.height() - 14
             ar = QRectF(x, r.center().y() - av / 2, av, av)
@@ -395,7 +436,7 @@ class SideRow(QAbstractButton):
             prefix = "> " if (s.motion == "type" and on) else ("  " if s.motion == "type" else "")
             name = t.heading(self.title) if s.display_upper else self.title
             p.drawText(QPointF(x, r.center().y() - 2), prefix + name)
-            status = stage_word(self.stage, w)
+            status = stage_word(self.stage, w) if self.on else w["off"]
             small = t.body_font(max(7.0, t.body_font().pointSizeF() - 1))
             p.setFont(small)
             sc = QColor(text_c if on and s.motion in ("type", "slam", "step") else t.muted())
@@ -464,6 +505,8 @@ class Sidebar(QWidget):
     """Agents first (picking one shows it), then what every agent shares."""
     chosen = Signal(str, str)        # ("agent", id) or ("nav", activity|models|settings)
     add_agent = Signal()
+    switch_agent = Signal(str, bool)  # right-click > on/off
+    talk_to = Signal(str)             # right-click > Talk
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -516,9 +559,34 @@ class Sidebar(QWidget):
             clear_layout(self.agent_lay)
             for i, (aid, a) in enumerate(agents.items()):
                 row = SideRow(aid, a.get("name") or aid, "agent", agent_color(a, i))
+                row.on = bool(a.get("enabled", True))
                 row.clicked.connect(lambda _c=False, k=aid: self.pick("agent", k))
+                row.setContextMenuPolicy(Qt.CustomContextMenu)
+                row.customContextMenuRequested.connect(lambda pos, r=row: self._menu(r, pos))
                 self.rows[("agent", aid)] = row
                 self.agent_lay.addWidget(row)
+
+    def _menu(self, row: "SideRow", pos: Any) -> None:
+        m = themed_menu(self)
+        name = row.title
+        talk = m.addAction(self.w["talk"].replace("{name}", name) if "{name}" in self.w["talk"]
+                           else f"{self.w['talk']} — {name}")
+        talk.setEnabled(row.on)
+        talk.triggered.connect(lambda: self.talk_to.emit(row.key))
+        m.addSeparator()
+        flip = m.addAction(f"Turn {name} off" if row.on else f"Turn {name} on")
+        flip.triggered.connect(lambda: self.switch_agent.emit(row.key, not row.on))
+        m.addSeparator()
+        show = m.addAction(f"Open {name}")
+        show.triggered.connect(lambda: self.pick("agent", row.key))
+        self._open_menu = m
+        m.popup(row.mapToGlobal(pos))
+
+    def set_on(self, aid: str, on: bool) -> None:
+        row = self.rows.get(("agent", aid))
+        if row is not None and row.on != on:
+            row.on = on
+            row.update()
 
     def pick(self, kind: str, key: str, emit: bool = True) -> None:
         for k, row in self.rows.items():
@@ -594,13 +662,20 @@ class AgentHeader(QWidget):
     cursor; Ledger draws a brass rule under the name; Brutalist slams the name in; Arcade's sprite
     bobs; Blueprint's frame marches."""
     talk = Signal()
+    switched = Signal(bool)          # the on/off switch beside Talk
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        from .ui_kit import CustomCheckBox
         self.theme = Theme()
         s = self.theme.settings
         self.w = words(s.vocab)
         self.aid = ""
+        self.on = True
+        self.switch = CustomCheckBox(self.w["on_switch"], self)
+        self.switch.setChecked(True)
+        self.switch.setToolTip("Switch this agent on or off (also on its right-click menu in the list)")
+        self.switch.toggled.connect(self._switched)
         self.agent: dict[str, Any] = {}
         self.index = 0
         self.color = QColor(self.theme.pop())
@@ -624,7 +699,7 @@ class AgentHeader(QWidget):
         name = agent.get("name") or aid
         self.button.setText(self.w["talk"].replace("{name}", name))
         self.button.updateGeometry()
-        self._place_button()
+        self.set_on(bool(agent.get("enabled", True)))
         if changed:
             self.intro = 0.0
             ms = {"type": 40 * max(4, len(name)) + 200}.get(self.theme.motion)
@@ -636,6 +711,21 @@ class AgentHeader(QWidget):
         self.stage = stage
         self._run()
         self.update()
+
+    def set_on(self, on: bool) -> None:
+        self.on = on
+        self.switch.blockSignals(True)
+        self.switch.setChecked(on)
+        self.switch.blockSignals(False)
+        self.switch.setText(self.w["on_switch"] if on else self.w["off"])
+        self.switch.updateGeometry()
+        self.button.setEnabled(on)
+        self._place_button()
+        self.update()
+
+    def _switched(self, on: bool) -> None:
+        self.set_on(on)
+        self.switched.emit(on)
 
     def _set_intro(self, v: Any) -> None:
         self.intro = float(v)
@@ -670,6 +760,9 @@ class AgentHeader(QWidget):
         hint = self.button.sizeHint()
         self.button.setGeometry(self.width() - hint.width() - 6, (self.height() - hint.height()) // 2,
                                 hint.width(), hint.height())
+        sw = self.switch.sizeHint()
+        self.switch.setGeometry(self.button.x() - sw.width() - 18, (self.height() - sw.height()) // 2,
+                                sw.width(), sw.height())
 
     # -- painting
     def paintEvent(self, _e: Any) -> None:
@@ -682,11 +775,13 @@ class AgentHeader(QWidget):
         k = max(0.0, min(1.0, self.intro))
         h = self.height()
         x = 6.0
-        right = self.button.x() - 20
+        right = self.switch.x() - 20
         name = self.agent.get("name") or self.aid or ""
         if s.display_upper:
             name = name.upper()
-        status = stage_word(self.stage, self.w)
+        status = stage_word(self.stage, self.w) if self.on else self.w["off"]
+        if not self.on:
+            p.setOpacity(0.55)
         calls = ", ".join(self.agent.get("call_names") or [])
 
         if m == "spring":                      # Alive: a colored panel with the agent's own color
@@ -997,7 +1092,13 @@ class OverviewPage(Page):
         per = agent.get("functions") or {}
         on = [f for f in functions if per.get(f["name"], f.get("globally_enabled", True))]
         some = ", ".join(f["title"] for f in on[:3])
-        self.cards["abilities"].set(f"{len(on)} on" if functions else "…", some + ("…" if len(on) > 3 else ""))
+        rud = agent.get("rudimentary") or {}
+        if rud.get("enabled"):                   # one function, no AI
+            self.cards["abilities"].set("Runs what you say",
+                                        f"{rud['program']} + your words" if rud.get("program") else "no AI, any command")
+            self.cards["brain"].set("No AI", "rudimentary: what you say is the command")
+        else:
+            self.cards["abilities"].set(f"{len(on)} on" if functions else "…", some + ("…" if len(on) > 3 else ""))
         calls = ", ".join(agent.get("call_names") or [])
         hear = {"user": "your microphone", "desktop": "desktop audio", "both": "mic and desktop",
                 "device": "a device"}.get(agent.get("listen_to", "user"), "your microphone")
@@ -1176,6 +1277,11 @@ class LookPage(Page):
             self.cards.append(card)
             grid.addWidget(card, i // 3, i % 3)
         self.body_layout.addLayout(grid)
+        from .ui_kit import CustomCheckBox
+        self.frame = CustomCheckBox("Rounded window: Jeeves draws its own frame and title bar (off: your desktop's)")
+        self.frame.setChecked(get_settings().own_frame)
+        self.frame.toggled.connect(self._frame)
+        self.body_layout.addWidget(self.frame)
         self.editor = ThemeEditorGroup(current=get_settings(), defaults=JEEVES_THEME_DEFAULTS)
         self.body_layout.addWidget(self.editor)
         save = CustomButton("Save these colors")
@@ -1189,6 +1295,13 @@ class LookPage(Page):
             c.setChecked(c.look is look)
         target = look.settings()
         target.custom_widgets_enabled = get_settings().custom_widgets_enabled
+        target.own_frame = get_settings().own_frame
+        self.daemon.call("settings.set", lambda _r: self.apply(), self._failed, changes={"theme": asdict(target)})
+
+    def _frame(self, on: bool) -> None:
+        from .ui_kit import ThemeSettings, get_settings
+        target = ThemeSettings(**asdict(get_settings()))
+        target.own_frame = on
         self.daemon.call("settings.set", lambda _r: self.apply(), self._failed, changes={"theme": asdict(target)})
 
     def save(self) -> None:
@@ -1202,3 +1315,244 @@ class LookPage(Page):
     def _failed(self, err: str) -> None:
         from .ui_kit import show_message
         show_message(self, "Look", str(err))
+
+
+# ---------------------------------------------------------------------------- the window's own frame
+EDGE = 7
+
+
+def frame_radius(theme: Theme) -> float:
+    from .ui_kit import skin
+    return {"fade": 14.0, "spring": 22.0, "glide": 10.0, "type": 6.0, "draw": 4.0}.get(skin.kind(theme), 0.0)
+
+
+class WindowFrame(QWidget):
+    """The window's background. With its own frame (Look > Rounded window) the window has no system
+    frame: this paints its rounded (Arcade: pixel-stepped) outline and lets its edges resize it."""
+
+    def __init__(self, own: bool, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.theme = Theme()
+        self.own = own
+        self.setMouseTracking(own)
+
+    def _full(self) -> bool:
+        w = self.window()
+        return bool(w.windowState() & (Qt.WindowMaximized | Qt.WindowFullScreen))
+
+    def outline(self) -> QPainterPath:
+        from .ui_kit import skin
+        r = QRectF(self.rect())
+        if not self.own or self._full():
+            path = QPainterPath()
+            path.addRect(r)
+            return path
+        if skin.kind(self.theme) == "step":             # pixel corners: three steps
+            s = 4.0
+            pts = [QPointF(r.left() + 3 * s, r.top()), QPointF(r.right() - 3 * s, r.top()),
+                   QPointF(r.right() - 3 * s, r.top() + s), QPointF(r.right() - s, r.top() + s),
+                   QPointF(r.right() - s, r.top() + 3 * s), QPointF(r.right(), r.top() + 3 * s),
+                   QPointF(r.right(), r.bottom() - 3 * s), QPointF(r.right() - s, r.bottom() - 3 * s),
+                   QPointF(r.right() - s, r.bottom() - s), QPointF(r.right() - 3 * s, r.bottom() - s),
+                   QPointF(r.right() - 3 * s, r.bottom()), QPointF(r.left() + 3 * s, r.bottom()),
+                   QPointF(r.left() + 3 * s, r.bottom() - s), QPointF(r.left() + s, r.bottom() - s),
+                   QPointF(r.left() + s, r.bottom() - 3 * s), QPointF(r.left(), r.bottom() - 3 * s),
+                   QPointF(r.left(), r.top() + 3 * s), QPointF(r.left() + s, r.top() + 3 * s),
+                   QPointF(r.left() + s, r.top() + s), QPointF(r.left() + 3 * s, r.top() + s)]
+            path = QPainterPath()
+            path.moveTo(pts[0])
+            for pt in pts[1:]:
+                path.lineTo(pt)
+            path.closeSubpath()
+            return path
+        return _path(r, frame_radius(self.theme))
+
+    def paintEvent(self, _e: Any) -> None:
+        from .ui_kit import skin
+        t = self.theme
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, skin.kind(t) != "step")
+        path = self.outline()
+        p.fillPath(path, t.app_background())
+        if self.own and not self._full():
+            k = skin.kind(t)
+            pen = {"slam": QPen(t.text(), 3), "step": QPen(t.accent(), 2), "draw": QPen(QColor(255, 255, 255, 140), 1),
+                   "glide": QPen(QColor(t.pop().red(), t.pop().green(), t.pop().blue(), 110), 1),
+                   "type": QPen(QColor(t.pop().red(), t.pop().green(), t.pop().blue(), 90), 1)}.get(
+                k, QPen(QColor(255, 255, 255, 22), 1))
+            pen.setWidthF(pen.widthF() * 2)           # drawn clipped to the shape: the inner half shows
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.setClipPath(path)
+            p.drawPath(path)
+        p.end()
+
+    # -- resizing from the edges (no system frame to do it)
+    def _edges(self, pos: Any) -> Qt.Edges:
+        if not self.own or self._full():
+            return Qt.Edges()
+        e = Qt.Edges()
+        x, y, w, h = pos.x(), pos.y(), self.width(), self.height()
+        if x < EDGE:
+            e |= Qt.LeftEdge
+        if x > w - EDGE:
+            e |= Qt.RightEdge
+        if y < EDGE:
+            e |= Qt.TopEdge
+        if y > h - EDGE:
+            e |= Qt.BottomEdge
+        return e
+
+    def mouseMoveEvent(self, e: Any) -> None:
+        edges = self._edges(e.position())
+        cursors = {Qt.LeftEdge: Qt.SizeHorCursor, Qt.RightEdge: Qt.SizeHorCursor, Qt.TopEdge: Qt.SizeVerCursor,
+                   Qt.BottomEdge: Qt.SizeVerCursor}
+        if edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif edges in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
+            self.setCursor(Qt.SizeBDiagCursor)
+        elif edges in cursors:
+            self.setCursor(cursors[edges])
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(e)
+
+    def mousePressEvent(self, e: Any) -> None:
+        edges = self._edges(e.position())
+        handle = self.window().windowHandle()
+        if e.button() == Qt.LeftButton and edges and handle is not None:
+            handle.startSystemResize(edges)
+            return
+        if e.button() == Qt.LeftButton and handle is not None and self.own:   # empty margins move it
+            handle.startSystemMove()
+            return
+        super().mousePressEvent(e)
+
+    def changeEvent(self, e: Any) -> None:
+        super().changeEvent(e)
+        self.update()
+
+
+class WinButton(QAbstractButton):
+    """Minimise, maximise, close: in the theme's look."""
+
+    def __init__(self, role: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.role = role
+        self.theme = Theme()
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(30 if self._kind() != "type" else 34, 22)
+        self.setToolTip({"min": "Minimise", "max": "Maximise", "close": "Close"}[role])
+
+    def _kind(self) -> str:
+        from .ui_kit import skin
+        return skin.kind(self.theme)
+
+    def enterEvent(self, e: Any) -> None:
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e: Any) -> None:
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, _e: Any) -> None:
+        t = self.theme
+        k = self._kind()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, k != "step")
+        hover = self.underMouse()
+        r = QRectF(self.rect())
+        close = self.role == "close"
+        hot = QColor("#e0483e") if close and k in ("fade", "spring", "glide") else t.pop()
+        if k == "type":                               # [_] [^] [x]
+            p.setFont(t.mono_font())
+            p.setPen(t.pop() if hover else t.muted())
+            p.drawText(r, Qt.AlignCenter, {"min": "[_]", "max": "[^]", "close": "[x]"}[self.role])
+            p.end()
+            return
+        if k in ("fade", "spring"):                   # dots that show their sign on hover
+            d = 12.0 if k == "fade" else 13.0
+            c = r.center()
+            col = {"min": QColor("#f5c04a"), "max": QColor("#6ddc8f"), "close": QColor("#ff6b57")}[self.role] \
+                if k == "spring" else (hot if hover else t.highlight())
+            if k == "fade" and hover and not close:
+                col = t.highlight().lighter(140)
+            p.setPen(Qt.NoPen)
+            p.setBrush(col)
+            p.drawEllipse(c, d / 2, d / 2)
+            if not hover:
+                p.end()
+                return
+            fg = QColor(0, 0, 0, 170) if k == "spring" else contrast_text(col)
+            p.setPen(QPen(fg, 1.4))
+            s = d * 0.22
+            self._glyph(p, c, s)
+            p.end()
+            return
+        if k == "slam":
+            if hover:
+                p.fillRect(r, t.pop())
+            p.setPen(QPen(t.text(), 2.5))
+            self._glyph(p, r.center(), 5)
+            p.end()
+            return
+        if k == "step":
+            if hover:
+                p.fillRect(r.adjusted(2, 2, -2, -2), t.accent() if not close else t.pop())
+            p.setPen(QPen(t.text() if not hover else t.page_background(), 2))
+            self._glyph(p, r.center(), 4)
+            p.end()
+            return
+        # Ledger, Blueprint: thin glyphs, a hairline box on hover
+        if hover:
+            p.setPen(QPen(t.pop() if k == "glide" else t.text(), 1))
+            p.drawRect(r.adjusted(4.5, 1.5, -4.5, -1.5))
+        p.setPen(QPen(t.pop() if k == "glide" else t.text(), 1.1))
+        self._glyph(p, r.center(), 4.5)
+        p.end()
+
+    def _glyph(self, p: QPainter, c: QPointF, s: float) -> None:
+        if self.role == "min":
+            p.drawLine(QPointF(c.x() - s, c.y()), QPointF(c.x() + s, c.y()))
+        elif self.role == "max":
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(QRectF(c.x() - s, c.y() - s, 2 * s, 2 * s))
+        else:
+            p.drawLine(QPointF(c.x() - s, c.y() - s), QPointF(c.x() + s, c.y() + s))
+            p.drawLine(QPointF(c.x() + s, c.y() - s), QPointF(c.x() - s, c.y() + s))
+
+
+class TitleBar(QWidget):
+    """A slim strip across the top: drag it to move the window, double-click to maximise; the
+    window buttons sit at its right."""
+
+    def __init__(self, window: QWidget, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.win = window
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        lay.addStretch(1)
+        for role in ("min", "max", "close"):
+            b = WinButton(role)
+            b.clicked.connect(lambda _c=False, r=role: self._act(r))
+            lay.addWidget(b)
+        self.setFixedHeight(24)
+
+    def _act(self, role: str) -> None:
+        if role == "min":
+            self.win.showMinimized()
+        elif role == "max":
+            self.win.showNormal() if self.win.isMaximized() else self.win.showMaximized()
+        else:
+            self.win.close()
+
+    def mousePressEvent(self, e: Any) -> None:
+        handle = self.win.windowHandle()
+        if e.button() == Qt.LeftButton and handle is not None:
+            handle.startSystemMove()
+
+    def mouseDoubleClickEvent(self, e: Any) -> None:
+        if e.button() == Qt.LeftButton:
+            self._act("max")

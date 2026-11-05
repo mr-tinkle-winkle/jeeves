@@ -21,8 +21,12 @@ from typing import Any
 from ...util import normalize, similarity, which
 from ..base import Arg, FunctionError, partial
 
-FORMAT = ("bv*[height<=?{h}][vcodec~='^(avc1|h264)']+ba[ext=m4a]/bv*[height<=?{h}]+ba/"
-          "b[height<=?{h}]/b")
+# Plain https streams first (the local stream proxy can feed those to the player with YouTube's headers),
+# H.264 + m4a first among them (every FFmpeg plays them), then anything.
+_H = "[protocol^=http][protocol!*=dash]"
+FORMAT = (f"bv*[height<=?{{h}}][vcodec~='^(avc1|h264)']{_H}+ba[ext=m4a]{_H}/bv*[height<=?{{h}}]{_H}+ba{_H}/"
+          f"b[height<=?{{h}}]{_H}/"
+          "bv*[height<=?{h}][vcodec~='^(avc1|h264)']+ba[ext=m4a]/bv*[height<=?{h}]+ba/b[height<=?{h}]/b")
 
 
 # Signing in: YouTube asks some connections to "sign in to confirm you're not a bot". yt-dlp can use the
@@ -313,6 +317,19 @@ def channel_in(query: str) -> tuple[str, str]:
     return "", query
 
 
+def playable(f: dict[str, Any]) -> str:
+    """The address the player opens for a format: plain https streams go through the local stream proxy
+    (YouTube's headers, fetched in pieces); others (HLS playlists) are opened directly."""
+    url = f["url"]
+    if str(f.get("protocol") or "https") in ("https", "http"):
+        from ...daemon import streamproxy
+        ext = f.get("ext") or ""
+        kind = "audio" if f.get("vcodec") in (None, "none") else "video"
+        ctype = {"m4a": "audio/mp4", "webm": f"{kind}/webm", "mp4": "video/mp4"}.get(ext, "")
+        return streamproxy.register(url, f.get("http_headers") or {}, ctype)
+    return url
+
+
 def streams(url: str, max_height: int = 1080) -> dict[str, Any]:
     """{title, channel, video, audio (None = combined), duration, page} for the player."""
     info = _ytdlp("--no-playlist", "-f", FORMAT.format(h=max_height), url, timeout=90)
@@ -321,14 +338,15 @@ def streams(url: str, max_height: int = 1080) -> dict[str, Any]:
                      reverse=True)
     req = info.get("requested_formats")
     if req and len(req) >= 2:
-        video = next((f["url"] for f in req if f.get("vcodec") not in (None, "none")), req[0]["url"])
-        audio = next((f["url"] for f in req if f.get("acodec") not in (None, "none") and f["url"] != video), None)
+        vf = next((f for f in req if f.get("vcodec") not in (None, "none")), req[0])
+        af = next((f for f in req if f.get("acodec") not in (None, "none") and f is not vf), None)
     else:
-        video, audio = info.get("url"), None
-    if not video:
+        vf, af = info, None
+    if not vf.get("url"):
         raise FunctionError("YouTube didn't give a playable stream for that video")
+    video, audio = playable(vf), (playable(af) if af else None)
     req = req or [info]
-    vfmt = next((f for f in req if f.get("vcodec") not in (None, "none")), req[0])
+    vfmt = vf
     chapters = [{"start": float(c.get("start_time") or 0), "end": float(c.get("end_time") or 0),
                  "title": c.get("title") or ""} for c in info.get("chapters") or []]
     return {"title": info.get("title", ""), "channel": info.get("channel") or info.get("uploader") or "",
