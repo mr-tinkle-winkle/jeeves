@@ -1,0 +1,1196 @@
+"""On-screen indicators and popups. Started (and restarted) by the daemon, so
+everything here works without the settings GUI open.
+
+* Indicators, in the configured corner: microphone (click = +5 s, hold = keep
+  listening until release +1 s), the transcript under it, and a spinner per
+  active request coloured by stage:
+    thinking gray · researching blue · responding black with a white outline ·
+    asking for input flashing white · unclear purple · unavailable flashing red.
+  Clicking the spinner: thinking/researching -> the agent's current thoughts
+  (and what it's looking at); responding -> pause/resume; asking -> proceed.
+* Timers in the bottom-right corner.
+* Marked screen positions (circles).
+* Popups: Manual Response Review, Text Request, imported-function approval,
+  typed answers, notices.
+
+Two processes, both started by the daemon:
+
+* ``jeeves overlay`` -- the indicators, timers, screen marks and notices. On
+  Wayland they are layer-shell surfaces on the overlay layer (``layershell.py``,
+  the same way afterglow's clip indicator works); without the layer-shell shim
+  it falls back to XWayland override-redirect windows.
+* ``jeeves overlay --popups`` -- Manual Response Review, Text Request, typed
+  answers, thoughts and import approval: ordinary windows that need the
+  keyboard, so they can't live in the layer-shell process (that setting turns
+  every window of a process into a layer surface).
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import sys
+import time
+from typing import Any
+
+from .util import format_duration, graphical_env
+
+
+ALREADY_RUNNING = 3      # exit code: another overlay of this kind already runs (the daemon waits, doesn't respawn)
+
+
+def _single_instance(name: str) -> Any:
+    """One overlay per session: a second copy exits (the first keeps working and
+    reconnects to a restarted daemon by itself)."""
+    import fcntl
+
+    from . import paths
+    paths.ensure(paths.runtime_dir())
+    path = paths.runtime_dir() / f"{name}.lock"
+    f = open(path, "a+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            holder = path.read_text().strip()
+        except OSError:
+            holder = "?"
+        print(f"jeeves {name}: another copy is already running (pid {holder}); exiting", file=sys.stderr)
+        return None
+    f.seek(0)
+    f.truncate()
+    f.write(str(os.getpid()))
+    f.flush()
+    return f
+
+
+
+def sources_html(d: dict[str, Any], expanded: set[int] | None = None, link: str = "#4ea1ff") -> str:
+    """The Sources popup: question, the answer with [n] links to its sources, then each source with
+    a link to the page and the text that was read from it (first 600 characters unless expanded)."""
+    import html
+    import re as _re
+    esc = html.escape
+    expanded = expanded or set()
+
+    def cite(m: Any) -> str:
+        nums = _re.findall(r"\d+", m.group(0))
+        return " ".join(f'<a href="#s{n}" style="color:{link};text-decoration:none">[{n}]</a>' for n in nums)
+    answer = _re.sub(r"\[\d+(?:\s*[,-]\s*\d+)*\]", cite, esc(d.get("answer", "")))
+    parts = [f'<h3>{esc(d.get("question", ""))}</h3>',
+             f'<p style="font-size:15px">{answer.replace(chr(10), "<br>")}</p>', "<h4>Sources</h4>"]
+    for s in d.get("sources", []):
+        n = s["n"]
+        url = s.get("url", "")
+        title = esc(s.get("title") or url)
+        head = f'<a href="{esc(url)}" style="color:{link}">{title}</a>' if url.startswith("http") else title
+        text = s.get("text", "")
+        full = n in expanded or len(text) <= 600
+        shown = esc(text if full else text[:600].rsplit(" ", 1)[0] + "…").replace("\n", "<br>")
+        toggle = "" if len(text) <= 600 else \
+            f' <a href="more:{n}" style="color:{link}">{"show less" if full else "show all the text read"}</a>'
+        parts.append(f'<a name="s{n}"></a><p><b>[{n}]</b> {head}<br>'
+                     f'<span style="font-size:11px">{esc(url)}</span></p>'
+                     f'<blockquote>{shown}{toggle}</blockquote>')
+    return "".join(parts)
+
+def main(popups: bool = False) -> int:
+    lock = _single_instance("popups" if popups else "overlay")
+    if lock is None:
+        return ALREADY_RUNNING
+    env = graphical_env()
+    for k in ("WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP"):
+        if k in env and k not in os.environ:
+            os.environ[k] = env[k]
+    from . import layershell
+    use_layer = False
+    if not popups:
+        forced = os.environ.get("QT_QPA_PLATFORM", "")
+        if os.environ.get("WAYLAND_DISPLAY") and forced in ("", "wayland") and layershell.enable_in_this_process():
+            os.environ["QT_QPA_PLATFORM"] = "wayland"
+            use_layer = True
+        elif not forced:
+            # no layer-shell: XWayland override-redirect windows are the next best thing
+            os.environ["QT_QPA_PLATFORM"] = "xcb" if os.environ.get("DISPLAY") else "wayland"
+
+    from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+    from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPainterPath
+    from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
+    from .gui.common import Daemon, flags_overlay, install_theme, theme_palette
+    from .gui.ui_kit import (CustomButton, CustomCheckBox, CustomLineEdit, CustomPlainTextEdit, CustomTextBrowser,
+                             SmoothScrollArea, Theme, fit_to_width)
+    from . import overlay_skin as ovs
+    from .gui.ui_kit import skin
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    app.setQuitOnLastWindowClosed(False)
+    app.setApplicationName("jeeves-popups" if popups else "jeeves-overlay")
+    app.setDesktopFileName("jeeves")
+    from .resources import app_icon
+    app.setWindowIcon(app_icon())              # popups, thoughts, sources and the video player
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("jeeves.overlay").info("%s on %s (layer-shell: %s)", "popups" if popups else "indicators",
+                                             QGuiApplication.platformName(), use_layer)
+
+    def target_screen() -> Any:
+        """Which monitor overlays appear on (Indicators > Screen): the primary one, the one
+        the mouse is on, or a named output. Layer surfaces without an output get one
+        chosen by the compositor -- often not the one you're looking at."""
+        choice = (settings.get("indicators") or {}).get("screen", "mouse") or "mouse"
+        screens = QGuiApplication.screens()
+        if choice not in ("mouse", "primary"):
+            named = next((sc for sc in screens if sc.name() == choice), None)
+            if named is not None:
+                return named
+        if choice == "mouse":
+            try:
+                from PySide6.QtCore import QPoint
+
+                from .daemon import desktop as dk
+                x, y = dk.mouse_position()
+                found = QGuiApplication.screenAt(QPoint(x, y))
+                if found is not None:
+                    return found
+            except Exception:  # noqa: BLE001 -- no kdotool/hyprctl: fall back to primary
+                pass
+        try:
+            from .daemon import desktop as dk
+            name = dk.primary_output()
+        except Exception:  # noqa: BLE001
+            name = None
+        named = next((sc for sc in screens if sc.name() == name), None) if name else None
+        return named or QGuiApplication.primaryScreen()
+
+    def present(w: QWidget, edges: list[str], margins: tuple[int, int, int, int] = (0, 0, 0, 0),
+                on: Any = None) -> None:
+        """Show an overlay window: a layer surface anchored to edges (Wayland), or
+        placed by geometry beforehand (X11). Re-anchors if the edges or screen changed.
+        The screen is chosen when the window appears, never while it is showing."""
+        screen = on or (target_screen() if not w.isVisible() else getattr(w, "_screen", None))
+        key = (tuple(edges), tuple(margins), screen.name() if screen is not None else "")
+        if use_layer and w.isVisible() and getattr(w, "_layer_key", None) != key:
+            w.hide()
+        if not w.isVisible():
+            w._screen = screen
+            if use_layer:
+                w.winId()
+                win = w.windowHandle()
+                if screen is not None and win is not None and win.screen() is not screen:
+                    win.setScreen(screen)
+                if getattr(w, "_layer_key", None) != key:
+                    layershell.configure(win, edges, margins)
+                    w._layer_key = key
+            w.show()
+
+    def set_input(w: QWidget, rects: list[Any]) -> None:
+        """Wayland layer surface: clicks only land on these rects; elsewhere they pass
+        through to the windows below (Qt maps the mask to the input region)."""
+        if not use_layer:
+            return
+        win = w.windowHandle()
+        if win is None:
+            return
+        from PySide6.QtGui import QRegion
+        key = tuple(tuple(int(v) for v in (r.left(), r.top(), r.width(), r.height())) for r in rects)
+        if key == getattr(w, "_input_key", None):
+            return
+        w._input_key = key
+        if rects:
+            region = QRegion()
+            for r in rects:
+                region = region.united(QRegion(r.toAlignedRect()))
+            win.setFlags(win.flags() & ~Qt.WindowTransparentForInput)
+            win.setMask(region)
+        else:
+            win.setMask(QRegion())
+            win.setFlags(win.flags() | Qt.WindowTransparentForInput)
+
+    def open_popup(kind: str, **data: Any) -> None:
+        """From the indicator process: ask the popups process to open a window."""
+        daemon.call("ui.popup", None, lambda _e: None, kind=kind, data=data)
+
+    install_theme()
+    daemon = Daemon()
+    settings: dict[str, Any] = {}
+
+    def load_settings(*_: Any) -> None:
+        def got(res: Any) -> None:
+            if isinstance(res, dict):
+                settings.clear()
+                settings.update(res.get("value", {}))
+                if indicator is not None:
+                    indicator.theme = Theme()
+                    timers_w.theme = indicator.theme
+                    marks.theme = indicator.theme
+                    indicator.relayout()
+                    timers_w.relayout()
+        daemon.call("settings.get", got, lambda _e: None)
+
+    # ------------------------------------------------------------------ indicator
+    class Indicator(QWidget):
+        MIC = 0
+
+        def __init__(self) -> None:
+            super().__init__(None, flags_overlay())
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setAttribute(Qt.WA_ShowWithoutActivating)
+            self.setWindowTitle("Jeeves indicator")
+            self.setMouseTracking(True)
+            self.states: dict[str, dict[str, Any]] = {}
+            self.transcript = ""
+            self.transcript_until = 0.0
+            self.response = ""
+            self.response_until = 0.0
+            self.sources: dict[str, Any] | None = None     # researched answer's sources, under the answer
+            self.phase = 0.0
+            self.press_at = 0.0
+            self.holding = False
+            self.hits: list[tuple[QRectF, str, str]] = []   # rect, kind, request id
+            self.menu: dict[str, Any] | None = None          # right-click menu: {"rid", "anchor"}
+            self.menu_until = 0.0
+            self.anim = QTimer(self)
+            self.anim.setInterval(33)
+            self.anim.timeout.connect(self._tick)
+            self.anim.start()
+            self.hold_timer = QTimer(self)
+            self.hold_timer.setSingleShot(True)
+            self.hold_timer.setInterval(350)
+            self.hold_timer.timeout.connect(self._start_hold)
+            self.theme = Theme()                   # the window's theme (overlay_skin.py); renewed with settings
+            self.levels: dict[str, tuple[float, float]] = {}     # request -> (your voice 0..1, when)
+
+        def cfg(self, key: str, default: Any = None) -> Any:
+            return (settings.get("indicators") or {}).get(key, default)
+
+        def color(self, stage: str) -> QColor:
+            cols = self.cfg("colors", {}) or {}
+            defaults = {"thinking": "#808080", "researching": "#2f6fff", "responding": "#000000",
+                        "asking": "#ffffff", "unclear": "#8a2be2", "unavailable": "#ff2020", "listening": "#ffffff",
+                        "transcript": "#808080", "watching": "#20b070", "playing": "#ff4040",
+                        "misheard": "#ff3030"}
+            return QColor(cols.get(stage) or defaults.get(stage, "#808080"))
+
+        def bubble_size(self, text: str) -> tuple[str, int]:
+            """(the text as it fits, its bubble height): measured the same way it's painted, so the window
+            is always tall enough -- a long answer used to run off the bottom of it."""
+            f = ovs.font(self.theme, 11)
+            fm = QFontMetrics(f)
+            width = max(420, int(self.cfg("size", 56)) * 8) - 32
+            limit = int(target_screen().availableGeometry().height() * 0.5)
+            shown = text
+            rect = fm.boundingRect(0, 0, width, 10000, Qt.TextWordWrap, shown)
+            if rect.height() > limit:
+                words = text.split()
+                lo, hi = 0, len(words)
+                while lo < hi:                             # the most words that fit, then "…"
+                    mid = (lo + hi + 1) // 2
+                    cand = " ".join(words[:mid]) + " …"
+                    if fm.boundingRect(0, 0, width, 10000, Qt.TextWordWrap, cand).height() <= limit:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                shown = " ".join(words[:lo]) + " …"
+                rect = fm.boundingRect(0, 0, width, 10000, Qt.TextWordWrap, shown)
+            return shown, rect.height() + 14
+
+        def relayout(self) -> None:
+            size = int(self.cfg("size", 56))
+            w = max(420, size * 8)
+            rows = max(1, len(self.visible_states()))
+            h = (size + 8) * rows + 12
+            if self.menu is not None:
+                h = max(h, 6 + 4 * 32 + 16)                 # the right-click menu fits too
+            if self.transcript and time.time() < self.transcript_until:
+                h += self.bubble_size(f"“{self.transcript}”")[1] + 6
+            if self.response and time.time() < self.response_until + 1:
+                h += self.bubble_size(self.response)[1] + 12
+            if self.sources:
+                h += (QFontMetrics(ovs.font(self.theme, 10)).height() + 6) * (len(self.sources.get("sources", [])) + 1) + 30
+            corner = self.cfg("corner", "top-right")
+            pad = 16
+            if use_layer:
+                self.resize(int(w), int(h))
+            else:
+                scr = target_screen().availableGeometry()
+                x = scr.x() + pad if "left" in corner else scr.x() + scr.width() - w - pad
+                y = scr.y() + pad if corner.startswith("top") else scr.y() + scr.height() - h - pad
+                self.setGeometry(int(x), int(y), int(w), int(h))
+            if self.visible_states() or time.time() < max(self.transcript_until, self.response_until):
+                self._empty_since = 0.0
+                present(self, layershell.corner_edges(corner), (pad, pad, pad, pad))
+            # (nothing to show: _tick hides it a moment later. Hiding at once blinked the surface off
+            # between "transcript" and "thinking" -- a few ms apart -- and some compositors didn't map
+            # it again until it changed size, so the spinner only appeared once it started talking.)
+
+        def visible_states(self) -> list[dict[str, Any]]:
+            out = []
+            for s in self.states.values():
+                if s["stage"] == "listening" and not self.cfg("stt_active", True):
+                    continue
+                if s["stage"] not in ("listening", "transcript") and not self.cfg("processing", True):
+                    continue
+                out.append(s)
+            return sorted(out, key=lambda s: s.get("time", 0))
+
+        def update_state(self, st: dict[str, Any]) -> None:
+            rid = st.get("request")
+            if st.get("stage") == "idle":
+                self.states.pop(rid, None)
+            elif st.get("stage") == "transcript":
+                if rid in self.states:              # heard: the mic becomes the spinner straight away
+                    self.states[rid] = dict(st, stage="thinking", detail="")
+                if self.cfg("stt_output", True):
+                    self.transcript = st.get("detail", "")
+                    self.transcript_until = time.time() + 4
+            else:
+                self.states[rid] = st
+            self.relayout()
+            self.update()
+
+        def show_response(self, text: str) -> None:
+            if not self.cfg("response_text", True):
+                return
+            self.response = text
+            self.response_until = time.time() + min(20, 4 + len(text) / 18)
+            self.sources = None
+            self.relayout()
+            self.update()
+
+        def show_sources(self, d: dict[str, Any]) -> None:
+            """A researched answer: the answer, then its sources as clickable lines (open in the browser)
+            and "Show what it read" (the full view). Stays up longer so there's time to click."""
+            self.response = d.get("answer", "")
+            self.sources = d
+            self.response_until = time.time() + max(30, min(60, 10 + len(self.response) / 12))
+            self.relayout()
+            self.show()
+            self.update()
+
+        def _tick(self) -> None:
+            self.phase = (self.phase + 0.033) % 1000
+            if self.isVisible():
+                if not self.visible_states() and time.time() > max(self.transcript_until, self.response_until):
+                    if not getattr(self, "_empty_since", 0.0):
+                        self._empty_since = time.time()
+                    elif time.time() - self._empty_since > 0.25:
+                        self._empty_since = 0.0
+                        self.hide()
+                else:
+                    self._empty_since = 0.0
+                self.update()
+            else:
+                self.anim.stop()            # (30 wake-ups a second for nothing on screen otherwise)
+
+        def showEvent(self, e: Any) -> None:
+            super().showEvent(e)
+            if not self.anim.isActive():
+                self.anim.start()
+
+        # -------------------------------------------------------------- painting
+        def paintEvent(self, _e: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            size = int(self.cfg("size", 56))
+            right = "right" in self.cfg("corner", "top-right")
+            self.hits = []
+            y = 6
+            for st in self.visible_states():
+                stage = st["stage"]
+                x = self.width() - size - 6 if right else 6
+                rect = QRectF(x, y, size, size)
+                if stage == "listening":
+                    self._mic(p, rect, st)
+                    self.hits.append((rect, "mic", st["request"]))
+                else:
+                    self._spinner(p, rect, st)
+                    self.hits.append((rect, "spinner", st["request"]))
+                label = st.get("agent_name") or ("Listening" if stage == "listening" else "")
+                detail = st.get("detail") or ""
+                if stage == "responding" and detail and self.response and time.time() < self.response_until and \
+                        (detail in self.response or self.response in detail):
+                    detail = ""                     # it's in the response box right below: not twice
+                text = f"{label}: {detail}" if detail and label else (detail or label)
+                self._label(p, rect, text, right)
+                y += size + 8
+            if time.time() < self.transcript_until and self.transcript:
+                y = self._bubble(p, y, f"“{self.transcript}”", right, None) + 6
+            if time.time() < self.response_until and self.response:
+                y = self._bubble(p, y, ovs.text_prefix(self.theme) + self.response, right, None) + 6
+                if self.sources:
+                    self._sources(p, y, right)
+            self._paint_menu(p, right)
+            p.end()
+            set_input(self, [r for r, _k, _i in self.hits])
+
+        # -------------------------------------------------------------- right-click menu
+        def _paint_menu(self, p: QPainter, right: bool) -> None:
+            """Drawn inside this surface rather than as a QMenu popup window: popups
+            attached to layer surfaces aren't reliable across compositors."""
+            m = self.menu
+            if m is None:
+                return
+            if m["rid"] not in self.states or time.time() > self.menu_until:
+                self.menu = None
+                return
+            st = self.states[m["rid"]]
+            items = [] if st.get("stage") == "listening" else [("thoughts", "Observe Thoughts"),
+                                                                ("interrupt", "Interrupt")]
+            items += [("suspend", "Resume" if st.get("suspended") else "Suspend"), ("close", "Close")]
+            anchor: QRectF = m["anchor"]
+            w, ih = 170.0, 32.0
+            x = anchor.left() - w - 8 if right else anchor.right() + 8
+            box = QRectF(x, anchor.top(), w, ih * len(items) + 8)
+            c = ovs.colors(self.theme)
+            ovs.box(p, box, self.theme, QColor(c["bg"].red(), c["bg"].green(), c["bg"].blue(), 245), big=True)
+            p.setFont(ovs.font(self.theme, 11))
+            for i, (action, text) in enumerate(items):
+                r = QRectF(box.left() + 4, box.top() + 4 + i * ih, w - 8, ih)
+                p.setPen(c["text"])
+                if self.menu.get("hover") == action:
+                    sel = QColor(255, 255, 255, 40) if c["edge"].alpha() == 0 else self.theme.pop()
+                    rad = ovs.radius(self.theme, r.height()) * 0.7
+                    path = QPainterPath()
+                    path.addRoundedRect(r, rad, rad)
+                    p.fillPath(path, sel)
+                    if c["edge"].alpha():
+                        from .gui.ui_kit import contrast_text
+                        p.setPen(contrast_text(sel))
+                p.drawText(r.adjusted(12, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, self.theme.heading(text))
+                p.setPen(Qt.NoPen)
+                self.hits.insert(0, (r, f"menu:{action}", m["rid"]))
+
+        def _flash(self, period: float = 0.8) -> float:
+            return 0.5 + 0.5 * math.sin(self.phase * 2 * math.pi / period)
+
+        def _mic(self, p: QPainter, r: QRectF, st: dict[str, Any]) -> None:
+            lvl, at = self.levels.get(st.get("request", ""), (0.0, 0.0))
+            shown = getattr(self, "_shown_level", {})
+            self._shown_level = shown
+            # eased: jumps up with your voice, falls back over a fifth of a second
+            prev = shown.get(st.get("request", ""), 0.0)
+            target = lvl if time.time() - at < 0.4 else 0.0
+            cur = target if target > prev else prev + (target - prev) * 0.35
+            shown[st.get("request", "")] = cur
+            ovs.mic(p, r, self.theme, self.phase, st.get("detail") == "held" or self.holding,
+                    bool(st.get("suspended")), cur)
+
+        def _spinner(self, p: QPainter, r: QRectF, st: dict[str, Any]) -> None:
+            stage = st["stage"]
+            base = self.color(stage)
+            if st.get("color") and stage in ("thinking",):
+                base = QColor(st["color"])
+            alpha = 255
+            if stage == "asking":
+                alpha = int(80 + 175 * self._flash(0.9))
+            if stage == "unavailable":
+                alpha = int(60 + 195 * self._flash(0.4))
+            base.setAlpha(alpha)
+            outline = None
+            if stage == "responding":
+                outline = QColor((settings.get("indicators") or {}).get("colors", {}).get("responding_outline",
+                                                                                          "#ffffff"))
+            still = stage in ("asking", "unavailable", "unclear") or bool(st.get("paused") or st.get("suspended"))
+            if stage == "misheard":                  # it thought it heard its name: spins away in red
+                k = max(0.0, 1.0 - (time.time() - float(st.get("time") or time.time())) / 0.9)
+                p.save()
+                p.setOpacity(k)
+                c = r.center()
+                p.translate(c)
+                p.scale(0.4 + 0.6 * k, 0.4 + 0.6 * k)
+                p.translate(-c)
+                ovs.spinner(p, r, self.theme, base, self.phase * 3.0, True, None, False)
+                p.restore()
+                return
+            ovs.spinner(p, r, self.theme, base, self.phase, not still, outline,
+                        bool(st.get("paused") or st.get("suspended")))
+
+        def _label(self, p: QPainter, r: QRectF, text: str, right: bool) -> None:
+            if not text:
+                return
+            p.setFont(ovs.font(self.theme, 10))
+            metrics = p.fontMetrics()
+            maxw = self.width() - r.width() - 40
+            text = self.theme.heading(text)
+            shown = metrics.elidedText(text, Qt.ElideRight, int(maxw))
+            tw = metrics.horizontalAdvance(shown) + (16 if ovs.radius(self.theme, 26) < 13 else 22)
+            th = max(26, metrics.height() + 8)
+            box = QRectF(r.left() - tw - 10 if right else r.right() + 10, r.center().y() - th / 2, tw, th)
+            ovs.box(p, box, self.theme)
+            p.setPen(ovs.colors(self.theme)["text"])
+            p.drawText(box, Qt.AlignCenter, shown)
+
+        def _bubble(self, p: QPainter, y: int, text: str, right: bool, bg: QColor | None) -> int:
+            p.setFont(ovs.font(self.theme, 11))
+            w = self.width() - 12
+            text, bh = self.bubble_size(text)
+            rect = p.fontMetrics().boundingRect(0, 0, w - 20, 10000, Qt.TextWordWrap, text)
+            box = QRectF(6, y, min(w, rect.width() + 20), bh)
+            if right:
+                box.moveRight(self.width() - 6)
+            ovs.box(p, box, self.theme, bg, big=True)
+            p.setPen(ovs.colors(self.theme)["text"])
+            p.drawText(box.adjusted(10, 7, -10, -7), Qt.TextWordWrap, text)
+            return int(box.bottom())
+
+        def _sources(self, p: QPainter, y: int, right: bool) -> None:
+            from urllib.parse import urlparse
+            p.setFont(ovs.font(self.theme, 10))
+            fm = p.fontMetrics()
+            line_h = fm.height() + 6
+            c = ovs.colors(self.theme)
+            items = (self.sources or {}).get("sources", [])
+            rows = [(f"[{s['n']}] {s.get('title', '')}", (urlparse(s.get("url", "")).netloc or s.get("url", "")),
+                     "source", s.get("url", "")) for s in items]
+            rows.append(("Show what it read…", "", "sourcetext", (self.sources or {}).get("request", "")))
+            w = self.width() - 12
+            box = QRectF(6, y, w, line_h * len(rows) + 10)
+            if right:
+                box.moveRight(self.width() - 6)
+            ovs.box(p, box, self.theme, QColor(20, 20, 30, 225) if c["edge"].alpha() == 0 else None, big=True)
+            yy = box.top() + 5
+            for title, host, kind, target in rows:
+                r = QRectF(box.left() + 10, yy, box.width() - 20, line_h)
+                clickable = kind == "sourcetext" or str(target).startswith("http")
+                p.setPen(c["link"] if clickable else c["text"])
+                text = fm.elidedText(title, Qt.ElideRight, int(r.width() * (0.62 if host else 1.0)))
+                p.drawText(r, Qt.AlignVCenter | Qt.AlignLeft, text)
+                if host:
+                    p.setPen(c["muted"])
+                    p.drawText(r, Qt.AlignVCenter | Qt.AlignRight, fm.elidedText(host, Qt.ElideLeft, int(r.width() * 0.36)))
+                if clickable:
+                    self.hits.append((r, kind, target))
+                yy += line_h
+
+        # -------------------------------------------------------------- input
+        def _hit(self, pos: Any) -> tuple[str, str] | None:
+            for rect, kind, rid in self.hits:
+                if rect.contains(pos):
+                    return kind, rid
+            return None
+
+        def mousePressEvent(self, e: Any) -> None:
+            hit = self._hit(e.position())
+            if e.button() == Qt.RightButton:
+                if hit and hit[0] in ("mic", "spinner"):
+                    rect = next(r for r, k, i in self.hits if i == hit[1] and k == hit[0])
+                    self.menu = {"rid": hit[1], "anchor": QRectF(rect)}
+                    self.menu_until = time.time() + 10
+                    self.relayout()
+                else:
+                    self.menu = None
+                self.update()
+                return
+            if hit and hit[0] == "mic":
+                self.press_at = time.time()
+                self.hold_timer.start()
+
+        def mouseMoveEvent(self, e: Any) -> None:
+            if self.menu is not None:
+                hit = self._hit(e.position())
+                hover = hit[0][5:] if hit and hit[0].startswith("menu:") else None
+                if hover != self.menu.get("hover"):
+                    self.menu["hover"] = hover
+                    self.update()
+
+        def _start_hold(self) -> None:
+            self.holding = True
+            daemon.call("mic", None, lambda _e: None, action="hold")
+
+        def mouseReleaseEvent(self, e: Any) -> None:
+            if e.button() == Qt.RightButton:
+                return
+            hit = self._hit(e.position())
+            self.hold_timer.stop()
+            if hit and hit[0].startswith("menu:"):
+                action, rid = hit[0][5:], hit[1]
+                if action == "thoughts":
+                    open_popup("thoughts", request=rid, state=self.states.get(rid, {}))
+                else:
+                    method = {"suspend": "request.suspend", "close": "request.close",
+                              "interrupt": "request.interrupt"}[action]
+                    daemon.call(method, None, lambda _e: None, request=rid)
+                self.menu = None
+                self.update()
+                return
+            if self.menu is not None:          # any other click dismisses the menu
+                self.menu = None
+                self.update()
+            if self.holding:
+                self.holding = False
+                daemon.call("mic", None, lambda _e: None, action="release")
+                return
+            if not hit:
+                return
+            kind, rid = hit
+            if kind == "mic":
+                daemon.call("mic", None, lambda _e: None, action="click")
+                return
+            if kind == "source":
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(QUrl(rid))
+                self.response_until = max(self.response_until, time.time() + 20)
+                return
+            if kind == "sourcetext":
+                daemon.call("ui.popup", None, lambda _e: None, kind="sources", data={"request": rid})
+                return
+            st = self.states.get(rid, {})
+            if st.get("waiting") == "answer":
+                open_popup("answer", request=rid, question=st.get("detail", ""), choices=st.get("choices"))
+                return
+
+            def clicked(res: Any) -> None:
+                if res == "thoughts":
+                    open_popup("thoughts", request=rid, state=st)
+            daemon.call("indicator.click", clicked, lambda _e: None, request=rid)
+
+    # ------------------------------------------------------------------ timers
+    class Timers(QWidget):
+        def __init__(self) -> None:
+            super().__init__(None, flags_overlay() | Qt.WindowTransparentForInput)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setAttribute(Qt.WA_ShowWithoutActivating)
+            self.items: list[dict[str, Any]] = []
+            self.received = time.time()
+            t = QTimer(self)
+            t.setInterval(250)
+            t.timeout.connect(lambda: self.update() if self.isVisible() else None)
+            t.start()
+
+        def set_items(self, items: list[dict[str, Any]]) -> None:
+            self.items = items or []
+            self.received = time.time()
+            self.relayout()
+
+        def relayout(self) -> None:
+            enabled = (settings.get("indicators") or {}).get("timers", True)
+            if not self.items or not enabled:
+                self.hide()
+                return
+            w, h = 260, 40 * len(self.items) + 8
+            if use_layer:
+                self.resize(w, h)
+            else:
+                scr = target_screen().availableGeometry()
+                self.setGeometry(scr.x() + scr.width() - w - 16, scr.y() + scr.height() - h - 16, w, h)
+            present(self, ["bottom", "right"], (16, 16, 16, 16))
+
+        def paintEvent(self, _e: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            theme = getattr(self, "theme", None) or Theme()
+            p.setFont(ovs.font(theme, 12))
+            elapsed = time.time() - self.received
+            for i, t in enumerate(self.items):
+                box = QRectF(4, 4 + i * 40, self.width() - 12, 32)
+                ovs.box(p, box, theme)
+                remaining = max(0.0, float(t.get("remaining", 0)) - elapsed)
+                total = max(1.0, float(t.get("total", 1)))
+                frac = 1 - remaining / total
+                inset = 0 if ovs.radius(theme, 32) == 0 else 6
+                ovs.timer_bar(p, QRectF(box.left() + inset, box.bottom() - 5, (box.width() - 2 * inset) * frac, 4),
+                              theme, frac)
+                p.setPen(ovs.colors(theme)["text"])
+                label = t.get("label") or ("schedule" if t.get("kind") == "schedule" else "timer")
+                p.drawText(box.adjusted(12, 0, -12, -2), Qt.AlignVCenter | Qt.AlignLeft, label)
+                p.drawText(box.adjusted(12, 0, -12, -2), Qt.AlignVCenter | Qt.AlignRight, format_duration(remaining))
+            p.end()
+
+    # ------------------------------------------------------------------ screen marks
+    class Marks(QWidget):
+        def __init__(self) -> None:
+            super().__init__(None, flags_overlay() | Qt.WindowTransparentForInput)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setAttribute(Qt.WA_ShowWithoutActivating)
+            self.marks: list[dict[str, Any]] = []
+            self.tick = QTimer(self)
+            self.tick.setInterval(33)
+            self.tick.timeout.connect(self._tick)
+
+        def add(self, m: dict[str, Any]) -> None:
+            # the monitor the point is on (desktop coordinates), not the one the indicator uses
+            from PySide6.QtCore import QPoint
+            pt = QPoint(int(m.get("x", 0)), int(m.get("y", 0)))
+            scr = next((s for s in QGuiApplication.screens() if s.geometry().contains(pt)), None) or target_screen()
+            geo = scr.geometry() if use_layer else scr.virtualGeometry()
+            self.setGeometry(geo)
+            m = dict(m, until=time.time() + float(m.get("seconds", 4)), born=time.time())
+            self.marks.append(m)
+            present(self, ["top", "bottom", "left", "right"], on=scr)
+            self.tick.start()
+
+        def _tick(self) -> None:
+            now = time.time()
+            self.marks = [m for m in self.marks if m["until"] > now]
+            if not self.marks:
+                self.hide()
+                self.tick.stop()
+            else:
+                self.update()
+
+        def paintEvent(self, _e: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            geo = (getattr(self, "_screen", None) or QGuiApplication.primaryScreen()).geometry() if use_layer \
+                else self.geometry()
+            for m in self.marks:
+                age = time.time() - m["born"]
+                r = float(m.get("radius", 40)) * (1 + 0.08 * math.sin(age * 6))
+                c = QPointF(m["x"] - geo.x(), m["y"] - geo.y())
+                ovs.mark(p, c, r, getattr(self, "theme", None) or Theme(), age)
+            p.end()
+
+    # ------------------------------------------------------------------ themed popups
+    class Popup(QDialog):
+        """Every popup: the theme's own rounded frame and border (no system frame), dragged by any
+        empty spot, with a close button in the corner."""
+
+        def __init__(self, title: str) -> None:
+            super().__init__(None, Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+            self.setWindowTitle(title)
+            theme_palette(self)
+            self.setAutoFillBackground(False)
+            self.theme = Theme()
+            self.lay = QVBoxLayout(self)
+            pad = self.theme.padding
+            edge = int(skin.frame_pen(self.theme).widthF()) + 6
+            self.lay.setContentsMargins(pad + edge, pad + edge, pad + edge, pad + edge)
+            self.lay.setSpacing(pad)
+            from .gui.shell import WinButton
+            self.close_btn = WinButton("close", self)
+            self.close_btn.clicked.connect(self.close)
+
+        def resizeEvent(self, e: Any) -> None:
+            super().resizeEvent(e)
+            edge = int(skin.frame_pen(self.theme).widthF()) + 6
+            self.close_btn.move(self.width() - self.close_btn.width() - edge, edge)
+            self.close_btn.raise_()
+
+        def paintEvent(self, _e: Any) -> None:
+            p = QPainter(self)
+            skin.paint_frame(p, QRectF(self.rect()), self.theme, self.theme.page_background())
+            p.end()
+
+        def mousePressEvent(self, e: Any) -> None:
+            handle = self.windowHandle()
+            if e.button() == Qt.LeftButton and handle is not None:
+                handle.startSystemMove()
+                return
+            super().mousePressEvent(e)
+
+        def heading(self, text: str) -> QLabel:
+            lab = QLabel(self.theme.heading(text))
+            pixel = self.theme.settings.font_display in ("Press Start 2P",)     # wraps onto itself: body face
+            lab.setFont(self.theme.body_font(16, 700) if pixel else self.theme.display_font(14, 700))
+            lab.setStyleSheet(f"QLabel {{ color: {self.theme.text().name()}; padding-right: 30px; }}")
+            lab.setWordWrap(True)
+            self.lay.addWidget(lab)
+            return lab
+
+    class Thoughts(Popup):
+        current: "Thoughts | None" = None
+
+        @classmethod
+        def open(cls, rid: str, st: dict[str, Any]) -> None:
+            if cls.current is not None:
+                cls.current.close()
+            cls.current = cls(rid, st)
+            cls.current.show()
+
+        def __init__(self, rid: str, st: dict[str, Any]) -> None:
+            super().__init__(f"{st.get('agent_name', 'Agent')} — thoughts")
+            self.rid = rid
+            self.title = self.heading(f"{st.get('agent_name', 'Agent')} is {st.get('stage', 'thinking')}")
+            self.said = QLabel("")                  # what it was asked, as in the ledger
+            self.said.setWordWrap(True)
+            self.said.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.said.setStyleSheet(f"QLabel {{ color: {self.theme.text().name()}; }}")
+            self.said.hide()
+            self.lay.addWidget(self.said)
+            self.looking = QLabel("")
+            self.looking.setWordWrap(True)
+            self.lay.addWidget(self.looking)
+            self.text = CustomPlainTextEdit()
+            self.text.setReadOnly(True)
+            self.lay.addWidget(self.text, 1)
+            self.resize(560, 420)
+            daemon.call("request.thoughts", self._fill, lambda _e: None, request=rid)
+
+        def _fill(self, res: Any) -> None:
+            if not isinstance(res, dict):
+                return
+            if res.get("text"):
+                import html as _h
+                how = {"voice": "You said", "text": "You typed", "schedule": "Scheduled", "trigger": "Triggered by",
+                       "handoff": "Handed over"}.get(str(res.get("source", "text")).split(":", 1)[0], "Asked")
+                self.said.setText(f"<span style='color:{self.theme.muted().name()}'>{how}:</span> "
+                                  f"“{_h.escape(res['text'])}”")
+                self.said.show()
+            self.text.setPlainText("".join(t if t.endswith("\n") else t + "\n" for t in res.get("thoughts", [])))
+            if res.get("looking_at"):
+                self.looking.setText(f"Looking at: {res['looking_at']}")
+
+        def on_thought(self, data: dict[str, Any]) -> None:
+            if data.get("request") != self.rid:
+                return
+            cur = self.text.textCursor()
+            cur.movePosition(cur.MoveOperation.End)
+            cur.insertText(data.get("text", "") if data.get("append") else "\n" + data.get("text", ""))
+            self.text.setTextCursor(cur)
+            if data.get("looking_at"):
+                self.looking.setText(f"Looking at: {data['looking_at']}")
+
+    class SourcesBox(Popup):
+        """A researched answer with its sources: [n] markers jump to the source, titles open the page
+        in the browser, and each source shows the text Jeeves read from it (click to expand)."""
+        current: "SourcesBox | None" = None
+
+        def __init__(self, data: dict[str, Any]) -> None:
+            super().__init__(f"{data.get('agent_name', 'Jeeves')} — sources")
+            self.data = data
+            self.expanded: set[int] = set()
+            self.view = CustomTextBrowser()
+            self.view.setOpenLinks(False)
+            self.view.anchorClicked.connect(self._clicked)
+            self.lay.addWidget(self.view, 1)
+            self.setAttribute(Qt.WA_ShowWithoutActivating)
+            self.resize(720, 640)
+            self._render()
+
+        def _render(self) -> None:
+            t = self.theme
+            pos = self.view.verticalScrollBar().value()
+            self.view.setHtml(sources_html(self.data, self.expanded, t.accent().name()))
+            self.view.verticalScrollBar().setValue(pos)
+
+        def _clicked(self, url: Any) -> None:
+            s = url.toString()
+            if s.startswith("#s"):
+                self.view.scrollToAnchor(s[1:])
+            elif s.startswith("more:"):
+                n = int(s[5:])
+                self.expanded ^= {n}
+                self._render()
+            elif s.startswith(("http://", "https://")):
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(url)
+
+    class AnswerBox(Popup):
+        def __init__(self, rid: str | None, question: str, choices: list[str] | None = None) -> None:
+            super().__init__("Answer")
+            self.rid = rid
+            self.heading(question or "Your answer")
+            row = QHBoxLayout()
+            if choices:
+                for c in choices:
+                    b = CustomButton(str(c))
+                    b.clicked.connect(lambda _=False, c=c: self._send(str(c)))
+                    row.addWidget(b)
+                self.lay.addLayout(row)
+            self.edit = CustomLineEdit()
+            self.edit.returnPressed.connect(lambda: self._send(self.edit.text()))
+            self.lay.addWidget(self.edit)
+            send = CustomButton("Send")
+            send.clicked.connect(lambda: self._send(self.edit.text()))
+            self.lay.addWidget(send, alignment=Qt.AlignRight)
+            fit_to_width(self, 480)
+
+        def _send(self, text: str) -> None:
+            if text.strip():
+                daemon.call("request.answer", None, lambda _e: None, request=self.rid, text=text.strip())
+            self.close()
+
+    class TextRequest(Popup):
+        current: "TextRequest | None" = None
+
+        def __init__(self) -> None:
+            super().__init__("Jeeves — Text Request")
+            self.title = self.heading("Type a request (start with the agent's name)")
+
+            def got(res: Any) -> None:                # with a Main agent, it's who a request naming nobody goes to
+                v = (res or {}).get("value") if isinstance(res, dict) else None
+                agents, main = (v or {}).get("agents") or {}, ((v or {}).get("general") or {}).get("main_agent")
+                if main in agents:
+                    self.title.setText(self.theme.heading(f"Type a request (start with an agent's name, or it goes "
+                                                          f"to {agents[main].get('name', main)})"))
+            daemon.call("settings.get", got, lambda _e: None)
+            self.edit = CustomLineEdit()
+            self.edit.setPlaceholderText("Jeeves, set a timer for 10 minutes")
+            self.edit.returnPressed.connect(self._send)
+            self.lay.addWidget(self.edit)
+            fit_to_width(self, 560)
+
+        def showEvent(self, e: Any) -> None:
+            super().showEvent(e)
+            self.activateWindow()
+            self.edit.setFocus()
+
+        def _send(self) -> None:
+            text = self.edit.text().strip()
+            if text:
+                daemon.call("request.text", None, None, text=text)
+            self.close()
+
+    class Review(Popup):
+        current: "Review | None" = None
+
+        def __init__(self) -> None:
+            super().__init__("Jeeves — Manual Response Review")
+            self.items: list[dict[str, Any]] = []
+            self.index = 0
+            nav = QHBoxLayout()
+            self.prev = CustomButton("‹")
+            self.next = CustomButton("›")
+            self.prev.clicked.connect(lambda: self.step(1))
+            self.next.clicked.connect(lambda: self.step(-1))
+            self.where = QLabel("")
+            nav.addWidget(self.prev)
+            nav.addWidget(self.where, 1, Qt.AlignCenter)
+            nav.addWidget(self.next)
+            self.lay.addLayout(nav)
+            self.title = self.heading("")
+            self.body = CustomPlainTextEdit()
+            self.body.setReadOnly(True)
+            self.lay.addWidget(self.body, 1)
+            self.resize(720, 560)
+            self.reload()
+
+        def reload(self) -> None:
+            def got(res: Any) -> None:
+                if isinstance(res, list):
+                    self.items = res
+                    self.index = 0
+                    self.render()
+            daemon.call("history.list", got, lambda _e: None, limit=100)
+
+        def step(self, d: int) -> None:
+            if self.items:
+                self.index = max(0, min(len(self.items) - 1, self.index + d))
+                self.render()
+
+        def keyPressEvent(self, e: Any) -> None:
+            if e.key() == Qt.Key_Left:
+                self.step(1)
+            elif e.key() == Qt.Key_Right:
+                self.step(-1)
+            else:
+                super().keyPressEvent(e)
+
+        def render(self) -> None:
+            if not self.items:
+                self.title.setText("No responses yet")
+                self.body.setPlainText("")
+                self.where.setText("")
+                return
+            e = self.items[self.index]
+            self.where.setText(f"{self.index + 1} of {len(self.items)}  ·  {time.strftime('%a %H:%M:%S', time.localtime(e['time']))}")
+            self.title.setText(f"{e.get('agent')}: “{e.get('text')}”")
+            lines = [f"Response: {e.get('response') or '—'}", f"Status: {e.get('status')}",
+                     f"Function: {e.get('function')} {json.dumps(e.get('args'))}", "", "Everything it did:"]
+            for t in e.get("trace", []):
+                rest = {k: v for k, v in t.items() if k not in ("t", "kind")}
+                lines.append(f"  {t.get('t', 0):6.2f}s  {t.get('kind'):<14} {json.dumps(rest, default=str)}")
+            self.body.setPlainText("\n".join(lines))
+            self.prev.setEnabled(self.index < len(self.items) - 1)
+            self.next.setEnabled(self.index > 0)
+
+    class ImportApproval(Popup):
+        def __init__(self, req: dict[str, Any]) -> None:
+            super().__init__("Jeeves — Add functions?")
+            self.req = req
+            self.heading(f"“{req['app']}” wants to add {len(req['items'])} function(s) to Jeeves")
+            scroll = SmoothScrollArea()
+            scroll.setWidgetResizable(True)
+            inner = QWidget()
+            col = QVBoxLayout(inner)
+            self.boxes: dict[str, Any] = {}
+            for item in req["items"]:
+                f = item["function"]
+                cb = CustomCheckBox(f"{f['name']} — {f.get('description', '')}")
+                cb.setChecked(not item["problems"])
+                cb.setEnabled(not item["problems"])
+                self.boxes[f["name"]] = cb
+                col.addWidget(cb)
+                uses = ", ".join(item.get("default_functions_used") or []) or "none"
+                info = QLabel(f"Uses default functions: {uses}" +
+                              (f"\nReplaces the existing version from {req['app']}" if item.get("replaces") else "") +
+                              ("\nProblems: " + "; ".join(item["problems"]) if item["problems"] else ""))
+                info.setWordWrap(True)
+                info.setContentsMargins(28, 0, 0, 8)
+                col.addWidget(info)
+            col.addStretch(1)
+            scroll.setWidget(inner)
+            inner.setAutoFillBackground(False)
+            scroll.viewport().setAutoFillBackground(False)
+            self.lay.addWidget(scroll, 1)
+            row = QHBoxLayout()
+            deny = CustomButton("Deny all")
+            deny.clicked.connect(self._deny)
+            ok = CustomButton("Add selected")
+            ok.clicked.connect(self._approve)
+            row.addStretch(1)
+            row.addWidget(deny)
+            row.addWidget(ok)
+            self.lay.addLayout(row)
+            self.resize(640, 460)
+
+        def _approve(self) -> None:
+            names = [n for n, cb in self.boxes.items() if cb.isChecked()]
+            daemon.call("functions.decide", None, None, id=self.req["id"], approve=names)
+            self.close()
+
+        def _deny(self) -> None:
+            daemon.call("functions.decide", None, None, id=self.req["id"], deny_all=True)
+            self.close()
+
+    class Notice(QWidget):
+        def __init__(self, text: str) -> None:
+            super().__init__(None, flags_overlay() | Qt.WindowTransparentForInput)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.text = text
+            f = QFont()
+            self.setFont(f)
+            h = QFontMetrics(f).boundingRect(0, 0, 520 - 28, 2000, Qt.AlignCenter | Qt.TextWordWrap, text).height()
+            h = max(60, h + 28)                      # as tall as its text: long notices were cut off
+            if use_layer:
+                self.resize(520, h)
+            else:
+                scr = target_screen().availableGeometry()
+                self.setGeometry(scr.x() + (scr.width() - 520) // 2, scr.y() + 40, 520, h)
+            QTimer.singleShot(6000, self.close)
+            present(self, ["top"], (40, 0, 0, 0))
+
+        def paintEvent(self, _e: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            theme = Theme()
+            ovs.box(p, QRectF(self.rect()).adjusted(2, 2, -6, -6), theme, big=True)
+            p.setPen(ovs.colors(theme)["text"])
+            p.drawText(self.rect().adjusted(14, 0, -14, 0), Qt.AlignCenter | Qt.TextWordWrap, self.text)
+            p.end()
+
+    if popups:
+        indicator = timers_w = marks = None
+    else:
+        indicator = Indicator()
+        timers_w = Timers()
+        marks = Marks()
+    keep: list[Any] = []
+
+    def popup(w: Any) -> None:
+        keep.append(w)
+        w.finished.connect(lambda *_: keep.remove(w) if w in keep else None)
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    def on_event(topic: str, data: Any) -> None:
+        if not popups:
+            if topic == "level":
+                indicator.levels[data.get("request", "")] = (float(data.get("level") or 0), time.time())
+                return
+            if topic == "indicator":
+                if data.get("hidden"):              # this agent is visually muted
+                    data = dict(data, stage="idle")
+                indicator.update_state(data)
+            elif topic == "response":
+                if not data.get("hidden"):
+                    indicator.show_response(data.get("text", ""))
+            elif topic == "sources":
+                indicator.show_sources(data)
+            elif topic == "timers":
+                timers_w.set_items(data)
+            elif topic == "mark":
+                marks.add(data)
+            elif topic == "notice":
+                keep.append(Notice(data.get("text", "")))
+            elif topic == "settings":
+                load_settings()
+            return
+        if topic == "video":
+            from .video_player import VideoPlayer
+            if data.get("action") == "play":
+                if VideoPlayer.current is None:
+                    VideoPlayer.current = VideoPlayer(
+                        lambda method, **params: daemon.call(method, None, lambda _e: None, **params))
+                VideoPlayer.current.play(data, target_screen())
+            elif VideoPlayer.current is not None:
+                VideoPlayer.current.control(data)
+            return
+        if topic == "sources":
+            if not data.get("open"):              # shown on the on-screen overlay; the full view only on request
+                return
+            if SourcesBox.current is not None:
+                SourcesBox.current.close()
+            SourcesBox.current = SourcesBox(data)
+            keep.append(SourcesBox.current)
+            SourcesBox.current.show()
+            return
+        if topic == "popup":
+            d = data.get("data") or {}
+            if data.get("kind") == "answer":
+                popup(AnswerBox(d.get("request"), d.get("question", ""), d.get("choices")))
+            elif data.get("kind") == "sources":
+                def got(e: Any) -> None:
+                    if isinstance(e, dict) and e.get("sources"):
+                        on_event("sources", {"open": True, "request": e["id"], "agent_name": e.get("agent") or "Jeeves",
+                                             "question": e.get("text", ""), "answer": e.get("response", ""),
+                                             "sources": e["sources"]})
+                daemon.call("history.get", got, lambda _e: None, id=d.get("request"))
+            elif data.get("kind") == "thoughts":
+                Thoughts.open(d.get("request"), d.get("state") or {})
+        elif topic == "thoughts" and Thoughts.current is not None and Thoughts.current.isVisible():
+            Thoughts.current.on_thought(data)
+        elif topic == "show_review":
+            if Review.current is not None and Review.current.isVisible():
+                Review.current.reload()
+            else:
+                Review.current = Review()
+                popup(Review.current)
+        elif topic == "show_text_request":
+            TextRequest.current = TextRequest()
+            popup(TextRequest.current)
+        elif topic == "import_request":
+            popup(ImportApproval(data))
+        elif topic == "history" and Review.current is not None and Review.current.isVisible():
+            Review.current.reload()
+
+    gone_since = [0.0]
+
+    def watchdog() -> None:
+        # the daemon went away for good (not just a restart): exit
+        if daemon.online:
+            gone_since[0] = 0.0
+        elif not gone_since[0]:
+            gone_since[0] = time.time()
+        elif time.time() - gone_since[0] > 30:
+            app.quit()
+
+    dog = QTimer()
+    dog.setInterval(2000)
+    dog.timeout.connect(watchdog)
+    dog.start()
+
+    def on_connected(ok: bool) -> None:
+        if not ok:
+            return
+        if popups:
+            load_settings()                     # (the video player's monitor, the Main agent...)
+            daemon.call("functions.pending", lambda reqs: [popup(ImportApproval(r)) for r in (reqs or [])],
+                        lambda _e: None)
+        else:
+            load_settings()
+            daemon.call("indicator.state", lambda states: [indicator.update_state(s) for s in (states or [])],
+                        lambda _e: None)
+            daemon.call("timers.list", timers_w.set_items, lambda _e: None)
+
+    daemon.event.connect(on_event)
+    daemon.connected.connect(on_connected)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main(popups="--popups" in sys.argv))
