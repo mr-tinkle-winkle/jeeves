@@ -33,7 +33,8 @@ from .base import Arg, FunctionDef, FunctionError
 
 ARGS_SYSTEM = """You fill in the arguments of the one function {agent} (a voice assistant) runs. Every request is for
 this function; work out how the user wants it done. For an argument with listed values, use one of them;
-leave out arguments the request doesn't need. Only if it can't run without a missing detail, reply
+leave out arguments the request doesn't need. A request that is just a name or a title ("White Knuckle")
+is the value of the main argument. Only if it can't run without a missing detail, reply
 {{"question": "<ask for just that detail>"}}.
 Reply with JSON only: {{"args": {{...}}}}
 

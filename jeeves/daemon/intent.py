@@ -130,9 +130,12 @@ class IntentProcessor:
             except ModelUnavailable as exc:
                 if exc.queueable:
                     raise
+        whole = self._whole_request(f, agent, text, dict(said))
         if llm is None:
             if not guess_problems:
                 return Decision(f.name, guessed, 0.7, "", "keywords")
+            if whole is not None:
+                return Decision(f.name, whole, 0.6, "", "keywords")
             missing = [a.description or a.name for a in f.args if a.required and a.name not in guessed]
             return Decision(None, {}, 0.3, f"What {missing[0]}?" if missing else "How would you like that done?",
                             "keywords", guess_problems)
@@ -152,6 +155,11 @@ class IntentProcessor:
             if data is None:
                 err = "Your answer wasn't valid JSON."
             elif data.get("question") and not data.get("args"):
+                if whole is not None:
+                    # "White Knuckle." to a Steam agent: the request IS the game. Asking "What game?"
+                    # back made it answer every bare name with a question.
+                    notes.append("the whole request taken as the missing argument")
+                    return Decision(f.name, whole, 0.7, "", "model", notes)
                 return Decision(None, {}, 0.5, str(data["question"]), "model", notes)
             else:
                 given = data.get("args") if isinstance(data.get("args"), dict) else \
@@ -164,7 +172,22 @@ class IntentProcessor:
             messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": err + " Try again."}]
         if not guess_problems:
             return Decision(f.name, guessed, 0.6, "", "keywords", notes)
+        if whole is not None:
+            return Decision(f.name, whole, 0.6, "", "keywords", notes)
         return Decision(None, {}, 0.3, "How would you like that done?", "model", notes + guess_problems)
+
+    def _whole_request(self, f: FunctionDef, agent: dict[str, Any], text: str,
+                       have: dict[str, Any]) -> dict[str, Any] | None:
+        """A rudimentary agent told just a value ("White Knuckle", "lo-fi beats"): when one text argument is
+        all that's missing, what was said is that argument."""
+        missing = [a for a in f.args if a.required and a.name not in have and not a.said]
+        if len(missing) != 1 or missing[0].type not in ("string", "str", "text") or missing[0].choices:
+            return None
+        value = (self.strip_address(agent, text, polite=False) or "").strip().strip(".!?,").strip()
+        if not value or len(value.split()) > 12:
+            return None
+        args, problems = self.validate(f, {**have, missing[0].name: value})
+        return None if problems else args
 
     def args_prompt(self, agent: dict[str, Any], f: FunctionDef) -> str:
         from ..functions.rudimentary import ARGS_SYSTEM

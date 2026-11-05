@@ -343,8 +343,13 @@ class WakeRecognizer:
         self._last_partial = ""
         if words:
             self.speech_end = max(self.speech_end, max(float(w.get("end", 0)) for w in words))
-        return self.pick_names([(w["word"], float(w.get("conf", 0)),
-                                 float(w.get("end", 0)) - float(w.get("start", 0))) for w in words], self.names)
+        heard = [(w["word"], float(w.get("conf", 0)), float(w.get("end", 0)) - float(w.get("start", 0)))
+                 for w in words]
+        found = self.pick_names(heard, self.names)
+        if found:
+            log.info("wake model heard %s -> %s", " ".join(f"{w}({c:.2f}, {d:.2f}s)" for w, c, d in heard),
+                     ", ".join(f"{n} {c:.2f}" for n, c in found))
+        return found
 
     @staticmethod
     def long_enough(word: str, seconds: float | None) -> float:

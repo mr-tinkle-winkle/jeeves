@@ -154,3 +154,15 @@ def test_a_short_sound_isnt_a_confident_name():
     juh = W.pick_names([("jeeves", 1.0, 0.12)], ["jeeves"])[0][1]
     real = W.pick_names([("jeeves", 1.0, 0.42)], ["jeeves"])[0][1]
     assert juh < 0.3 and real == 1.0
+
+
+def test_a_rudimentary_agent_told_just_a_name_runs_it(engine):
+    from jeeves.daemon.intent import IntentProcessor
+    from jeeves.functions.base import Arg, FunctionDef
+    from tests.test_frame_rudimentary_proxy import _LLM, _Models
+    f = FunctionDef(name="launch_game", kind="full", title="Launch game", description="Starts a Steam game.",
+                    args=[Arg("game", "string", "which game")], impl=lambda ctx, game: game)
+    llm = _LLM(['{"question": "What game do you want to start?"}'])
+    ip = IntentProcessor(engine.settings, engine.registry, _Models(llm), engine.history)
+    d = ip.decide_one(engine.agents()["jeeves"], f, "White Knuckle.")
+    assert d.function == "launch_game" and d.args == {"game": "White Knuckle"} and not d.question
