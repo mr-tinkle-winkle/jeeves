@@ -8,7 +8,7 @@ A local-first voice assistant for Linux (NixOS). Named agents respond to spoken 
 
 ## Status
 
-First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (394 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
+First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (397 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
 
 ## Installing (NixOS)
 
@@ -114,6 +114,7 @@ jeeves overlay --popups   -- Review, Text Request, answers, thoughts, import app
 
 ## Decisions and rationale
 
+- **Jellyfin: your own account, your Jellyfin app.** Sign in with your username and password on the server (a friend's works: no admin or API key needed; `/Users/AuthenticateByName`, the token is kept in secrets.json, the password isn't). By default what you ask for is sent to your Jellyfin app the way Jellyfin's remote control does (`/Sessions/{id}/Playing?playCommand=PlayNow`, from where you left off; a book opens on its page) -- the app is started first if it isn't running (`jellyfin.app_command`, blank finds jellyfin-desktop / jellyfinmediaplayer / the Flatpak). With no app, or `jellyfin.open_in = player`, Jeeves' own player plays it as below.
 - **Jellyfin.** A `jellyfin` function (on by default) plays shows, movies, audiobooks and music from your Jellyfin server in Jeeves' player and opens its books: a show plays the episode named ("season 2 episode 5", "S02E05") or Jellyfin's Next Up; things continue where you left off; the player reports its position every 30 s and when closed (Jellyfin's start/progress/stopped reports, plus the position or a watched mark), so Continue Watching and Next Up stay right. Books are downloaded once to `~/.cache/jeeves/jellyfin` and opened with `xdg-open`. Settings > Listening & keys > Jellyfin: the server address, your user, an API key (kept in secrets.json). Requests naming Jellyfin skip the model (`jellyfin.parse_request`). Code: `jeeves/functions/partials/jellyfin.py`.
 - **Decoy words in the wake grammar.** With only the names (and `[unk]`) in its grammar, Vosk decoded any short sound as the nearest name -- "guh" came out as `jeeves(1.00)`, so neither the threshold nor the length check could tell. Everyday and sound-alike words (uh, go, gee, geez, cheese, believes, ...; `WakeRecognizer.DECOYS`, minus the call names' own words and words the model doesn't know) now compete with the names, so a sound has to be closer to the name than to any of them. `wake_word.decoys` turns it off. A device listener that isn't the microphone logs which device each records.
 - **One listener per microphone; a narrower near-miss band.** An agent set to listen to one exact device that is also the default microphone got a second listener on the same mic, so every name was heard twice (and Whisper ran twice). The microphone listener now hears for such agents (`Engine._is_the_mic`). A wake below the threshold opens a checked listen only within a quarter of it (it was half), and a name only the partial result glimpsed reports 0.4 -- so those no longer open listens at the default 0.6.

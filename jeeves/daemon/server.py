@@ -121,6 +121,31 @@ class Server:
             config.save_secret(name, value)
             return True
 
+        def jellyfin_sign_in(url: str, username: str, password: str) -> Any:
+            from ..functions.partials import jellyfin
+            got = jellyfin.sign_in(url, username, password)      # (the password itself isn't kept)
+            config.save_secret("jellyfin_token", got["token"])
+            e.settings.set("jellyfin.url", url.strip())
+            e.settings.set("jellyfin.user", got["user"])
+            e.settings.set("jellyfin.user_id", got["user_id"])
+            return {"user": got["user"]}
+
+        def jellyfin_status() -> Any:
+            from ..functions.partials import jellyfin
+            try:
+                j = jellyfin.from_settings(e.settings)
+                me = j.get("/Users/Me") or {}
+                app = j.app_session()
+                return {"ok": True, "user": me.get("Name", ""), "app": (app or {}).get("Client", ""),
+                        "app_command": " ".join(jellyfin.app_command(e.settings) or [])}
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "problem": str(exc)}
+
+        def jellyfin_sign_out() -> Any:
+            config.save_secret("jellyfin_token", None)
+            e.settings.set("jellyfin.user_id", "")
+            return True
+
         def audio_devices() -> Any:
             out = {"sources": [], "sinks": []}
             if which("pactl"):
@@ -200,6 +225,9 @@ class Server:
             "accounts.status": e.online.status,
             "accounts.login": lambda name: e.online.login(name),
             "accounts.set_key": accounts_set_key,
+            "jellyfin.sign_in": jellyfin_sign_in,
+            "jellyfin.status": jellyfin_status,
+            "jellyfin.sign_out": jellyfin_sign_out,
             "wikipedia.status": e.wikipedia.status,
             "wikipedia.update": e.wikipedia.update,
             "wikipedia.cancel": e.wikipedia.cancel,

@@ -31,45 +31,84 @@ KINDS = {"show": ["Series"], "movie": ["Movie"], "book": ["Book"], "audiobook": 
 TICKS = 10_000_000                       # Jellyfin counts time in 100 ns ticks
 
 
+def _base(url: str) -> str:
+    url = (url or "").strip().rstrip("/")
+    return url if re.match(r"https?://", url) or not url else "http://" + url
+
+
+def _auth(token: str = "") -> str:
+    import socket
+    host = socket.gethostname() or "computer"
+    return (f'MediaBrowser Client="Jeeves", Device="{host}", DeviceId="jeeves-{host}", Version="1.0"'
+            + (f', Token="{token}"' if token else ""))
+
+
+def sign_in(url: str, username: str, password: str, timeout: float = 15.0) -> dict[str, str]:
+    """Sign in as a user of the server -- yours on a friend's server; no admin or API key needed.
+    -> {"token", "user_id", "user"} (the token stays valid until signed out on the server)."""
+    base = _base(url)
+    if not base:
+        raise FunctionError("add the Jellyfin server's address first")
+    req = urllib.request.Request(f"{base}/Users/AuthenticateByName", method="POST",
+                                 data=json.dumps({"Username": username, "Pw": password}).encode(),
+                                 headers={"Authorization": _auth(), "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        raise FunctionError("Jellyfin didn't accept that username and password" if exc.code in (400, 401, 403)
+                            else f"Jellyfin answered {exc.code}") from exc
+    except OSError as exc:
+        raise FunctionError(f"can't reach Jellyfin at {base}: {getattr(exc, 'reason', exc)}") from exc
+    user = data.get("User") or {}
+    return {"token": data.get("AccessToken", ""), "user_id": user.get("Id", ""), "user": user.get("Name", username)}
+
+
 class Jellyfin:
-    def __init__(self, url: str, api_key: str, user: str = "", timeout: float = 10.0) -> None:
-        if not url or not api_key:
-            raise FunctionError("Jellyfin isn't set up: add its address and an API key in the Jellyfin settings")
-        self.url = url.rstrip("/")
-        if not re.match(r"https?://", self.url):
-            self.url = "http://" + self.url
-        self.key, self.user_name, self.timeout = api_key, user, timeout
-        self._uid = ""
+    def __init__(self, url: str, token: str, user: str = "", user_id: str = "", timeout: float = 10.0) -> None:
+        if not url or not token:
+            raise FunctionError("Jellyfin isn't set up: sign in in the Jellyfin settings (Listening & keys)")
+        self.url = _base(url)
+        self.key, self.user_name, self.timeout = token, user, timeout
+        self._uid = user_id
 
     # ------------------------------------------------------------------ HTTP
     def get(self, path: str, **params: Any) -> Any:
         q = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")}, doseq=True)
         req = urllib.request.Request(f"{self.url}{path}{'?' + q if q else ''}",
-                                     headers={"Authorization": f'MediaBrowser Token="{self.key}"',
-                                              "Accept": "application/json"})
+                                     headers={"Authorization": _auth(self.key), "Accept": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 body = r.read()
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
-                raise FunctionError("Jellyfin didn't accept the API key (the Jellyfin settings)") from exc
+                raise FunctionError("Jellyfin signed Jeeves out: sign in again in the Jellyfin settings") from exc
             raise FunctionError(f"Jellyfin answered {exc.code} for {path}") from exc
         except OSError as exc:
             raise FunctionError(f"can't reach Jellyfin at {self.url}: {getattr(exc, 'reason', exc)}") from exc
         return json.loads(body) if body else None
 
-    def post(self, path: str, data: dict[str, Any]) -> None:
-        req = urllib.request.Request(f"{self.url}{path}", data=json.dumps(data).encode(), method="POST",
-                                     headers={"Authorization": f'MediaBrowser Token="{self.key}"',
-                                              "Content-Type": "application/json"})
+    def post(self, path: str, data: dict[str, Any] | None = None, quiet: bool = True) -> bool:
+        req = urllib.request.Request(f"{self.url}{path}", data=json.dumps(data or {}).encode(), method="POST",
+                                     headers={"Authorization": _auth(self.key), "Content-Type": "application/json"})
         try:
             urllib.request.urlopen(req, timeout=self.timeout).close()
-        except OSError:
-            pass                                  # progress reports are best-effort
+            return True
+        except OSError as exc:
+            if not quiet:
+                raise FunctionError(f"Jellyfin refused {path.split('?')[0]}: {exc}") from exc
+            return False                          # progress reports are best-effort
 
     def user_id(self) -> str:
         if self._uid:
             return self._uid
+        try:                                      # a user's own token: who it is
+            me = self.get("/Users/Me")
+            if me and me.get("Id"):
+                self._uid = me["Id"]
+                return self._uid
+        except FunctionError:
+            pass
         users = self.get("/Users") or []
         if not users:
             raise FunctionError("Jellyfin has no users")
@@ -167,6 +206,35 @@ class Jellyfin:
         os.replace(tmp, path)
         return path
 
+    # ------------------------------------------------------------------ the Jellyfin app
+    def app_session(self) -> dict[str, Any] | None:
+        """A Jellyfin app of yours that can be remote-controlled (Jellyfin Media Player / Desktop, the web
+        app in a browser), preferring one on this computer, then the most recently used."""
+        import socket
+        host = (socket.gethostname() or "").lower()
+        sessions = self.get("/Sessions", controllableByUserId=self.user_id()) or []
+        apps = [s for s in sessions if s.get("SupportsRemoteControl") and s.get("Client") != "Jeeves"
+                and s.get("UserId") in (None, "", self.user_id())]
+        if not apps:
+            return None
+        return max(apps, key=lambda s: ((s.get("DeviceName") or "").lower() == host,
+                                        "media player" in (s.get("Client") or "").lower() or
+                                        "desktop" in (s.get("Client") or "").lower(),
+                                        s.get("LastActivityDate") or ""))
+
+    def play_in_app(self, session: dict[str, Any], item: dict[str, Any]) -> None:
+        """The app plays it -- from where you left off -- as if you'd picked it there."""
+        q = urllib.parse.urlencode({"playCommand": "PlayNow", "itemIds": item["Id"],
+                                    "startPositionTicks": int(((item.get("UserData") or {}).get(
+                                        "PlaybackPositionTicks")) or 0)})
+        self.post(f"/Sessions/{session['Id']}/Playing?{q}", quiet=False)
+
+    def show_in_app(self, session: dict[str, Any], item: dict[str, Any]) -> None:
+        """The app opens its page (a book: where its reader is)."""
+        q = urllib.parse.urlencode({"itemType": item.get("Type", ""), "itemId": item["Id"],
+                                    "itemName": item.get("Name", "")})
+        self.post(f"/Sessions/{session['Id']}/Viewing?{q}", quiet=False)
+
     def report(self, item: dict[str, Any], position_ms: int, stopped: bool = False, started: bool = False) -> None:
         """Playback reports, the way Jellyfin's own players send them (start, progress, stopped), so its
         "continue watching", Next Up and watched marks follow what you watched in Jeeves' player."""
@@ -244,7 +312,33 @@ def label(item: dict[str, Any]) -> str:
     return f"{item.get('Name')}" + (f" ({year})" if year and item.get("Type") == "Movie" else "")
 
 
+APP_COMMANDS = [["jellyfin-desktop"], ["jellyfinmediaplayer"], ["jellyfin-media-player"],
+                ["flatpak", "run", "org.jellyfin.JellyfinDesktop"],
+                ["flatpak", "run", "com.github.iwalton3.jellyfin-media-player"]]
+
+
+def app_command(settings: Any) -> list[str] | None:
+    import shlex
+    import shutil
+    own = str(settings.get("jellyfin.app_command", "") or "").strip()
+    if own:
+        return shlex.split(own)
+    for cmd in APP_COMMANDS:
+        if shutil.which(cmd[0]) and (cmd[0] != "flatpak" or _flatpak_has(cmd[2])):
+            return cmd
+    return None
+
+
+def _flatpak_has(app: str) -> bool:
+    import subprocess
+    try:
+        return subprocess.run(["flatpak", "info", app], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def from_settings(settings: Any) -> Jellyfin:
-    from ...config import get_secret          # the key lives in secrets.json (mode 600), not the settings
-    key = get_secret("jellyfin_api_key") or str(settings.get("jellyfin.api_key", "") or "")
-    return Jellyfin(str(settings.get("jellyfin.url", "") or ""), key, str(settings.get("jellyfin.user", "") or ""))
+    from ...config import get_secret          # the sign-in lives in secrets.json (mode 600), not the settings
+    token = get_secret("jellyfin_token") or get_secret("jellyfin_api_key") or ""
+    return Jellyfin(str(settings.get("jellyfin.url", "") or ""), token, str(settings.get("jellyfin.user", "") or ""),
+                    str(settings.get("jellyfin.user_id", "") or ""))

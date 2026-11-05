@@ -17,6 +17,7 @@ ITEMS = [
 EPISODES = [{"Id": f"e{s}{e}", "Name": f"Ep {s}.{e}", "Type": "Episode", "SeriesName": "The Office",
              "ParentIndexNumber": s, "IndexNumber": e} for s in (1, 2) for e in (1, 2, 3)]
 SEEN = []
+APPS = []
 
 
 class Fake(BaseHTTPRequestHandler):
@@ -37,6 +38,10 @@ class Fake(BaseHTTPRequestHandler):
             self.send_response(401)
             self.end_headers()
             return
+        if u.path == "/Users/Me":
+            return self._send({"Id": "u1", "Name": "mrtw"})
+        if u.path == "/Sessions":
+            return self._send(APPS)
         if u.path == "/Users":
             return self._send([{"Id": "u1", "Name": "mrtw", "Policy": {"IsAdministrator": True}}])
         if u.path == "/Items":
@@ -55,6 +60,14 @@ class Fake(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
+        if self.path == "/Users/AuthenticateByName":
+            body = json.loads(self.rfile.read(n))
+            ok = body == {"Username": "mrtw", "Pw": "pw"}
+            self.send_response(200 if ok else 401)
+            self.end_headers()
+            if ok:
+                self.wfile.write(json.dumps({"AccessToken": "KEY", "User": {"Id": "u1", "Name": "mrtw"}}).encode())
+            return
         SEEN.append(("POST", self.path, json.loads(self.rfile.read(n) or b"{}"), None))
         self.send_response(204)
         self.end_headers()
@@ -65,13 +78,15 @@ def server():
     httpd = HTTPServer(("127.0.0.1", 0), Fake)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     SEEN.clear()
+    APPS.clear()
     yield f"127.0.0.1:{httpd.server_port}"
     httpd.shutdown()
 
 
-def _setup(engine, url, monkeypatch):
+def _setup(engine, url, monkeypatch, open_in="player"):
     engine.settings.set("jellyfin.url", url)
-    monkeypatch.setenv("JEEVES_JELLYFIN_API_KEY", "KEY")
+    engine.settings.set("jellyfin.open_in", open_in)
+    monkeypatch.setenv("JEEVES_JELLYFIN_TOKEN", "KEY")
 
 
 def _plays(engine):
@@ -131,3 +146,30 @@ def test_a_book_is_downloaded_and_opened(engine, server, monkeypatch):
 def test_not_set_up_says_where(engine):
     res = engine.handle_text("Jeeves, play Dune on Jellyfin", wait=True)
     assert "Jellyfin isn't set up" in json.dumps(res)
+
+
+def test_signing_in_needs_no_api_key(server):
+    from jeeves.functions.base import FunctionError
+    from jeeves.functions.partials.jellyfin import sign_in
+    assert sign_in(server, "mrtw", "pw") == {"token": "KEY", "user_id": "u1", "user": "mrtw"}
+    with pytest.raises(FunctionError):
+        sign_in(server, "mrtw", "wrong")
+
+
+def test_it_plays_in_your_jellyfin_app(engine, server, monkeypatch):
+    _setup(engine, server, monkeypatch, open_in="app")
+    APPS.append({"Id": "sess1", "Client": "Jellyfin Media Player", "DeviceName": "x", "SupportsRemoteControl": True,
+                 "UserId": "u1"})
+    res = engine.handle_text("Jeeves, play the movie Dune on Jellyfin", wait=True)
+    play = [x for x in SEEN if x[0] == "POST" and x[1].startswith("/Sessions/sess1/Playing")]
+    assert play and "itemIds=m1" in play[0][1] and "startPositionTicks=12000000000" in play[0][1]
+    assert "in Jellyfin, from 20 minutes in" in str(res)
+
+
+def test_no_app_falls_back_to_the_player(engine, server, monkeypatch):
+    from jeeves.functions.partials import jellyfin as jf
+    _setup(engine, server, monkeypatch, open_in="app")
+    monkeypatch.setattr(jf, "app_command", lambda settings: None)
+    ev = _plays(engine)
+    engine.handle_text("Jeeves, play the movie Dune on Jellyfin", wait=True)
+    assert [d for t, d in ev if t == "video"]

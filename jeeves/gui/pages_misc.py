@@ -105,17 +105,45 @@ class GeneralPage(Page):
                     hint="Exported from your browser (e.g. with a 'Get cookies.txt' extension); used instead.")
 
         jf = self.section("Jellyfin")
-        self.b.text(jf, "Server address", "jellyfin.url", placeholder="http://my-server:8096",
-                    hint="Its address as this computer reaches it -- a Tailscale name works.")
-        self.b.text(jf, "Your user", "jellyfin.user", placeholder="blank: the server's administrator",
-                    hint="Whose watch progress and library to use.")
-        self.jf_key = CustomLineEdit()
-        self.jf_key.setEchoMode(CustomLineEdit.Password)
-        self.jf_key.setPlaceholderText("an API key: Jellyfin > Dashboard > API Keys (stored in secrets.json, mode 600)")
-        jf_save = CustomButton("Save key")
-        jf_save.clicked.connect(lambda: daemon.call("accounts.set_key", lambda _r: self.jf_key.clear(), None,
-                                                    name="jellyfin_api_key", value=self.jf_key.text().strip() or None))
-        jf.addWidget(row(self.jf_key, jf_save, stretch=0))
+        self.jf_url = self.b.text(jf, "Server address", "jellyfin.url", placeholder="http://friends-server:8096",
+                                  hint="Its address as this computer reaches it -- a Tailscale name works. "
+                                       "Yours or a friend's: you sign in with your own account on it.")
+        self.jf_user = CustomLineEdit()
+        self.jf_user.setPlaceholderText("your username on that server")
+        self.jf_pw = CustomLineEdit()
+        self.jf_pw.setEchoMode(CustomLineEdit.Password)
+        self.jf_pw.setPlaceholderText("password (only used to sign in; not kept)")
+        jf_in = CustomButton("Sign in")
+        self.jf_state = QLabel("")
+        self.jf_state.setWordWrap(True)
+
+        def signed(res: Any) -> None:
+            self.jf_pw.clear()
+            self.jf_state.setText(f"Signed in as {res.get('user')}.")
+            self.jf_check()
+
+        def failed(err: Any) -> None:
+            self.jf_state.setText(f"Couldn't sign in: {err}")
+        jf_in.clicked.connect(lambda: (self.jf_state.setText("Signing in..."), daemon.call(
+            "jellyfin.sign_in", signed, failed, url=self.jf_url.text().strip(), username=self.jf_user.text().strip(),
+            password=self.jf_pw.text())))
+        jf.addWidget(row(self.jf_user, self.jf_pw, jf_in, stretch=0))
+        jf.addWidget(self.jf_state)
+        self.b.choice(jf, "Play in", "jellyfin.open_in",
+                      [("The Jellyfin app (opened if it isn't running)", "app"), ("Jeeves' own player", "player")],
+                      hint="The app is sent what to play the way Jellyfin's remote control does; it has to be "
+                           "signed in to the same server as you.")
+        self.b.text(jf, "Jellyfin app command", "jellyfin.app_command",
+                    placeholder="blank: finds jellyfin-desktop / jellyfinmediaplayer / the Flatpak")
+
+        def checked(res: Any) -> None:
+            if not res.get("ok"):
+                self.jf_state.setText(res.get("problem", ""))
+                return
+            app = res.get("app") or ("none running; Jeeves opens " + (res.get("app_command") or "nothing (not found)"))
+            self.jf_state.setText(f"Signed in as {res.get('user')}. Jellyfin app: {app}.")
+        self.jf_check = lambda: daemon.call("jellyfin.status", checked, lambda _e: None)
+        QTimer.singleShot(1500, self.jf_check)
 
         a = self.section("Audio devices")
         self.mic = self.b.choice(a, "Microphone", "audio.microphone", [("Default", "")])

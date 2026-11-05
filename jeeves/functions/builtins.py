@@ -626,10 +626,10 @@ def youtube(ctx, action="play", query="", channel="", newest=False, seconds=None
               choices=["any", "show", "movie", "book", "audiobook", "music"]),
           Arg("season", "number", "For a show: which season", required=False, default=None),
           Arg("episode", "number", "For a show: which episode", required=False, default=None)],
-    how="Jellyfin's search finds it (the Jellyfin settings: the server's address, an API key, your user). "
-        "A show plays the episode you named, else the next one to watch; shows and movies continue where you "
-        "left off, in Jeeves' player, and Jellyfin is told how far you got. Books are downloaded once and "
-        "opened in your book reader.",
+    how="Jellyfin's search finds it (signed in as you: Listening & keys > Jellyfin). A show plays the episode "
+        "you named, else the next one to watch, continuing where you left off. It's sent to your Jellyfin app "
+        "(opened if it isn't running) the way Jellyfin's own remote control does; with no app, or set to, it "
+        "plays in Jeeves' player instead (and books are downloaded and opened in your book reader).",
     keywords=["jellyfin", "put on", "watch", "next episode", "season", "episode", "read the book", "movie"],
     examples=["Jeeves, put on The Office on Jellyfin.", "Jeeves, play Breaking Bad season 2 episode 5.",
               "Jeeves, play the movie Dune.", "Jeeves, read Project Hail Mary."],
@@ -650,6 +650,19 @@ def jellyfin(ctx, title, kind="any", season=None, episode=None):
                          int(episode) if episode is not None else None)
     ctx.think(f"Found: {jf.label(item)} ({item.get('Type')})", looking_at=j.web_page(item))
     ctx.entry["sources"] = [{"n": 1, "title": jf.label(item), "url": j.web_page(item), "text": "Jellyfin"}]
+    if item.get("Type") in ("MusicAlbum", "Folder", "BoxSet") and ctx.settings.get("jellyfin.open_in", "app") != "app":
+        raise FunctionError(f"{jf.label(item)} is a collection; ask for one song or one film in it")
+    if ctx.settings.get("jellyfin.open_in", "app") == "app":
+        app = _jellyfin_app(ctx, j)
+        if app is not None:
+            if item.get("Type") in ("Book",):
+                j.show_in_app(app, item)               # its page, where the reader is
+                return ctx.say(f"{jf.label(item)} is open in Jellyfin.")
+            j.play_in_app(app, item)
+            start = j.resume_ms(item)
+            where = f", from {start // 60000} minutes in" if start >= 60000 else ""
+            return ctx.say(f"Playing {jf.label(item)} in Jellyfin{where}.")
+        ctx.think("No Jellyfin app to send it to: using Jeeves' own player")
     if item.get("Type") == "Book":
         import subprocess
         from ..paths import cache_dir
@@ -672,6 +685,35 @@ def jellyfin(ctx, title, kind="any", season=None, episode=None):
     eng.run_async(lambda: j.report(item, start, started=True))
     where = f", from {start // 60000} minutes in" if start >= 60000 else ""
     return ctx.say(f"Here's {jf.label(item)}{where}.")
+
+
+def _jellyfin_app(ctx, j):
+    """Your Jellyfin app's session, opening the app first if it isn't running (up to ~25 s for it to sign
+    in to the server). None when there's no app."""
+    import subprocess
+    import time
+    from .partials import jellyfin as jf
+    app = j.app_session()
+    if app is not None:
+        return app
+    cmd = jf.app_command(ctx.settings)
+    if cmd is None:
+        return None
+    ctx.state("researching", "Opening Jellyfin")
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        return None
+    deadline = time.time() + float(ctx.settings.get("jellyfin.app_wait", 25))
+    while time.time() < deadline:
+        ctx.check_cancelled()
+        time.sleep(1.0)
+        app = j.app_session()
+        if app is not None:
+            time.sleep(1.5)                            # (it reports in a moment before it's ready for commands)
+            return app
+    return None
 
 
 @full(
