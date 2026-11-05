@@ -714,3 +714,35 @@ def spelled(answer: str) -> str:
         word = "".join(parts).lower()
         return word[:1].upper() + word[1:]        # letters said one by one: written as a name
     return a
+
+
+def related_names(ctx: Any, term: str, plan: dict[str, Any], limit: int = 2) -> list[str]:
+    """What the user may have meant: searched broadly (the word, and the word with what it's about), the
+    names in the results that come close to it -- "Wumpie" in a Parkour Reborn search turning up
+    "Wumpy Jump". Names that only share a letter or two don't count."""
+    import difflib
+    about = " ".join(plan.get("context") or [])
+    results = search_many(ctx, list(dict.fromkeys([term, f"{term} {about}".strip(), f"{about} {term[:4]}".strip()])))
+    low = term.lower()
+    scores: dict[str, float] = {}
+    for r in results:
+        text = f"{r.get('title', '')} {r.get('snippet', '')}"
+        words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]+", text)
+        for n in (1, 2, 3):
+            for i in range(len(words) - n + 1):
+                cand = " ".join(words[i:i + n])
+                c = cand.lower()
+                if c == low or len(c) < 3 or c in GENERIC:
+                    continue
+                ratio = max(difflib.SequenceMatcher(None, low, c).ratio(),
+                            difflib.SequenceMatcher(None, low, c.replace(" ", "")).ratio())
+                if ratio >= 0.72:
+                    scores[cand] = max(scores.get(cand, 0.0), ratio) + 0.05     # (seen again: a little more)
+    best = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    out: list[str] = []
+    for cand, _score in best:
+        if not any(cand.lower() in o.lower() or o.lower() in cand.lower() for o in out):
+            out.append(cand)
+        if len(out) >= limit:
+            break
+    return out

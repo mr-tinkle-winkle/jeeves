@@ -803,9 +803,10 @@ def research(ctx, question, depth=""):
 
 def _research_until_found(ctx, question: str, depth: str, earlier: str, plan: dict):
     """Research, and when nothing at all turns up about the word: other spellings of it ("Wumpie" ->
-    "Wumpy"), then asking you how it's spelled, then asking what it is -- and only then giving up.
+    "Wumpy"), then things close to it that a broader search finds, then asking you how it's spelled,
+    then asking what it is -- and only then giving up.
     (sources, notes), or (None, None) when it gave up (and said so)."""
-    from .research import found_nothing, run, spelled, spelling_variants, unknown_term
+    from .research import found_nothing, related_names, run, spelled, spelling_variants, unknown_term
 
     def attempt(q: str, d: str | None, out: dict) -> tuple[list, list]:
         try:
@@ -835,10 +836,16 @@ def _research_until_found(ctx, question: str, depth: str, earlier: str, plan: di
         got = again(re.sub(re.escape(term), alt, question, flags=re.I), f"Nothing about '{term}'; trying '{alt}'")
         if got:
             return got
+    # 2. something close to it that does exist (a search around it, names near the word)
+    for near in related_names(ctx, term, plan):
+        got = again(re.sub(re.escape(term), near, question, flags=re.I), f"Nothing about '{term}'; maybe '{near}'?")
+        if got:
+            ctx.say(f"I couldn't find “{term}”, but I think you mean “{near}”.")
+            return got
     user_here = str(ctx.entry.get("source", "text")).split(":", 1)[0] in ("text", "voice", "manual", "cli")
     if not user_here:
         return sources, notes                     # (a schedule or trigger: nobody to ask)
-    # 2. how is it spelled?
+    # 3. how is it spelled?
     answer = ctx.ask(f"I couldn't find anything about “{term}”. How is it spelled?", timeout=45)
     if answer:
         word = spelled(answer)
@@ -846,13 +853,13 @@ def _research_until_found(ctx, question: str, depth: str, earlier: str, plan: di
         if got:
             return got
         term = word
-    # 3. what is it?
+    # 4. what is it?
     answer = ctx.ask(f"Still nothing on “{term}”. Could you tell me a bit more about what it is?", timeout=60)
     if answer:
         got = again(f"{question} ({term}: {answer})", f"More about it: {answer}")
         if got:
             return got
-    # 4. give up
+    # 5. give up
     ctx.say(f"I'm sorry, I couldn't find anything about “{term}”.")
     return None, None
 

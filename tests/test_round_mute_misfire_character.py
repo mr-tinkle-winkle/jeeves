@@ -77,6 +77,7 @@ def test_research_tries_other_spellings_then_asks(engine, monkeypatch):
         return [{"title": "Something else", "url": "https://x", "text": "nothing relevant"}], [], []
     monkeypatch.setattr(research, "run", fake_run)
     monkeypatch.setattr(research, "spelling_variants", lambda ctx, t, q: ["Wumpey"])
+    monkeypatch.setattr(research, "related_names", lambda ctx, t, plan: [])
     engine.wait_for_answer = lambda ctx, q, choices, timeout: asked.append(q) or "W U M P Y"
     from jeeves.daemon.context import FunctionContext
     from jeeves.daemon.history import new_entry
@@ -95,6 +96,7 @@ def test_research_gives_up_after_asking(engine, monkeypatch):
         plan_out.update({"goal": q, "context": [], "terms": ["Zorbleflux"]}) if plan_out is not None else None,
         ([], [], []))[1])
     monkeypatch.setattr(research, "spelling_variants", lambda ctx, t, q: [])
+    monkeypatch.setattr(research, "related_names", lambda ctx, t, plan: [])
     asked = []
     engine.wait_for_answer = lambda ctx, q, choices, timeout: asked.append(q) or "no idea"
     from jeeves.daemon.context import FunctionContext
@@ -169,3 +171,27 @@ def test_plain_lines_are_said_in_character_keeping_the_facts(engine):
     ctx.agent = engine.agents()["jeeves"]
     ctx.say("Timer set for 4:00.")
     assert said[-1] == "Timer set for 4:00."
+
+
+def test_research_looks_for_what_you_may_have_meant(engine, monkeypatch):
+    from jeeves.functions import builtins, research
+    said = _said(engine)
+    monkeypatch.setattr(research, "search_many", lambda ctx, qs, count=6: [
+        {"title": "Wumpy Jump - Parkour Reborn Wiki", "url": "https://w/1", "snippet": "The Wumpy Jump is a trick."},
+        {"title": "Wumpus (game)", "url": "https://w/2", "snippet": "Hunt the Wumpus"}])
+    assert research.related_names(None, "Wumpie", {"context": ["Parkour Reborn"]})[0] in ("Wumpy", "Wumpy Jump")
+
+    def fake_run(ctx, q, depth=None, earlier="", plan_out=None):
+        if plan_out is not None:
+            plan_out.update({"goal": q, "context": ["Parkour Reborn"], "terms": [q.split()[-1]]})
+        if "wumpy" in q.lower():
+            return [{"title": "Wumpy Jump", "url": "https://w/1", "text": "The Wumpy Jump is a trick."}], [], []
+        return [], [], []
+    monkeypatch.setattr(research, "run", fake_run)
+    monkeypatch.setattr(research, "spelling_variants", lambda ctx, t, q: [])
+    engine.wait_for_answer = lambda *a, **k: (_ for _ in ()).throw(AssertionError("found it: no need to ask"))
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("what is a Wumpie", "jeeves", "text"))
+    sources, _ = builtins._research_until_found(ctx, "what is a Wumpie", "", "", {})
+    assert sources and "think you mean" in said[-1]
