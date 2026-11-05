@@ -33,6 +33,9 @@ def engine():
     # the tests' audio is synthetic tones, which the neural speech detector rightly doesn't take for
     # speech: judge it with the level meter (tests/test_vad.py covers the detector itself)
     e.settings.set("audio.speech_detector", "level")
+    # the tests' scripted models answer in order: rewording every plain line in character would use
+    # their answers up (tests/test_main_lobotomy_ticks.py covers it)
+    e.settings.set("persona.every_line", False)
     yield e
     e.timers.stop()
     e.pool.shutdown(wait=False, cancel_futures=True)

@@ -230,7 +230,7 @@ class Watcher:
         if say and (may_speak or self.focus):
             self.said.append((time.time(), say))
             self.last_spoke = time.time()
-            ctx.say(say)
+            ctx.say(say, in_character=True)
             eng.set_indicator(ctx.entry["id"], ctx.agent_id, "watching", seen[:80] if seen else "")
 
 

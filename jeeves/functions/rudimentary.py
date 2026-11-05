@@ -229,7 +229,7 @@ def run(ctx: Any, command: str = "") -> str:
         raise FunctionError(f"{os.path.basename(argv[0])} failed" + (f": {last.strip()[:200]}" if last else
                                                                     f" (exit status {proc.returncode})"))
     if text and len(text) <= 200 and text.count("\n") <= 2:
-        return ctx.say(text)                       # short output (date, a status): said
+        return ctx.say(text, in_character=True)    # short output (date, a status): said as it is
     if text:
         ctx.show(f"$ {shown}\n{text[-4000:]}")
         return ctx.say("Done. The output's on screen.")

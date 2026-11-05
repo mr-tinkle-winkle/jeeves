@@ -93,12 +93,19 @@ class FunctionContext:
 
     # ---- output ------------------------------------------------------------
     def show(self, text: str) -> None:
-        self.engine.publish("response", {"request": self.entry["id"], "agent": self.agent_id, "text": text})
+        from .engine import muted
+        self.engine.publish("response", {"request": self.entry["id"], "agent": self.agent_id, "text": text,
+                                         "hidden": muted(self.agent, "visual")})
 
-    def say(self, text: str) -> str:
+    def say(self, text: str, in_character: bool = False) -> str:
+        """Speak (and show) a line. in_character: it's already in the agent's own words (a model reply in
+        its character); anything else -- "Timer set for 2:00.", "Kitchen timer is done." -- is said the way
+        the character would say it (Agents > Personality > Every line in character)."""
         text = str(text).strip()
         if not text:
             return text
+        if not in_character and not self.dry_run:
+            text = self.engine.in_character(self, text)
         self.entry["response"] = (self.entry["response"] + "\n" + text).strip() if self.entry["response"] else text
         self.trace("say", text=text)
         if self.dry_run:

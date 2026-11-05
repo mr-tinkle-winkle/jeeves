@@ -224,8 +224,8 @@ def main(popups: bool = False) -> int:
                     indicator.theme = Theme()
                     timers_w.theme = indicator.theme
                     marks.theme = indicator.theme
-                indicator.relayout()
-                timers_w.relayout()
+                    indicator.relayout()
+                    timers_w.relayout()
         daemon.call("settings.get", got, lambda _e: None)
 
     # ------------------------------------------------------------------ indicator
@@ -1060,9 +1060,12 @@ def main(popups: bool = False) -> int:
     def on_event(topic: str, data: Any) -> None:
         if not popups:
             if topic == "indicator":
+                if data.get("hidden"):              # this agent is visually muted
+                    data = dict(data, stage="idle")
                 indicator.update_state(data)
             elif topic == "response":
-                indicator.show_response(data.get("text", ""))
+                if not data.get("hidden"):
+                    indicator.show_response(data.get("text", ""))
             elif topic == "sources":
                 indicator.show_sources(data)
             elif topic == "timers":
@@ -1080,7 +1083,7 @@ def main(popups: bool = False) -> int:
                 if VideoPlayer.current is None:
                     VideoPlayer.current = VideoPlayer(
                         lambda method, **params: daemon.call(method, None, lambda _e: None, **params))
-                VideoPlayer.current.play(data)
+                VideoPlayer.current.play(data, target_screen())
             elif VideoPlayer.current is not None:
                 VideoPlayer.current.control(data)
             return
@@ -1142,6 +1145,7 @@ def main(popups: bool = False) -> int:
         if not ok:
             return
         if popups:
+            load_settings()                     # (the video player's monitor, the Main agent...)
             daemon.call("functions.pending", lambda reqs: [popup(ImportApproval(r)) for r in (reqs or [])],
                         lambda _e: None)
         else:

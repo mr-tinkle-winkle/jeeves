@@ -192,7 +192,25 @@ class VideoPlayer(QWidget):
         self.resize(1100, 680)
 
     # ------------------------------------------------------------------ loading
-    def play(self, d: dict[str, Any]) -> None:
+    def to_screen(self, screen: Any) -> None:
+        """Open on this monitor (Indicators > Screen: the one the mouse is on, by default). On Wayland a
+        window can't place itself, but a fullscreen one goes to the output it's given before showing --
+        without this the compositor picked one, often not the one you were looking at."""
+        if screen is None:
+            return
+        self.winId()                                    # (the native window exists, to be given a screen)
+        handle = self.windowHandle()
+        if handle is not None and handle.screen() is not screen:
+            if self.isVisible():
+                self.hide()                             # a shown window only moves outputs when re-shown
+            handle.setScreen(screen)
+        geo = screen.availableGeometry()
+        w, h = min(self.width(), geo.width()), min(self.height(), geo.height())
+        self.setGeometry(geo.x() + (geo.width() - w) // 2, geo.y() + (geo.height() - h) // 2, w, h)
+
+    def play(self, d: dict[str, Any], screen: Any = None) -> None:
+        if d.get("fullscreen", True) is not None:       # a new video (not a quality change): where you are
+            self.to_screen(screen)
         self.page = d.get("page", "")
         self.title.setText(f"{d.get('title', '')}  —  {d.get('channel', '')}")
         self.split = bool(d.get("audio"))

@@ -26,7 +26,9 @@ from .memory import Memory
 SYSTEM = """Pick the function that handles this request to {agent}, a voice assistant, and fill in its arguments.
 Use only the functions below. For an argument with listed values, use one of them; leave out arguments you
 don't need. Take the likeliest meaning: people speak casually. Only if it can't be done without a missing
-detail (a timer with no length), reply {{"function": null, "question": "<ask for just that detail>"}}.{research}
+detail (a timer with no length), reply {{"function": null, "question": "<ask for just that detail>"}}.
+If it isn't a request to {agent} at all -- the user talking to someone else or thinking aloud ("yeah I guess
+man, the game tonight was crazy") -- reply {{"function": null, "not_for_me": true}}.{research}
 Reply with JSON only: {{"function": "<name>", "args": {{...}}}}
 
 {dictionary}
@@ -45,6 +47,20 @@ SAID_PREFIX = {
 }
 
 
+CHATTER_START = re.compile(r"^\W*(?:yeah|yea|yep|nah|naw|lol|lmao|haha|bro|dude|man|bruh|honestly|i mean|i guess|"
+                           r"anyway|anyways|oh my god|omg|wait what|no way|true|facts|for real|fr)\b", re.I)
+REQUEST_WORDS = re.compile(r"\b(?:can you|could you|would you|will you|please|set|start|stop|open|close|play|pause|"
+                           r"turn|show|tell me|what|when|where|who|why|how|look up|search|find|remind|make|launch|"
+                           r"run|read|watch|skip|cancel|remember|give me|put)\b", re.I)
+
+
+def looks_like_chatter(text: str) -> bool:
+    """Words after the agent's name that read like talk to someone else ("Jeeves... yeah I guess man, the
+    game tonight was crazy"): starts like conversation and asks for nothing."""
+    t = text.strip()
+    return bool(CHATTER_START.match(t)) and not REQUEST_WORDS.search(t) and not t.rstrip().endswith("?")
+
+
 def agent_id_of(ctx: Any) -> str | None:
     return getattr(ctx, "agent_id", None) if ctx is not None else None
 
@@ -58,6 +74,7 @@ class Decision:
     method: str = "keywords"          # model | keywords | rules
     notes: list[str] = field(default_factory=list)
     refusal: str = ""                 # say this instead of running anything (e.g. the function is off)
+    not_for_me: bool = False          # the words weren't meant for the agent (a misfire): do nothing
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -290,7 +307,8 @@ class IntentProcessor:
                 name = data.get("function")
                 conf = _num(data.get("confidence"), 0.7)
                 if not name:
-                    return Decision(None, {}, conf, str(data.get("question") or ""), "model", notes)
+                    return Decision(None, {}, conf, str(data.get("question") or ""), "model", notes,
+                                    not_for_me=bool(data.get("not_for_me")))
                 f = by_name.get(name)
                 if f is None:
                     err = f"'{name}' isn't one of the available functions."

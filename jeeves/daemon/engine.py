@@ -52,6 +52,16 @@ from .wikipedia import Wikipedia
 log = logging.getLogger("jeeves.engine")
 
 
+def muted(agent: dict[str, Any] | None, kind: str) -> bool:
+    """Agent > Voice > Mute: "audio" = it never speaks; "visual" = nothing of it on screen. (A
+    rudimentary agent's older Mute switch counts as audio.)"""
+    a = agent or {}
+    m = a.get("mute") or {}
+    if kind == "audio" and (a.get("rudimentary") or {}).get("enabled") and (a.get("rudimentary") or {}).get("mute"):
+        return True
+    return bool(m.get(kind)) if isinstance(m, dict) else False
+
+
 
 # What Whisper "hears" in silence or noise (it was trained on subtitles). Alone, these are dropped
 # instead of being treated as a request -- otherwise a wake word followed by a pause got an answer.
@@ -189,7 +199,7 @@ class Engine:
 
     def stop(self) -> None:
         self._stop.set()
-        self.abort()
+        self.abort()                                # (stops whatever it's saying)
         for lst in self.listeners.values():
             lst.stop()
         self.models.stop()
@@ -372,6 +382,8 @@ class Engine:
         session = next((s for s in self.sessions.values() if s.request_id == request_id), None)
         state["suspended"] = bool((ctx is not None and ctx.suspend_event.is_set()) or
                                   (session is not None and session.suspended))
+        if muted(agent, "visual") and stage not in ("asking", "unclear"):
+            state["hidden"] = True                   # visual mute: nothing on screen (unless it needs you)
         with self._lock:
             if stage == "idle":
                 self.indicators.pop(request_id, None)
@@ -801,7 +813,7 @@ class Engine:
         """The wake word model heard a call name. after: the audio since the name (after_voiced: the
         speech detector's verdict on each frame), words: how many words it heard after the name,
         name_audio: the name itself (speech recognition checks it was really said)."""
-        if not self.is_on():
+        if not self.is_on() or self.previewing():
             return
         cur = self.sessions.get(source)
         if cur is not None:
@@ -937,8 +949,7 @@ class Engine:
         self.run_async(self._play_wake_reply, s, agent, random.choice(phrases))
 
     def _play_wake_reply(self, s: Session, agent: dict[str, Any], phrase: str) -> None:
-        rud = agent.get("rudimentary") or {}
-        if rud.get("enabled") and rud.get("mute"):       # a muted rudimentary agent says nothing
+        if muted(agent, "audio"):                     # audio mute: no "Yes?" either
             s.deaf_until = 0.0
             return
         try:
@@ -1026,7 +1037,7 @@ class Engine:
         """Something was said and the wake word model heard no name in it. It misses some -- a name run
         together with other words ("hey Jeeves what time is it"), said fast, or over loud sound -- so
         speech recognition checks: a name near the start makes it a call after all."""
-        if self.sessions.get(source) is not None or self.answer_pending(source):
+        if self.sessions.get(source) is not None or self.answer_pending(source) or self.previewing():
             return
         try:
             text = self.transcribe(pcm)
@@ -1065,6 +1076,8 @@ class Engine:
         """Transcribe-everything path: Summary log, audio keyword triggers, and
         call names found in the transcript (may_call: whether a name in it may call an agent --
         hold-to-listen, Listener._may_call)."""
+        if self.previewing():
+            may_call = False                        # (a voice preview saying a name calls nobody)
         try:
             text = self.transcribe(pcm)
         except ModelUnavailable:
@@ -1503,6 +1516,7 @@ class Engine:
         if request_id:
             entry["id"] = request_id
         entry["dry_run"] = dry_run
+        entry["manual"] = manual
         self.history.add(entry)
         ctx = FunctionContext(self, agent_id, agent, entry, dry_run=dry_run)
         if not dry_run:
@@ -1574,6 +1588,11 @@ class Engine:
                     return
                 raise FunctionError(exc.reason) from exc
             ctx.trace("intent", **decision.to_dict())
+            if self._misfire(ctx, text, decision):
+                entry["function"], entry["status"] = None, "ignored"
+                ctx.trace("ignored", reason="not meant for the agent")
+                log.info("  '%s' wasn't meant for %s (talking to someone else?): ignored", text, ctx.agent_id)
+                return
             if decision.refusal:
                 entry["function"], entry["status"] = None, "refused"
                 entry["response"] = decision.refusal
@@ -1671,6 +1690,18 @@ class Engine:
             except FunctionError as exc:
                 ctx.trace("error", message=str(exc))
 
+    def _misfire(self, ctx: FunctionContext, text: str, decision: Decision) -> bool:
+        """A wake word that wasn't meant for the agent (Listening & Keys > Ignore talk that isn't for an
+        agent): the intent model says so, or it reads like conversation with someone else. Only for
+        requests a wake word started -- typed and manual ones are always meant."""
+        src = str(ctx.entry.get("source", ""))
+        if not src.startswith("voice:") or ctx.entry.get("manual") or src == "voice:queued":
+            return False
+        if not self.settings.get("general.ignore_chatter", True):
+            return False
+        from .intent import looks_like_chatter
+        return decision.not_for_me or (decision.function in (None, "local_response") and looks_like_chatter(text))
+
     def _worth_asking(self, question: str, text: str) -> bool:
         """A clarifying question is only worth it when it asks for something new -- not when it
         restates the request ("Do you want me to look up X?") or is empty."""
@@ -1721,8 +1752,8 @@ class Engine:
                       flags=re.I) or text                # "Jeeves: Certainly" -> "Certainly"
         text = speakable(text) or text               # no "asterisk asterisk", URLs or [2] read out
         self.jump_in.spoke(ctx.agent_id, text)       # part of the conversation even if TTS fails
-        if (agent.get("rudimentary") or {}).get("enabled") and (agent.get("rudimentary") or {}).get("mute"):
-            ctx.trace("muted")                       # a muted rudimentary agent: on screen only
+        if muted(agent, "audio"):
+            ctx.trace("muted")                       # audio mute: never speaks (on screen only)
             return
         try:
             pcm, rate = self._synth(agent, text)
@@ -1768,6 +1799,42 @@ class Engine:
             log.info("  speech stopped early (the request was closed or replaced)")
             ctx.trace("speech_stopped")
         ctx.check_cancelled()
+
+    def in_character(self, ctx: FunctionContext, line: str) -> str:
+        """A function's plain line ("Timer set for 2:00.") in the agent's own voice ("By my hourglass, two
+        minutes and not a grain more!"): every fact, number and name kept -- if the rewrite drops one, or
+        no model answers quickly, the plain line is said. Off per agent (Personality > Every line in
+        character), for agents without a personality, and for muted voices that say nothing anyway."""
+        from ..models import persona
+        agent = ctx.agent
+        if not persona.has_persona(agent) or not agent.get("persona_every_line", True) or \
+                not self.settings.get("persona.every_line", True) or (muted(agent, "audio") and muted(agent, "visual")):
+            return line
+        if len(line) > 400:
+            return line
+        try:
+            out = self.models.respond(
+                agent, line, system=(
+                    "Say the line below as yourself, in your own character and manner of speaking -- the way you "
+                    "would put it. Keep every fact exactly: each number, time, name and title stays word for word. "
+                    "Same meaning, about the same length (one or two sentences). Reply with the line only."),
+                ctx=None, raw=False, temperature=0.8, max_tokens=90, kind="step")
+        except Exception:  # noqa: BLE001 -- no model: the plain line
+            return line
+        out = (out or "").strip().strip('"“”')
+        if not out or len(out) > max(160, len(line) * 4):
+            return line
+        import re as _re
+        need = set(_re.findall(r"\d+(?::\d+)?", line))
+        if need and not need <= set(_re.findall(r"\d+(?::\d+)?", out)):
+            ctx.trace("in_character_dropped_facts", line=line, rewrite=out)
+            return line                              # a number went missing: the plain line is right
+        ctx.trace("in_character", line=line)
+        return out
+
+    def previewing(self) -> bool:
+        """A voice preview is playing (or just finished): no agent wakes meanwhile."""
+        return time.time() < getattr(self, "_preview_until", 0.0)
 
     def lobotomize(self, agent_id: str) -> dict[str, Any]:
         """Start an agent afresh: what it was doing stops, and everything it remembers goes -- its notes,
@@ -1907,6 +1974,8 @@ class Engine:
         name = agent.get("name") or "your assistant"
         pcm, rate = self._synth(agent, text or f"Hello, I'm {name}. This is how I sound.")
         pb = Playback(pcm, rate, self.voice_targets(agent))
+        # nothing wakes while a preview plays (it says the agent's name, and may be routed into the mic)
+        self._preview_until = time.time() + pb.seconds() + 2.0
         with self._lock:
             self.speaking += 1
         try:
@@ -1915,6 +1984,7 @@ class Engine:
             with self._lock:
                 self.speaking -= 1
                 self.speaking_until = time.time() + 0.5
+            self._preview_until = time.time() + 1.0
         return {"ok": pb.error is None, "error": pb.error, "seconds": round(len(pcm) / 2 / rate, 1)}
 
     def voice_speakers(self, voice_id: str) -> dict[str, Any]:
@@ -1955,6 +2025,8 @@ class Engine:
             s.ended = True
             self.set_indicator(s.request_id, s.agent_id, "idle")
         self.control.release_all()
+        from .audio import stop_all
+        stop_all()                                  # every voice too: wake-up replies, timers, previews
         self.publish("abort", {"stopped": len(ctxs)})
         return {"stopped": len(ctxs), "listening_stopped": len(sessions)}
 
