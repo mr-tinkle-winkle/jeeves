@@ -170,6 +170,7 @@ class Engine:
         self.speaking_until = 0.0
         self._reply_cache: dict[tuple, tuple[bytes, int]] = {}      # wake-up replies, synthesized once
         self._why_modes: dict[str, str] = {}
+        self._last_wake: dict[str, float] = {}                         # source -> when the wake model last called
         self._backup_guess: dict[str, str | None] = {}              # source -> the agent a missed call sounded like
         self._just_said: list[tuple[str, float, float]] = []          # (text, started, seconds) just spoken
         self._reply_tried: set[tuple] = set()
@@ -601,7 +602,10 @@ class Engine:
         keyword_triggers = any(t.get("event") == "audio_keyword" and t.get("source", "microphone") in (source, "both")
                                for t in self.triggers.all())
         names = self.call_names(source)
-        wake_on = self.listens_for_names() and not self.summary.enabled()
+        # (Summary used to switch the wake word model off -- names were then only found once a whole
+        # sentence was transcribed, seconds late and with no mic indicator while you talked. Both run now:
+        # the wake model hears calls, transcription feeds the Summary and catches names it missed.)
+        wake_on = self.listens_for_names()
         self._why_modes[source] = self._modes_reason(source, names, wake_on)
         if names and wake_on:
             engine = self.settings.get("wake_word.engine", "vosk")
@@ -624,14 +628,14 @@ class Engine:
             return "no agent listens here"
         if not self.listens_for_names():
             return "names aren't listened for"
-        if self.summary.enabled():
-            return "Summary is on: everything is transcribed and names are found in the text (no wake word model)"
         engine = self.settings.get("wake_word.engine", "vosk")
         if engine != "vosk":
             return f"wake_word.engine is {engine!r}: names are found in transcribed text (no wake word model)"
         if self.models.wake_spotter() is None:
             return ("the wake word model (wake_word.model) isn't chosen, installed or loadable: names are found "
                     "in transcribed text instead")
+        if self.summary.enabled():
+            return "the wake word model hears names; everything is transcribed for the Summary too"
         return "the wake word model hears names"
 
     def open_session(self, source: str, agent_id: str | None, mode: str) -> Session:
@@ -897,6 +901,7 @@ class Engine:
         name_audio: the name itself (speech recognition checks it was really said)."""
         if not self.is_on() or self.previewing():
             return
+        self._last_wake[source] = time.time()
         cur = self.sessions.get(source)
         if cur is not None:
             if cur.mode != "request" or time.time() - cur.started < 8:
@@ -1190,8 +1195,9 @@ class Engine:
         if self.previewing():
             may_call = False                        # (a voice preview saying a name calls nobody)
         rid, guess = f"heard-{source}", None
-        if may_call and self.sessions.get(source) is None and "vosk" not in self.detection_modes(source) \
-                and self.models.wake_spotter() is not None and self._might_be_a_call(source, pcm):
+        if may_call and self.sessions.get(source) is None and self.models.wake_spotter() is not None \
+                and time.time() - self._last_wake.get(source, 0.0) > len(pcm) / 32000 + 3.0 \
+                and self._might_be_a_call(source, pcm):
             # names come from the transcript here: show the spinner while speech recognition works
             guess = self._backup_guess.pop(source, None) or self.main_agent()
             if guess:
@@ -1214,15 +1220,25 @@ class Engine:
         self.jump_in.heard(source, text)
         if self.sessions.get(source) is not None or self.answer_pending(source):
             return
-        wake_by_text = (self.summary.enabled() or self.settings.get("wake_word.engine") == "stt-match"
-                        or self.models.wake_spotter() is None) and self.listens_for_names() \
-            or self.summary.enabled()
+        by_model = "vosk" in self.detection_modes(source)
+        # names in the text call an agent when there's no wake word model -- or, beside it, as the backup
+        # for a name it missed (like the backup path, which doesn't run while everything is transcribed)
+        wake_by_text = self.listens_for_names() and (not by_model or bool(self.settings.get("wake_word.stt_backup", True)))
         aid, rest, _ = self.split_agent(text, source)
         if aid is None:
             self.jump_in.consider(source)      # nobody was addressed: maybe an agent wants to chime in
             return
         if not wake_by_text or not may_call:   # the wake word model handles addressed requests / keys not held
             return
+        if by_model:
+            spoken = len(pcm) / (2 * 16000)
+            if time.time() - self._last_wake.get(source, 0.0) < spoken + 3.0:
+                return                         # the wake word model heard this call: it's been handled
+            found, rest2 = self.strip_name(text, aid, within=self.BACKUP_WORDS)
+            if not found:
+                return                         # a name mid-sentence is someone being talked about
+            rest = rest2
+            log.info("the wake word model missed a call; speech recognition heard: %s", text)
         if self._hears_itself(aid, text):
             return
         log.info("  heard (whole-sentence transcription, %s): %s", self._why_modes.get(source, "?"), text)

@@ -8,7 +8,7 @@ A local-first voice assistant for Linux (NixOS). Named agents respond to spoken 
 
 ## Status
 
-First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (380 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
+First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (382 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
 
 ## Installing (NixOS)
 
@@ -114,6 +114,7 @@ jeeves overlay --popups   -- Review, Text Request, answers, thoughts, import app
 
 ## Decisions and rationale
 
+- **Summary no longer switches the wake word model off.** With Summary on, everything was transcribed and names were only found in the finished transcript (seconds after you stopped, no mic indicator while you talked, and a request said without a pause after the name often lost). Now the wake word model hears calls as usual, transcription feeds the Summary, and a name the wake model missed is still caught from the transcript (near the start of what was said, not one it already handled).
 - **Which way names are heard, in the log.** Each source logs what it listens with when that changes ("microphone: listening with backup, vosk (the wake word model hears names)") and why the wake word model isn't used when it isn't (Summary on, `wake_word.engine` not vosk, no wake model installed); `jeeves status` has it under `wake`. Requests found in whole-sentence transcription log `heard (whole-sentence transcription, ...)`, and that path shows the spinner while speech recognition works when the utterance sounds like it has a name in it.
 - **Spinner while a missed call is checked.** When the wake word model misses the name and speech recognition checks the whole sentence for it (the backup path), the agent's spinner now shows for those seconds ("Checking what you said") instead of nothing until it answered.
 - **Build marker.** `jeeves/__init__.py` has `__build__`, bumped each round; `jeeves version` prints the installed and the running build, and the daemon and overlay log it when they start, so a rebuild that didn't pick the new code up is obvious. The indicator overlay logs every state change and what it ends up showing (`~/.local/state/jeeves/overlay-indicators.log`).

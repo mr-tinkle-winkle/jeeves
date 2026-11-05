@@ -75,3 +75,32 @@ def test_stopping_is_bounded(monkeypatch):
     server._exit_after(0.05)
     time.sleep(0.3)
     assert exited == [0]
+
+
+class _Spotter:
+    def quick_text(self, pcm):
+        return "jeeves set a timer"
+
+
+def test_summary_keeps_the_wake_word_model(engine, monkeypatch):
+    engine.settings.set("summary.enabled", True)
+    engine.settings.set("summary.sources", ["microphone"])
+    monkeypatch.setattr(engine.models, "wake_spotter", lambda: _Spotter())
+    modes = engine.detection_modes("microphone")
+    assert "vosk" in modes and "transcribe" in modes
+
+
+def test_a_call_the_wake_model_heard_isnt_run_twice(engine, monkeypatch):
+    engine.settings.set("summary.enabled", True)
+    monkeypatch.setattr(engine.models, "wake_spotter", lambda: _Spotter())
+    monkeypatch.setattr(engine.models, "stt", lambda agent=None: STT("Jeeves, set a timer for 3 minutes"))
+    engine._last_wake["microphone"] = time.time()
+    engine.on_utterance("microphone", b"\0" * 32000 * 2)
+    time.sleep(0.3)
+    assert not engine.timers.list()
+    engine._last_wake["microphone"] = 0.0                # the wake model missed it: the transcript calls
+    engine.on_utterance("microphone", b"\0" * 32000 * 2)
+    deadline = time.time() + 5
+    while time.time() < deadline and not engine.timers.list():
+        time.sleep(0.02)
+    assert engine.timers.list()
