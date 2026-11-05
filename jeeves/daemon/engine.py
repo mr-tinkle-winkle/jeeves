@@ -1208,14 +1208,44 @@ class Engine:
             if guess:
                 self.set_indicator(rid, guess, "idle")
 
+    def _light_transcripts(self, source: str) -> Any:
+        """The wake word model, when only the Summary needs everything transcribed: its rough text is good
+        enough for a summary, and costs a fraction of one core -- Whisper large on the CPU took every core
+        for seconds each time anyone in the room (or on the desktop) said anything, which is what kept the
+        CPU hot while Jeeves sat idle. Keyword triggers and jumping in still get Whisper.
+        (Settings: summary.transcriber = light | whisper.)"""
+        if self.settings.get("summary.transcriber", "light") != "light":
+            return None
+        if self.jump_in.wants(source) or any(t.get("event") == "audio_keyword" and
+                                             t.get("source", "microphone") in (source, "both")
+                                             for t in self.triggers.all()):
+            return None
+        return self.models.wake_spotter()
+
     def _on_utterance(self, source: str, pcm: bytes, may_call: bool) -> None:
+        spotter = self._light_transcripts(source)
+        if spotter is not None:
+            try:
+                rough = spotter.quick_text(pcm)
+            except Exception:  # noqa: BLE001
+                rough = ""
+            if rough.strip():
+                self.summary.add(source, rough)
+            # Whisper only for what might be a call (a name-like word near the start, not one the wake
+            # model already handled)
+            if not may_call or not self.listens_for_names() or self.sessions.get(source) is not None \
+                    or self.answer_pending(source) \
+                    or time.time() - self._last_wake.get(source, 0.0) < len(pcm) / 32000 + 3.0 \
+                    or not self._might_be_a_call(source, pcm):
+                return
         try:
             text = self.transcribe(pcm)
         except ModelUnavailable:
             return
         if not text.strip() or is_noise_text(text):
             return
-        self.summary.add(source, text)
+        if spotter is None:
+            self.summary.add(source, text)
         self.triggers.on_transcript(text, source)
         self.jump_in.heard(source, text)
         if self.sessions.get(source) is not None or self.answer_pending(source):

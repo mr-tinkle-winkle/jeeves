@@ -133,8 +133,11 @@ class GeneralPage(Page):
         self.b.number(m, "Recent requests remembered", "memory.recent_count", 0, 50, 1)
         self.b.number(m, "Long-term (RAM) notes kept", "memory.long_term_limit", 10, 10000, 10)
         self.b.check(m, "Summary log (keeps a transcript of what's heard)", "summary.enabled",
-                     hint="Mic and desktop audio are kept separate with timestamps. While on, the wake word "
-                          "model is off.")
+                     hint="Mic and desktop audio are kept separate with timestamps. The wake word model keeps "
+                          "listening for names.")
+        self.b.choice(m, "Transcribed with", "summary.transcriber",
+                      [("Wake word model (rough, next to no CPU)", "light"), ("Speech recognition (accurate, heavy)", "whisper")],
+                      hint="Speech recognition on the CPU uses every core for seconds whenever anything is said.")
         self.b.number(m, "Keep the last", "summary.minutes", 1, 1440, 5, 0, suffix=" min")
         self.b.list_text(m, "Sources", "summary.sources", placeholder="microphone, desktop")
         self.memory_view = CustomPlainTextEdit()

@@ -8,7 +8,7 @@ A local-first voice assistant for Linux (NixOS). Named agents respond to spoken 
 
 ## Status
 
-First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (382 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
+First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (383 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
 
 ## Installing (NixOS)
 
@@ -114,6 +114,7 @@ jeeves overlay --popups   -- Review, Text Request, answers, thoughts, import app
 
 ## Decisions and rationale
 
+- **Summary is transcribed lightly.** With Summary on, every utterance in the room or on the desktop went through Whisper (large on the CPU: ~8 cores for ~6 s each time), which is what heated the CPU while Jeeves sat idle. The Summary now uses the wake word model's rough transcript (`summary.transcriber = light`, the default; `whisper` for the accurate one); Whisper only runs when something sounds like a call the wake model missed, or when keyword triggers or jumping in need that source.
 - **Summary no longer switches the wake word model off.** With Summary on, everything was transcribed and names were only found in the finished transcript (seconds after you stopped, no mic indicator while you talked, and a request said without a pause after the name often lost). Now the wake word model hears calls as usual, transcription feeds the Summary, and a name the wake model missed is still caught from the transcript (near the start of what was said, not one it already handled).
 - **Which way names are heard, in the log.** Each source logs what it listens with when that changes ("microphone: listening with backup, vosk (the wake word model hears names)") and why the wake word model isn't used when it isn't (Summary on, `wake_word.engine` not vosk, no wake model installed); `jeeves status` has it under `wake`. Requests found in whole-sentence transcription log `heard (whole-sentence transcription, ...)`, and that path shows the spinner while speech recognition works when the utterance sounds like it has a name in it.
 - **Spinner while a missed call is checked.** When the wake word model misses the name and speech recognition checks the whole sentence for it (the backup path), the agent's spinner now shows for those seconds ("Checking what you said") instead of nothing until it answered.

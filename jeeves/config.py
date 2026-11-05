@@ -236,7 +236,8 @@ DEFAULTS: dict[str, Any] = {
     # "auto" (only when asked, trying each installed browser), "off", or a browser: firefox, chrome, chromium,
     # brave, vivaldi, edge, librewolf (optionally "firefox:PROFILE"); cookies_file = an exported cookies.txt
     "youtube": {"max_height": 1080, "cookies_from_browser": "auto", "cookies_file": ""},
-    "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"]},
+    # transcriber: light = the wake word model's rough text (next to no CPU) | whisper = speech recognition
+    "summary": {"enabled": False, "minutes": 60, "sources": ["microphone", "desktop"], "transcriber": "light"},
     # Watch the screen: seconds between looks (backs off while nothing changes), how chatty, time limit
     "watch": {"interval": 2.0, "talkativeness": 0.5, "max_minutes": 120},
     "control_mode": {"virtual_controller": False, "absolute_moves": True},

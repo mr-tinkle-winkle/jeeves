@@ -104,3 +104,12 @@ def test_a_call_the_wake_model_heard_isnt_run_twice(engine, monkeypatch):
     while time.time() < deadline and not engine.timers.list():
         time.sleep(0.02)
     assert engine.timers.list()
+
+
+def test_summary_alone_doesnt_run_whisper(engine, monkeypatch):
+    engine.settings.set("summary.enabled", True)
+    monkeypatch.setattr(engine.models, "wake_spotter", lambda: type("S", (), {"quick_text": lambda self, p: "nice weather today"})())
+    ran = []
+    monkeypatch.setattr(engine, "transcribe", lambda pcm, *a, **k: ran.append(1) or "nice weather today")
+    engine.on_utterance("microphone", b"\0" * 32000)
+    assert "nice weather" in engine.summary.text(5) and not ran
