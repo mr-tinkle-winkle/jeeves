@@ -242,18 +242,27 @@ def test_too_little_speech_is_not_a_request(engine):
     assert s.got_speech
 
 
-def test_unsure_wake_is_checked_by_speech_recognition(engine, monkeypatch):
-    import time
-    engine.run_async = lambda fn, *a: fn(*a)                         # run the check right away
+def test_unsure_wake_listens_at_once_and_speech_recognition_confirms_the_name(engine, monkeypatch):
+    """An unsure name starts listening straight away (checking first took seconds); the name's audio is
+    transcribed with the request, and if it wasn't the name, nothing happens and it spins away red."""
     heard = {"text": "hey jeeves what time is it"}
     monkeypatch.setattr(engine, "transcribe", lambda pcm, agent=None: heard["text"])
-    engine.on_wake("microphone", "jeeves", 0.4, [])                 # under 0.6 but over half of it
-    assert engine.sessions.get("microphone") is not None             # STT heard the name: awake
+    handled = []
+    monkeypatch.setattr(engine, "handle_text", lambda text, aid, **k: handled.append(text) or {})
+    engine.on_wake("microphone", "jeeves", 0.4, [], name_audio=[b"\1\0" * 480])   # under 0.6, over half
+    s = engine.sessions.get("microphone")
+    assert s is not None and s.wake_conf == 0.4 and not s.reply_at                # listening, no "Yes?"
+    s.frames, s.got_speech = [b"\1\0" * 480] * 20, True
     engine.sessions.clear()
+    engine._finish_session(s)
+    assert handled == ["what time is it"]                                         # the name was said
+    engine.on_wake("microphone", "jeeves", 0.4, [], name_audio=[b"\1\0" * 480])
+    s = engine.sessions.pop("microphone")
+    s.frames, s.got_speech = [b"\1\0" * 480] * 20, True
     heard["text"] = "the weather is nice"
-    engine.on_wake("microphone", "jeeves", 0.4, [])
-    assert engine.sessions.get("microphone") is None                 # not the name: ignored
-    engine.on_wake("microphone", "jeeves", 0.2, [])                  # way too unsure: not even checked
+    engine._finish_session(s)
+    assert len(handled) == 1 and engine.indicators[s.request_id]["stage"] == "misheard"
+    engine.on_wake("microphone", "jeeves", 0.2, [])                               # way too unsure: nothing
     assert engine.sessions.get("microphone") is None
 
 

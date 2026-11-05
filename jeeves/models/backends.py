@@ -269,7 +269,7 @@ class WakeRecognizer:
     one between listener threads crashed the daemon."""
 
     PARTIAL_EVERY = 2        # frames between partial-result checks (~60 ms)
-    PARTIAL_STABLE = 3       # checks in a row the name must stay in the partial result (~180 ms)
+    PARTIAL_STABLE = 2       # checks in a row the name must stay in the partial result (~120 ms)
 
     def __init__(self, model: Any, names: list[str]) -> None:
         self.model = model                  # keeps the shared model alive while in use

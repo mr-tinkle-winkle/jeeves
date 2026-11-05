@@ -70,7 +70,7 @@ def test_wake_then_request_flow(engine, monkeypatch):
 
 
 def test_wake_below_threshold_is_ignored(engine):
-    engine.on_wake("microphone", "jeeves", 0.3, [])
+    engine.on_wake("microphone", "jeeves", 0.2, [])           # (half the threshold or more: listens, unsure)
     assert "microphone" not in engine.sessions
 
 
