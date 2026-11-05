@@ -1509,9 +1509,6 @@ class Engine:
             time.sleep(0.2)
 
     def _decide(self, ctx: FunctionContext, text: str, skip: set[str]) -> Decision:
-        if self.registry.rudimentary(ctx.agent) is not None:      # no AI: what was said is the command
-            from ..functions.rudimentary import NAME
-            return Decision(NAME, {"command": text}, 1.0, method="rules")
         agent = dict(ctx.agent)
         if skip:
             agent["functions"] = dict(agent.get("functions") or {}, **{s: False for s in skip})
@@ -1544,7 +1541,8 @@ class Engine:
             threshold = float(self.settings.get("general.unclear_confidence", 0.45))
             if decision.function is not None and decision.confidence < threshold:
                 ctx.trace("low_confidence", confidence=decision.confidence)    # act on the best guess anyway
-            if decision.function is None and not self._worth_asking(decision.question, text):
+            if decision.function is None and not self._worth_asking(decision.question, text) and \
+                    self.registry.rudimentary(ctx.agent) is None:      # (a rudimentary agent only asks)
                 decision = self._best_guess(ctx, text, skip)                    # answer instead of asking
                 ctx.trace("intent", **decision.to_dict())
             rounds = 0

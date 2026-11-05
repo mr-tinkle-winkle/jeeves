@@ -126,17 +126,20 @@ class Registry:
             f = next((c for c in self.agent_commands(agent) if c.name == name), None)
         return f
 
-    @staticmethod
-    def rudimentary(agent: dict[str, Any] | None) -> FunctionDef | None:
+    def rudimentary(self, agent: dict[str, Any] | None) -> FunctionDef | None:
         """A rudimentary agent's one function (functions/rudimentary.py), or None."""
-        from . import rudimentary
-        return rudimentary.function_def(agent) if rudimentary.settings_of(agent) else None
+        from .rudimentary import function_name
+        name = function_name(agent)
+        if not name:
+            return None
+        f = self.functions.get(name)
+        if f is None:
+            from .commands import command_defs
+            f = next((c for c in command_defs(agent, set(self.functions)) if c.name == name), None)
+        return f if f is not None and f.kind == "full" else None
 
     def agent_commands(self, agent: dict[str, Any]) -> list[FunctionDef]:
-        """The agent's own commands (Agents > Commands), as functions -- or a rudimentary agent's one."""
-        rud = self.rudimentary(agent)
-        if rud is not None:
-            return [rud]
+        """The agent's own commands (Agents > Commands), as functions."""
         from .commands import command_defs
         return command_defs(agent, set(self.functions))
 

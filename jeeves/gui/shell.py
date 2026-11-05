@@ -1093,10 +1093,10 @@ class OverviewPage(Page):
         on = [f for f in functions if per.get(f["name"], f.get("globally_enabled", True))]
         some = ", ".join(f["title"] for f in on[:3])
         rud = agent.get("rudimentary") or {}
-        if rud.get("enabled"):                   # one function, no AI
-            self.cards["abilities"].set("Runs what you say",
-                                        f"{rud['program']} + your words" if rud.get("program") else "no AI, any command")
-            self.cards["brain"].set("No AI", "rudimentary: what you say is the command")
+        if rud.get("enabled") and rud.get("function"):     # one function: only how to run it
+            title = next((f["title"] for f in functions if f["name"] == rud["function"]), rud["function"])
+            self.cards["abilities"].set(title, "rudimentary: its only function")
+            self.cards["brain"].set(names.get(intent, intent or "—"), f"just fills in {title}")
         else:
             self.cards["abilities"].set(f"{len(on)} on" if functions else "…", some + ("…" if len(on) > 3 else ""))
         calls = ", ".join(agent.get("call_names") or [])

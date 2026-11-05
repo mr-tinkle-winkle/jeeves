@@ -270,23 +270,17 @@ class AgentsPage(Page):
             self.model_boxes[kind] = c
             g.addWidget(row(label(title, False), c, stretch_last=True))
 
-        # --- a rudimentary agent: one function, no AI
+        # --- a rudimentary agent: just one function, so it only works out how you want it done
         g = self._group(f, "Rudimentary agent")
-        self.rud_on = CustomCheckBox("Rudimentary: no AI, whatever I say after its name is run as a command")
+        self.rud_on = CustomCheckBox("Rudimentary: this agent has just one function")
         g.addWidget(self.rud_on)
-        g.addWidget(label("“Box, firefox” runs firefox; “Box, systemctl dash dash user restart pipewire” runs "
-                          "systemctl --user restart pipewire. Spoken words are tidied: dash → -, dot → ., "
-                          "slash → /, tilde → ~. Typed requests run exactly as typed. No shell (no pipes or ;)."))
-        self.rud_program = CustomLineEdit()
-        self.rud_program.setPlaceholderText("e.g. playerctl  (empty: the first word said is the program)")
-        g.addWidget(row(label("Always run this program, with what I say as its arguments", False),
-                        self.rud_program, stretch_last=True))
-        self.rud_confirm = combo()
-        for text, key in (("Only for risky ones (rm, dd, kill, reboot, sudo…)", "risky"), ("Always", "always"),
-                          ("Never", "never")):
-            self.rud_confirm.addItem(text, key)
-        self.rud_terminal = CustomCheckBox("Run in a terminal window (to watch it, or for sudo)")
-        g.addWidget(row(label("Ask before running", False), self.rud_confirm, self.rud_terminal))
+        g.addWidget(label("It never has to work out which function you mean, only how you want this one done, so "
+                          "it's quicker: a function with nothing to fill in runs as soon as you say the agent's "
+                          "name; one with details (a timer's length) has them filled in from a short prompt about "
+                          "that function alone, and it asks if one is missing. It never chats or does anything "
+                          "else."))
+        self.rud_function = combo()
+        g.addWidget(row(label("Its function", False), self.rud_function, stretch_last=True))
         self.rud_on.toggled.connect(self._rudimentary)
 
         # --- functions
@@ -382,6 +376,7 @@ class AgentsPage(Page):
             cb = CustomCheckBox(f"{f['title']} — {f['description'][:90]}")
             self.func_checks[f["name"]] = cb
             self.func_layout.addWidget(cb)
+        self._fill_rud_functions()
         self.select(self.current)
         if self.on_loaded:
             self.on_loaded()
@@ -519,9 +514,7 @@ class AgentsPage(Page):
         self.commands.load(a.get("commands") or [])
         rud = a.get("rudimentary") or {}
         self.rud_on.setChecked(bool(rud.get("enabled")))
-        self.rud_program.setText(rud.get("program") or "")
-        self.rud_confirm.setCurrentIndex(max(0, self.rud_confirm.findData(rud.get("confirm") or "risky")))
-        self.rud_terminal.setChecked(bool(rud.get("terminal")))
+        self._fill_rud_functions(a, rud.get("function") or "")
         self._rudimentary(self.rud_on.isChecked())
         from ..functions.custom_sources import to_text
         cs = a.get("custom_sources") or {}
@@ -601,11 +594,33 @@ class AgentsPage(Page):
                                     f"{n} site{'s' if n != 1 else ''}." if n else "")
 
     def _rudimentary(self, on: bool) -> None:
-        """A rudimentary agent has just its one function: the rest of Abilities doesn't apply."""
-        for w in (self.rud_program, self.rud_confirm, self.rud_terminal):
-            w.setEnabled(on)
-        for w in (self.func_box, self.commands):
-            w.setEnabled(not on)
+        """A rudimentary agent has just its one function: the function list doesn't apply (its own
+        commands do: one of them can be its function)."""
+        self.rud_function.setEnabled(on)
+        self.func_box.setEnabled(not on)
+
+    def _fill_rud_functions(self, agent: dict[str, Any] | None = None, want: str | None = None) -> None:
+        """Every full function, and this agent's own commands."""
+        from ..functions.commands import function_name
+        if want is None:
+            want = self.rud_function.currentData() or ""
+        agent = agent if agent is not None else self.agents.get(self.current or "", {})
+        taken = {f["name"] for f in self.functions}
+        items = [(f"{f['title']}", f["name"]) for f in sorted(self.functions, key=lambda f: f["title"])]
+        for spec in agent.get("commands") or []:
+            if isinstance(spec, dict) and spec.get("name") and spec.get("command"):
+                name = function_name(spec["name"], taken)
+                taken.add(name)
+                items.append((f"{spec['name']} (its command)", name))
+        self.rud_function.blockSignals(True)
+        self.rud_function.clear()
+        self.rud_function.addItem("— pick one —", "")
+        for text, key in items:
+            self.rud_function.addItem(text, key)
+        if want and self.rud_function.findData(want) < 0:
+            self.rud_function.addItem(f"{want} (not found)", want)
+        self.rud_function.setCurrentIndex(max(0, self.rud_function.findData(want)))
+        self.rud_function.blockSignals(False)
 
     def _memory_enabled(self, on: bool) -> None:
         for w in (self.mem_recent, self.mem_notes, self.mem_own):
@@ -669,9 +684,7 @@ class AgentsPage(Page):
             "voice_style": self._style(),
             "functions": {name: cb.isChecked() for name, cb in self.func_checks.items()},
             "commands": self.commands.value(),
-            "rudimentary": {"enabled": self.rud_on.isChecked(), "program": self.rud_program.text().strip(),
-                            "confirm": self.rud_confirm.currentData() or "risky",
-                            "terminal": self.rud_terminal.isChecked()},
+            "rudimentary": {"enabled": self.rud_on.isChecked(), "function": self.rud_function.currentData() or ""},
             "jeenius": self.jeenius.currentData() or None,
             "custom_sources": {"enabled": self.sources_on.isChecked(),
                                "sites": parse_sources(self.sources_edit.toPlainText())[0]},

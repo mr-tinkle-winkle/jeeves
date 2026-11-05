@@ -74,6 +74,9 @@ class IntentProcessor:
 
     # ---- public ----------------------------------------------------------
     def decide(self, agent: dict[str, Any], text: str, ctx: Any = None) -> Decision:
+        one = self.registry.rudimentary(agent)
+        if one is not None:
+            return self.with_said(self.decide_one(agent, one, text, ctx), agent, text)
         functions = [f for f in self.registry.enabled_for(agent) if not self._blocked(f, text)]
         ruled = self.rule_decide(agent, text, functions)
         if ruled is not None:
@@ -90,6 +93,67 @@ class IntentProcessor:
         if llm is not None and functions:
             return self.with_said(self._with_model(llm, agent, text, functions, ctx), agent, text)
         return self.with_said(self.keyword_decide(agent, text, functions), agent, text)
+
+    # ---- a rudimentary agent: one function, only HOW to run it ---------------
+    def decide_one(self, agent: dict[str, Any], f: FunctionDef, text: str, ctx: Any = None) -> Decision:
+        """functions/rudimentary.py: nothing to fill in -> run it; unmistakable -> rules/keywords; else the
+        intent model fills in the arguments from a prompt about this function alone (no thinking)."""
+        said = self.said_args(f, agent, text)
+        if all(a.said for a in f.args):
+            return Decision(f.name, dict(said), 1.0, "", "rules")
+        ruled = self.rule_decide(agent, text, [f])
+        if ruled is not None and ruled.function == f.name:
+            return ruled
+        guessed, guess_problems = self.validate(f, {**self._guess_args(f, text, agent), **said})
+        llm = None
+        if self.models is not None:
+            from ..models.manager import ModelUnavailable
+            try:
+                llm = self.models.llm("intent", agent)
+            except ModelUnavailable as exc:
+                if exc.queueable:
+                    raise
+        if llm is None:
+            if not guess_problems:
+                return Decision(f.name, guessed, 0.7, "", "keywords")
+            missing = [a.description or a.name for a in f.args if a.required and a.name not in guessed]
+            return Decision(None, {}, 0.3, f"What {missing[0]}?" if missing else "How would you like that done?",
+                            "keywords", guess_problems)
+        from ..models.backends import BackendError
+        messages = [{"role": "system", "content": self.args_prompt(agent, f)},
+                    {"role": "user", "content": self.strip_address(agent, text, polite=False) or text}]
+        notes: list[str] = []
+        for _attempt in range(2):
+            try:
+                raw = llm.chat(messages, max_tokens=200, temperature=0.1, json_mode=True, think=False,
+                               on_token=(lambda t: ctx.think(t, append=True)) if ctx else None,
+                               cancelled=ctx.is_cancelled if ctx else None)
+            except BackendError as exc:
+                notes.append(f"intent model failed ({exc}); used keyword matching")
+                break
+            data = _parse_json(raw)
+            if data is None:
+                err = "Your answer wasn't valid JSON."
+            elif data.get("question") and not data.get("args"):
+                return Decision(None, {}, 0.5, str(data["question"]), "model", notes)
+            else:
+                given = data.get("args") if isinstance(data.get("args"), dict) else \
+                    {k: v for k, v in data.items() if k not in ("function", "confidence")}
+                args, problems = self.validate(f, {**given, **said})
+                if not problems:
+                    return Decision(f.name, args, 0.9, "", "model", notes)
+                err = "Problems: " + "; ".join(problems)
+            notes.append(err)
+            messages += [{"role": "assistant", "content": raw}, {"role": "user", "content": err + " Try again."}]
+        if not guess_problems:
+            return Decision(f.name, guessed, 0.6, "", "keywords", notes)
+        return Decision(None, {}, 0.3, "How would you like that done?", "model", notes + guess_problems)
+
+    def args_prompt(self, agent: dict[str, Any], f: FunctionDef) -> str:
+        from ..functions.rudimentary import ARGS_SYSTEM
+        examples = {k: v for k, v in self.examples().items() if k == f.name}
+        return ARGS_SYSTEM.format(agent=agent.get("name", "Jeeves"),
+                                  dictionary=self.registry.dictionary_text([f], examples, brief=True))
 
     # ---- the request in the user's own words ------------------------------
     def said_text(self, f: FunctionDef, agent: dict[str, Any], text: str) -> str:
@@ -173,9 +237,13 @@ class IntentProcessor:
         doesn't wait for a thousand words to be read."""
         if self.models is None:
             return
+        one = self.registry.rudimentary(agent)
+        if one is not None and all(a.said for a in one.args):
+            return                                  # nothing for a model to do
         llm = self.models.llm("intent", agent)
         functions = [f for f in self.registry.enabled_for(agent)]
-        llm.chat([{"role": "system", "content": self.system_prompt(agent, functions)},
+        system = self.args_prompt(agent, one) if one is not None else self.system_prompt(agent, functions)
+        llm.chat([{"role": "system", "content": system},
                   {"role": "user", "content": "hello"}], max_tokens=1, temperature=0.0, json_mode=True,
                  think=False)
 

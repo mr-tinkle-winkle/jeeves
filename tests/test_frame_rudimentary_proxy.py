@@ -103,57 +103,69 @@ def test_youtube_formats_go_through_the_proxy_but_playlists_dont():
 
 
 # ---------------------------------------------------------------------------- rudimentary agents
-def test_spoken_commands_are_tidied():
-    from jeeves.functions.rudimentary import argv_for, risky, tidy_spoken
-    assert tidy_spoken("Firefox.") == ["firefox"]
-    assert tidy_spoken("systemctl dash dash user restart pipewire") == ["systemctl", "--user", "restart", "pipewire"]
-    assert tidy_spoken("ls dash la slash tmp") == ["ls", "-la", "/tmp"]
-    assert tidy_spoken("cp notes dot txt tilde slash backup") == ["cp", "notes.txt", "~/backup"]
-    assert tidy_spoken("play dash pause") == ["play-pause"]
-    assert argv_for("next", "playerctl") == ["playerctl", "next"]
-    assert argv_for("", "playerctl") == ["playerctl"]                  # its program, no arguments
-    assert argv_for("echo 'two words'", spoken=False) == ["echo", "two words"]   # typed: exactly as typed
-    assert risky(["rm", "-rf", "x"]) and risky(["systemctl", "reboot"]) and not risky(["firefox"])
+class _LLM:
+    def __init__(self, answers):
+        self.answers, self.seen, self.kw = list(answers), [], []
+
+    def loaded(self):
+        return True
+
+    def chat(self, messages, **kw):
+        self.seen.append(messages)
+        self.kw.append(kw)
+        return self.answers.pop(0)
 
 
-def test_a_rudimentary_agent_runs_what_it_is_told_without_any_ai(engine):
-    from jeeves.functions.rudimentary import NAME
-    engine.settings.set("agents.jeeves.rudimentary", {"enabled": True, "program": "", "confirm": "risky"})
+class _Models:
+    def __init__(self, llm):
+        self._llm, self.suspended = llm, {}
+
+    def llm(self, kind, agent=None):
+        return self._llm
+
+
+def test_a_rudimentary_agent_only_works_out_how_to_run_its_one_function(engine):
+    from jeeves.daemon.intent import IntentProcessor
+    engine.settings.set("agents.jeeves.rudimentary", {"enabled": True, "function": "timers"})
     agent = engine.agents()["jeeves"]
-    assert [f.name for f in engine.registry.enabled_for(agent)] == [NAME]      # its only function
-    engine.intent.decide = lambda *a, **k: (_ for _ in ()).throw(AssertionError("no AI"))
+    assert [f.name for f in engine.registry.enabled_for(agent)] == ["timers"]
+    llm = _LLM(['{"args": {"action": "timer", "duration": "ten minutes", "label": "tea"}}'])
+    ip = IntentProcessor(engine.settings, engine.registry, _Models(llm), engine.history)
+    d = ip.decide(agent, "ten minutes for the tea, please")
+    assert d.function == "timers" and d.args["duration"] == "ten minutes" and d.method == "model"
+    system = llm.seen[0][0]["content"]
+    normal = dict(agent, rudimentary={})
+    full = ip.system_prompt(normal, engine.registry.enabled_for(normal))
+    assert "### timers" in system and "### research" not in system and len(system) < len(full) / 3
+    assert llm.kw[0]["think"] is False and llm.kw[0]["max_tokens"] <= 200      # no thinking, a short answer
+    # missing something: it asks for just that, it never falls back to chatting
+    llm = _LLM(['{"question": "How long?"}'])
+    ip = IntentProcessor(engine.settings, engine.registry, _Models(llm), engine.history)
+    d = ip.decide(agent, "do the thing")
+    assert d.function is None and d.question == "How long?"
+
+
+def test_a_rudimentary_agent_with_nothing_to_fill_in_needs_no_model(engine):
+    from jeeves.daemon.intent import IntentProcessor
+    engine.settings.set("agents.jeeves.commands", [{"name": "lights", "command": "true", "confirm": False}])
+    engine.settings.set("agents.jeeves.rudimentary", {"enabled": True, "function": "lights"})
+    ip = IntentProcessor(engine.settings, engine.registry, _Models(_LLM([])), engine.history)   # (no answers)
+    d = ip.decide(engine.agents()["jeeves"], "anything at all")
+    assert d.function == "lights" and d.method == "rules"
     said = []
     engine.speak = lambda ctx, t: said.append(t)
-
-    def run(text):
-        return engine.history.get(engine.handle_text(text, wait=True)["id"])
-    res = run(f"Jeeves, {sys.executable} -c \"print('hello there')\"")
-    assert res["status"] == "done" and res["function"] == NAME, res
-    assert said[-1] == "hello there"
-    res = run(f"Jeeves, {sys.executable} -c pass")
-    assert said[-1] == "Done."
-    res = run("Jeeves, no-such-program-here")
-    assert res["status"] == "error" and "isn't installed" in res["error"]
-    # one program, what's said is its arguments
-    engine.settings.set("agents.jeeves.rudimentary", {"enabled": True, "program": f"{sys.executable} -c "
-                                                      "'import sys; print(\"|\".join(sys.argv[1:]))'"})
-    res = run("Jeeves, a b")
-    assert "a|b" in res["response"]
-    # an app that keeps running is just started
-    engine.settings.set("agents.jeeves.rudimentary", {"enabled": True, "program": "", "wait": 0.3})
-    res = run("Jeeves, sleep 5")
-    assert said[-1] == "Started sleep." and res["status"] == "done"
-    engine.settings.set("agents.jeeves.rudimentary", {"enabled": False})
-    assert NAME not in [f.name for f in engine.registry.enabled_for(engine.agents()["jeeves"])]
+    res = engine.history.get(engine.handle_text("Jeeves, go", wait=True)["id"])
+    assert res["function"] == "lights" and res["status"] == "done"
 
 
-def test_risky_commands_ask_first(engine):
-    engine.settings.set("agents.jeeves.rudimentary", {"enabled": True, "confirm": "risky"})
-    asked = []
-    engine.wait_for_confirm = lambda ctx, text, *a, **k: asked.append(text) or False
-    engine.speak = lambda ctx, t: None
-    res = engine.history.get(engine.handle_text("Jeeves, rm nothing-here", wait=True)["id"])
-    assert asked and "rm nothing-here" in asked[0] and res["status"] == "error" and "not confirmed" in res["error"]
+def test_without_a_model_a_rudimentary_agent_uses_keywords_and_asks_instead_of_chatting(engine):
+    engine.settings.set("agents.jeeves.rudimentary", {"enabled": True, "function": "timers"})
+    said = []
+    engine.speak = lambda ctx, t: said.append(t)
+    res = engine.history.get(engine.handle_text("Jeeves, set a timer for 2 minutes", wait=True)["id"])
+    assert res["function"] == "timers" and res["status"] == "done"
+    engine.settings.set("agents.jeeves.rudimentary", {"enabled": False, "function": "timers"})
+    assert len(engine.registry.enabled_for(engine.agents()["jeeves"])) > 1      # off: a normal agent again
 
 
 # ---------------------------------------------------------------------------- the GUI
