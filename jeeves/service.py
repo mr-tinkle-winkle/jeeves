@@ -40,13 +40,31 @@ def _daemon_argv() -> list[str]:
     return [exe, "daemon"] if exe else [sys.executable, "-m", "jeeves.cli", "daemon"]
 
 
-def start(timeout: float = 20.0) -> None:
+def _why() -> str:
+    """The unit's state and its last few log lines, for a start that didn't work."""
+    try:
+        state = subprocess.run(["systemctl", "--user", "show", UNIT, "-p", "ActiveState,SubState,Result"],
+                               capture_output=True, text=True, timeout=10).stdout.split()
+        tail = subprocess.run(["journalctl", "--user", "-u", UNIT, "-n", "8", "--no-pager", "-o", "cat"],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return " (" + ", ".join(state) + ")" + ("\nLast lines of its log:\n" + tail if tail else "")
+
+
+def start(timeout: float = 60.0) -> None:
     """Start the daemon and wait until it answers."""
     if running():
         return
     if has_unit():
-        subprocess.run(["systemctl", "--user", "reset-failed", UNIT], capture_output=True, timeout=5)
-        out = subprocess.run(["systemctl", "--user", "start", UNIT], capture_output=True, text=True, timeout=30)
+        try:
+            subprocess.run(["systemctl", "--user", "reset-failed", UNIT], capture_output=True, timeout=10)
+            # --no-block: queue the start and come back, rather than waiting on systemd's job queue here
+            out = subprocess.run(["systemctl", "--user", "start", "--no-block", UNIT], capture_output=True, text=True,
+                                 timeout=30)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("systemd didn't answer when asked to start Jeeves (your user session's systemd is "
+                               "busy or stuck)") from exc
         if out.returncode != 0:
             raise RuntimeError(f"systemctl couldn't start Jeeves: {out.stderr.strip()}")
     else:
@@ -59,7 +77,8 @@ def start(timeout: float = 20.0) -> None:
         if running():
             return
         time.sleep(0.3)
-    raise RuntimeError("Jeeves didn't start (see `journalctl --user -u jeeves` or the daemon log)")
+    raise RuntimeError("Jeeves didn't answer within %d s%s\n(more: `journalctl --user -u jeeves -e`)"
+                       % (timeout, _why() if has_unit() else ""))
 
 
 def _save_enabled(on: bool) -> None:

@@ -111,6 +111,9 @@ in
         ExecStart = "${cfg.package}/bin/jeeves daemon";
         Restart = "on-failure";
         RestartSec = 2;
+        # no multi-gigabyte core dumps when a model server crashes (systemd-coredump chewing on them
+        # kept the CPU hot and the user manager slow)
+        LimitCORE = 0;
       };
     };
   };

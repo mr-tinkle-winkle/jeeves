@@ -47,12 +47,23 @@ def _find(*names: str) -> str | None:
 CPU_SET: set[int] | None = None
 
 
-def _pin_cpus() -> None:
+def _child_setup() -> None:
+    """In each model server before it runs: only the allowed cores (Minimum untouched CPU), and no
+    core dump when it crashes -- a crashed whisper/llama server is gigabytes, and systemd-coredump
+    compressing one after another kept the CPU hot and systemd itself slow."""
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ImportError, ValueError, OSError):
+        pass
     if CPU_SET:
         try:
             os.sched_setaffinity(0, CPU_SET)
         except OSError:
             pass
+
+
+_pin_cpus = _child_setup
 
 
 class ManagedServer:
@@ -69,7 +80,7 @@ class ManagedServer:
         self.stop()
         log.info("starting %s: %s", self.name, " ".join(cmd))
         self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                     preexec_fn=_pin_cpus if CPU_SET else None)
+                                     preexec_fn=_child_setup)
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.proc.poll() is not None:
@@ -151,8 +162,11 @@ class WhisperCppSTT(STT):
             raise BackendError("whisper.cpp isn't installed (whisper-server not found)")
         model = model_dir(self.entry) / self.entry.files[0].path
         self.server.port = free_port()
+        # whisper.cpp gains little past 8 threads; all 28 of them on every few seconds of desktop audio
+        # was most of Jeeves' CPU load (and heat), and a crash now and then
+        threads = min(env_threads(self.threads), 8)
         self.server.start([exe, "-m", str(model), "--host", "127.0.0.1", "--port", str(self.server.port),
-                           "-t", str(env_threads(self.threads))] + ([] if self.gpu else ["-ng"]), "/")
+                           "-t", str(threads)] + ([] if self.gpu else ["-ng"]), "/")
 
     def unload(self) -> None:
         self.server.stop()

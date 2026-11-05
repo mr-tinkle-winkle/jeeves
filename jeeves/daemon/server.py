@@ -263,6 +263,10 @@ class Server:
                     writer.write(encode({"id": rid, "result": True}))
                     await writer.drain()
                     continue
+                if method == "ping":                    # answered here: never waits behind busy workers
+                    writer.write(encode({"id": rid, "result": "pong"}))
+                    await writer.drain()
+                    continue
                 fn = self.methods.get(method)
                 if fn is None:
                     writer.write(encode({"id": rid, "error": f"unknown method '{method}'"}))

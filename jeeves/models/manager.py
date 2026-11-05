@@ -207,7 +207,11 @@ class ModelManager:
     def stt(self, agent: dict[str, Any] | None = None) -> STT:
         entry = self._check("stt", self.model_id("stt", agent))
         threads = self._threads()
-        gpu = bool(self.budget().get("whisper_gpu"))
+        # whisper.cpp uses the GPU when it was built with a GPU backend and runs on the CPU otherwise, so it's
+        # only told not to (-ng) when there's no GPU share for it: looking for its GPU library missed builds
+        # that link it in, and it ran large-v3 on 28 CPU threads beside a GPU doing nothing
+        b = self.budget()
+        gpu = bool(b.get("whisper_gpu")) or bool(b.get("vram_mb", 0) > 0 and b.get("gpu_share", 1.0) > 0)
         inst = self._instance(entry, lambda: make_stt(entry, threads, gpu))
         if hasattr(inst, "threads"):
             inst.threads = threads             # Minimum untouched applies on the next load
