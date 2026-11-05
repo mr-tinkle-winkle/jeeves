@@ -178,6 +178,9 @@ def _followers(d: dict[str, Any]) -> int:
     return 0
 
 
+LAST_CHOICE: list[str] = []      # the channels weighed last time, best first (shown in the thoughts)
+
+
 def find_channel(name: str) -> tuple[str, str]:
     """(channel id, channel name) for a spoken channel name -- the channel people mean, which isn't
     always the one whose name matches best: "moist critikal" is penguinz0 (millions of subscribers,
@@ -188,7 +191,7 @@ def find_channel(name: str) -> tuple[str, str]:
     cands: dict[str, dict[str, Any]] = {}
 
     def add(cid: str, ch: str, followers: int = 0, rank: int | None = None) -> dict[str, Any]:
-        c = cands.setdefault(cid, {"name": ch, "followers": 0, "rank": None, "videos": 0})
+        c = cands.setdefault(cid, {"name": ch, "followers": 0, "rank": None, "videos": 0, "handle": False})
         c["name"] = c["name"] or ch
         c["followers"] = max(c["followers"], followers)
         if rank is not None and (c["rank"] is None or rank < c["rank"]):
@@ -201,8 +204,9 @@ def find_channel(name: str) -> tuple[str, str]:
         data = _try("--flat-playlist", "--playlist-end", "1", f"https://www.youtube.com/@{handle}/videos",
                     errors=errors)
         if data and data.get("channel_id"):
-            add(data["channel_id"], data.get("channel") or data.get("uploader") or
-                data.get("title", "").removesuffix(" - Videos"), _followers(data))
+            c = add(data["channel_id"], data.get("channel") or data.get("uploader") or
+                    data.get("title", "").removesuffix(" - Videos"), _followers(data))
+            c["handle"] = True              # (youtube.com/@<the name> exists: shown in the thoughts)
     # searched as said and as one word: "moist critikal" and "moistcritikal" found different channels
     # (the one-word form the right one), so both are asked and the evidence added up
     spellings = list(dict.fromkeys([name] + ([handle] if handle and handle != name.strip().lower() else [])))
@@ -226,18 +230,24 @@ def find_channel(name: str) -> tuple[str, str]:
     import math
     most = math.log10(max(c["followers"] for c in cands.values()) + 1) or 1.0
 
+    top_videos = max(c["videos"] for c in cands.values()) or 1
+
     def score(c: dict[str, Any]) -> float:
-        # subscribers on a log scale, steeply: a channel a thousand times bigger is the one people mean
-        # even when a small one's name matches better (clip channels, fan reuploads, an abandoned namesake)
-        # -- but only a channel that has something to do with the name: its name, or the videos found for
-        # it. A huge unrelated channel in the results (CNN) won on size alone.
+        """How well its name matches, how much of what a search for the name finds is its own, and its
+        size -- size only for a channel that has something to do with the name. Not the bare count of its
+        videos found: a news channel with a few reports about a YouTuber had "enough" videos to count as
+        relevant and then won on size (CNN for "moist critikal"). How many of the videos found are its own,
+        next to the channel with the most, is what says it's the channel people mean (penguinz0's videos fill a search for "moist critikal"). An exact
+        name or @handle alone doesn't decide it either: @moistcritikal is a small, abandoned namesake."""
         named = _name_score(name, c["name"])
-        found = min(1.0, c["videos"] / (2 * len(spellings)))
+        found = (c["videos"] / top_videos) ** 2             # 1 for the channel with the most; a few reports, little
         relevant = max(named, found)
         big = (math.log10(c["followers"] + 1) / most) ** 4 * (relevant if relevant >= 0.4 else 0.0)
-        return (named + 0.5 * found + 0.9 * big +
+        return (named + 0.6 * found + 0.9 * big +
                 (0.3 if c["rank"] == 0 else 0.1 if c["rank"] is not None else 0) * (1.0 if relevant >= 0.4 else 0.2))
-    cid, best = max(cands.items(), key=lambda kv: score(kv[1]))
+    ranked = sorted(cands.items(), key=lambda kv: score(kv[1]), reverse=True)
+    LAST_CHOICE[:] = [f"{c['name']} ({score(c):.2f}{', @handle' if c.get('handle') else ''})" for _k, c in ranked[:4]]
+    cid, best = ranked[0]
     if score(best) < 0.6:
         raise FunctionError(f"I couldn't find a YouTube channel called {name}")
     return cid, best["name"]
@@ -296,8 +306,8 @@ def pick(query: str = "", channel: str = "", newest: bool = False) -> dict[str, 
         try:
             cid, cname = find_channel(channel)
         except FunctionError:
-            if not query:
-                raise
+            if not query or (newest and not guessed):
+                raise                            # "the newest X video": X's, or nothing -- not any search hit
             cid, cname, query = "", "", full if guessed else f"{channel} {query}"
         if cid and guessed:
             # "the alex bale video that..." -- only trust the guessed channel if it has a matching video

@@ -267,7 +267,8 @@ def main(popups: bool = False) -> int:
             cols = self.cfg("colors", {}) or {}
             defaults = {"thinking": "#808080", "researching": "#2f6fff", "responding": "#000000",
                         "asking": "#ffffff", "unclear": "#8a2be2", "unavailable": "#ff2020", "listening": "#ffffff",
-                        "transcript": "#808080", "watching": "#20b070", "playing": "#ff4040"}
+                        "transcript": "#808080", "watching": "#20b070", "playing": "#ff4040",
+                        "misheard": "#ff3030"}
             return QColor(cols.get(stage) or defaults.get(stage, "#808080"))
 
         def bubble_size(self, text: str) -> tuple[str, int]:
@@ -473,6 +474,17 @@ def main(popups: bool = False) -> int:
                 outline = QColor((settings.get("indicators") or {}).get("colors", {}).get("responding_outline",
                                                                                           "#ffffff"))
             still = stage in ("asking", "unavailable", "unclear") or bool(st.get("paused") or st.get("suspended"))
+            if stage == "misheard":                  # it thought it heard its name: spins away in red
+                k = max(0.0, 1.0 - (time.time() - float(st.get("time") or time.time())) / 0.9)
+                p.save()
+                p.setOpacity(k)
+                c = r.center()
+                p.translate(c)
+                p.scale(0.4 + 0.6 * k, 0.4 + 0.6 * k)
+                p.translate(-c)
+                ovs.spinner(p, r, self.theme, base, self.phase * 3.0, True, None, False)
+                p.restore()
+                return
             ovs.spinner(p, r, self.theme, base, self.phase, not still, outline,
                         bool(st.get("paused") or st.get("suspended")))
 

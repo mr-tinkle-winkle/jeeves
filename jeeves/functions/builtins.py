@@ -605,6 +605,8 @@ def youtube(ctx, action="play", query="", channel="", newest=False, seconds=None
         return f"<play {'newest ' if newest else ''}video {query!r} from {channel or 'search'}>"
     ctx.state("researching", "Looking on YouTube")
     v = yt.pick(str(query or ""), str(channel or ""), bool(newest))
+    if channel and yt.LAST_CHOICE:
+        ctx.think("Channels weighed: " + "; ".join(yt.LAST_CHOICE))
     ctx.think(f"Found: {v['title']} — {v['channel']} ({v['url']})", looking_at=v["url"])
     s = yt.streams(v["url"], int(ctx.settings.get("youtube.max_height", 1080)))
     eng.publish("video", {"action": "play", "title": s["title"] or v["title"], "channel": s["channel"] or v["channel"],

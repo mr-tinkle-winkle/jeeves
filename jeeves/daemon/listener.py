@@ -302,6 +302,10 @@ class Listener(threading.Thread):
                 hits = []
             if not gate:
                 hits = []
+            elif self.wake_rec is not None and getattr(self.wake_rec, "maybe", ""):
+                maybe, self.wake_rec.maybe = self.wake_rec.maybe, ""
+                if session is None and not hits:
+                    eng.wake_maybe(self.source, maybe)
         else:
             self.wake_rec = None
 

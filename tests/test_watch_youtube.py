@@ -297,8 +297,8 @@ def test_a_huge_unrelated_channel_in_the_results_is_not_picked(monkeypatch):
             return None
         return {"entries": [cnn, clips, main]}
 
-    def fake_search(q, errors=None):
-        owners = [main, main, main, clips, cnn] if q == "moistcritikal" else [clips, main, main, cnn]
+    def fake_search(q, errors=None):          # a few CNN reports about him in the results
+        owners = [main, main, main, cnn, cnn, clips] if q == "moistcritikal" else [clips, main, main, cnn, cnn]
         return [{"id": f"v{i}", "channel_id": o["channel_id"], "channel": o["channel"]} for i, o in enumerate(owners)]
     monkeypatch.setattr(yt, "_try", fake_try)
     monkeypatch.setattr(yt, "_try_search", fake_search)
