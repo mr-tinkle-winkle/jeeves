@@ -62,3 +62,33 @@ def test_whisper_only_checks_what_sounds_like_a_name(engine, monkeypatch):
     engine.settings.set("wake_word.backup_precheck", False)
     engine.on_backup_utterance("desktop", b"\0" * 32000)
     assert calls                                                 # the check off: as before
+
+
+def test_the_mic_hears_how_loud_you_are(engine):
+    ev = _events(engine)
+    engine.voice_level("r1", 3000.0, 100.0, True)          # talking well above the room
+    engine.voice_level("r1", 90.0, 100.0, False)           # quiet again
+    engine.voice_level("r1", 90.0, 100.0, False)           # (no change: nothing sent)
+    levels = [d["level"] for t, d in ev if t == "level"]
+    assert len(levels) == 2 and levels[0] > 0.3 and levels[1] == 0.0
+
+
+def test_the_mic_indicator_moves_with_your_voice(qapp_or_skip=None):
+    import pytest
+    pytest.importorskip("PySide6")
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from jeeves import overlay_skin as ovs
+    from jeeves.gui.ui_kit import Theme
+
+    def draw(level):
+        img = QImage(120, 120, QImage.Format_ARGB32)
+        img.fill(0)
+        p = QPainter(img)
+        ovs.mic(p, QRectF(30, 30, 56, 56), Theme(), 0.13, False, False, level)
+        p.end()
+        return img
+    quiet, loud = draw(0.0), draw(0.9)
+    assert quiet != loud

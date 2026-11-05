@@ -94,9 +94,21 @@ def text_prefix(theme: Theme) -> str:
 
 
 # ---------------------------------------------------------------------------- the microphone
-def mic(p: QPainter, r: QRectF, theme: Theme, phase: float, held: bool, suspended: bool) -> None:
+def mic(p: QPainter, r: QRectF, theme: Theme, phase: float, held: bool, suspended: bool,
+        level: float = 0.0) -> None:
+    """level: your voice right now, 0..1 -- the mic shakes and a ring swells with it, the theme's way."""
     k = kind(theme)
     p.setRenderHint(QPainter.Antialiasing)
+    if level > 0.02:
+        _voice_ring(p, r, theme, level, phase)
+        amp = 0.8 + 2.4 * level                     # vibrating: a small, fast shake that grows with you
+        dx = amp * math.sin(phase * 2 * math.pi * 9.0)
+        dy = amp * 0.6 * math.sin(phase * 2 * math.pi * 13.0 + 1.3)
+        if k == "step":
+            dx, dy = round(dx / 2) * 2, round(dy / 2) * 2          # pixel steps
+        elif k == "slam":
+            dx, dy = (3 if dx > 0 else -3) * (level > 0.25), 0      # a hard jolt, side to side
+        r = r.translated(dx, dy)
     c = r.center()
     s = r.width() / 56
     flash = 0.5 + 0.5 * math.sin(phase * 2 * math.pi / 1.2)
@@ -182,6 +194,31 @@ def mic(p: QPainter, r: QRectF, theme: Theme, phase: float, held: bool, suspende
     p.drawArc(QRectF(c.x() - 11 * s, c.y() - 10 * s, 22 * s, 20 * s), 200 * 16, 140 * 16)
     p.drawLine(QPointF(c.x(), c.y() + 10 * s), QPointF(c.x(), c.y() + 15 * s))
     _held_suspended(p, r, theme, held, suspended)
+
+
+def _voice_ring(p: QPainter, r: QRectF, theme: Theme, level: float, phase: float) -> None:
+    """Behind the mic: a ring (or the theme's equivalent) that swells with your voice."""
+    k = kind(theme)
+    c = r.center()
+    grow = 1 + 4 * level                            # (stays inside the indicator's margin)
+    col = theme.pop() if k != "fade" else QColor("#ffffff")
+    if k == "type":                                   # a level meter, bottom up
+        h = r.height() * level
+        p.fillRect(QRectF(r.right() + 3, r.bottom() - h, 4, h), _a(col, 0.9))
+        return
+    if k in ("step", "slam"):
+        p.setRenderHint(QPainter.Antialiasing, k != "step")
+        p.setPen(QPen(_a(col, 0.35 + 0.55 * level), 3 if k == "step" else 4))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(r.adjusted(-grow, -grow, grow, grow))
+        p.setRenderHint(QPainter.Antialiasing)
+        return
+    p.setBrush(Qt.NoBrush)
+    for i, a in ((0, 0.55), (1, 0.25)):
+        g = grow * (1 + 0.25 * i)
+        p.setPen(QPen(_a(col, a * (0.4 + 0.6 * level)), 2 if k != "draw" else 1,
+                      Qt.DashLine if k == "draw" else Qt.SolidLine))
+        p.drawEllipse(c, r.width() / 2 + g, r.height() / 2 + g)
 
 
 def _held_suspended(p: QPainter, r: QRectF, theme: Theme, held: bool, suspended: bool) -> None:

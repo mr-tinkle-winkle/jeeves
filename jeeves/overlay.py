@@ -259,6 +259,7 @@ def main(popups: bool = False) -> int:
             self.hold_timer.setInterval(350)
             self.hold_timer.timeout.connect(self._start_hold)
             self.theme = Theme()                   # the window's theme (overlay_skin.py); renewed with settings
+            self.levels: dict[str, tuple[float, float]] = {}     # request -> (your voice 0..1, when)
 
         def cfg(self, key: str, default: Any = None) -> Any:
             return (settings.get("indicators") or {}).get(key, default)
@@ -455,8 +456,16 @@ def main(popups: bool = False) -> int:
             return 0.5 + 0.5 * math.sin(self.phase * 2 * math.pi / period)
 
         def _mic(self, p: QPainter, r: QRectF, st: dict[str, Any]) -> None:
+            lvl, at = self.levels.get(st.get("request", ""), (0.0, 0.0))
+            shown = getattr(self, "_shown_level", {})
+            self._shown_level = shown
+            # eased: jumps up with your voice, falls back over a fifth of a second
+            prev = shown.get(st.get("request", ""), 0.0)
+            target = lvl if time.time() - at < 0.4 else 0.0
+            cur = target if target > prev else prev + (target - prev) * 0.35
+            shown[st.get("request", "")] = cur
             ovs.mic(p, r, self.theme, self.phase, st.get("detail") == "held" or self.holding,
-                    bool(st.get("suspended")))
+                    bool(st.get("suspended")), cur)
 
         def _spinner(self, p: QPainter, r: QRectF, st: dict[str, Any]) -> None:
             stage = st["stage"]
@@ -1071,6 +1080,9 @@ def main(popups: bool = False) -> int:
 
     def on_event(topic: str, data: Any) -> None:
         if not popups:
+            if topic == "level":
+                indicator.levels[data.get("request", "")] = (float(data.get("level") or 0), time.time())
+                return
             if topic == "indicator":
                 if data.get("hidden"):              # this agent is visually muted
                     data = dict(data, stage="idle")

@@ -335,6 +335,8 @@ class Listener(threading.Thread):
             level_meter = self.detector is None
             decoding = bool(self.wake_rec is not None and self.wake_rec.phrase_open)
             phrase_open = level_meter and decoding
+            if self.frame_no % 2 == 0:              # ~16 times a second: how loud you are, for the mic indicator
+                eng.voice_level(session.request_id, level, self.floor, voiced)
             session.feed(frame, voiced, now, self._heard_until(now) if level_meter else None,
                          sure=level_meter or decoding or self._above >= SPEECH_RUN)
             if session.reply_at and now >= session.reply_at:

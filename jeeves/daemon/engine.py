@@ -695,7 +695,9 @@ class Engine:
                 # the wake model hears "geez", "believes", "cheese" as "Jeeves" now and then; speech
                 # recognition, which heard the whole phrase, says the name wasn't said: not for us
                 log.info("  woke on the name, but speech recognition heard '%s': not the name, ignored", text)
-                self.set_indicator(s.request_id, s.agent_id, "idle")
+                self.set_indicator(s.request_id, s.agent_id, "misheard")       # spins away red
+                rid, aid0 = s.request_id, s.agent_id
+                threading.Timer(0.9, lambda: self.set_indicator(rid, aid0, "idle")).start()
                 if s.interrupting:
                     self._resume(s.interrupting)
                 return
@@ -810,6 +812,21 @@ class Engine:
     # ------------------------------------------------------------------ "did you say Jeeves?"
     MAYBE_SECONDS = 2.5
 
+    def voice_level(self, request_id: str, level: float, floor: float, voiced: bool) -> None:
+        """While it listens: how loud you are, 0..1 above the room's background (the on-screen mic moves
+        with your voice). Only sent while it changes, so a quiet room sends nothing."""
+        import math
+        db = 20 * math.log10(max(1.0, level))
+        base = 20 * math.log10(max(1.0, floor)) + 4
+        v = max(0.0, min(1.0, (db - base) / 26.0)) if voiced or db > base + 6 else 0.0
+        last = self.__dict__.setdefault("_levels", {})
+        if abs(last.get(request_id, -1.0) - v) < 0.04 and v < 0.02:
+            return
+        last[request_id] = v
+        if len(last) > 32:
+            last.clear()
+        self.publish("level", {"request": request_id, "level": round(v, 3)})
+
     def wake_maybe(self, source: str, name: str) -> None:
         """The wake model thinks it's hearing a name (the moment it appears, before it's sure): the agent's
         indicator shows at once, so you know to keep talking. If it turns out not to be a call, it spins
@@ -881,42 +898,19 @@ class Engine:
         if conf < thr:
             if conf >= thr * 0.5 and self.settings.get("wake_word.verify_near_misses", True) and \
                     self.stt_spells_names(agent):
-                # unsure: check with speech recognition whether the name was really said
-                lst = self.listeners.get(source)
-                n0 = lst.frame_no if lst is not None else 0
-                phrase = list(lst.ring)[-100:] if lst is not None else []
-                log.info("wake '%s' unsure (%.2f < %.2f): checking with speech recognition", name, conf, thr)
-                self.clear_maybe(source, hold=True)
-                self.run_async(self._verify_wake, source, aid, name, conf, phrase, after, threshold, words, n0,
-                               name_audio, after_voiced)
+                # unsure: start listening right away anyway -- checking with speech recognition first took
+                # seconds before the listen even began. The name's own audio goes in with the request, and
+                # when it's transcribed speech recognition decides (Engine._finish_session): not the name
+                # -> nothing happens, and the indicator spins away red.
+                log.info("wake '%s' unsure (%.2f < %.2f): listening; speech recognition confirms the name",
+                         name, conf, thr)
+                self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
             else:
                 log.info("wake '%s' ignored (confidence %.2f < %.2f)", name, conf, thr)
                 self.clear_maybe(source, misheard=True)
             return
         log.info("wake '%s' (%.2f) on %s", name, conf, source)
         self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
-
-    def _verify_wake(self, source: str, aid: str, name: str, conf: float, phrase: list[bytes],
-                     after: list[bytes], threshold: float | None, words: int, n0: int,
-                     name_audio: list[bytes] | None = None, after_voiced: list[bool] | None = None) -> None:
-        try:
-            text = self.transcribe(b"".join(phrase), self.agents().get(aid))
-        except Exception as exc:  # noqa: BLE001 -- can't check: stay on the safe side
-            log.info("  couldn't check (%s); ignored", exc)
-            return
-        found = self.strip_name(text, aid)[0]
-        log.info("  heard '%s' -> %s", text, "the name: waking" if found else "not the name: ignored")
-        if not found or self.sessions.get(source) is not None:
-            self.clear_maybe(source, misheard=not found)
-            return
-        lst = self.listeners.get(source)
-        if lst is not None and lst.frame_no > n0:      # what was said while checking belongs to the request
-            k = min(len(lst.ring), lst.frame_no - n0)
-            after = list(after) + list(lst.ring)[-k:]
-            if after_voiced is not None:
-                after_voiced = list(after_voiced) + list(getattr(lst, "voiced_ring", []))[-k:]
-        self._start_listen(source, aid, name, after, threshold, words, name_audio, 1.0,   # confirmed
-                           after_voiced)
 
     def _start_listen(self, source: str, aid: str, name: str, after: list[bytes], threshold: float | None,
                       words: int, name_audio: list[bytes] | None = None, conf: float = 1.0,
@@ -948,7 +942,8 @@ class Engine:
         if name_audio:
             s.preroll = list(name_audio)
         s.wake_conf = conf
-        if spoke_at is None and self._wake_reply_phrases(self.agents().get(aid, {})):
+        if spoke_at is None and self._wake_reply_phrases(self.agents().get(aid, {})) and \
+                conf >= self.threshold(self.agents().get(aid, {})):     # (an unsure name gets no "Yes?")
             # still quiet by then: "Yes?" (Listener.process decides, by whether you've started talking --
             # not by the wake model's "words after the name", which a breath or room noise also gives)
             s.reply_at = time.time() + REPLY_WAIT
