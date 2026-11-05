@@ -169,6 +169,7 @@ class Engine:
         self.speaking = 0
         self.speaking_until = 0.0
         self._reply_cache: dict[tuple, tuple[bytes, int]] = {}      # wake-up replies, synthesized once
+        self._why_modes: dict[str, str] = {}
         self._backup_guess: dict[str, str | None] = {}              # source -> the agent a missed call sounded like
         self._just_said: list[tuple[str, float, float]] = []          # (text, started, seconds) just spoken
         self._reply_tried: set[tuple] = set()
@@ -601,6 +602,7 @@ class Engine:
                                for t in self.triggers.all())
         names = self.call_names(source)
         wake_on = self.listens_for_names() and not self.summary.enabled()
+        self._why_modes[source] = self._modes_reason(source, names, wake_on)
         if names and wake_on:
             engine = self.settings.get("wake_word.engine", "vosk")
             if engine == "vosk" and self.models.wake_spotter() is not None:
@@ -613,6 +615,24 @@ class Engine:
         if summary or keyword_triggers or (names and self.summary.enabled()) or self.jump_in.wants(source):
             modes.add("transcribe")
         return modes
+
+    def _modes_reason(self, source: str, names: list[str], wake_on: bool) -> str:
+        """Why names are (or aren't) heard by the wake word model on this source -- for the log, since
+        without it a call is only noticed once speech recognition has the whole sentence (seconds later,
+        and with no mic indicator while you talk)."""
+        if not names:
+            return "no agent listens here"
+        if not self.listens_for_names():
+            return "names aren't listened for"
+        if self.summary.enabled():
+            return "Summary is on: everything is transcribed and names are found in the text (no wake word model)"
+        engine = self.settings.get("wake_word.engine", "vosk")
+        if engine != "vosk":
+            return f"wake_word.engine is {engine!r}: names are found in transcribed text (no wake word model)"
+        if self.models.wake_spotter() is None:
+            return ("the wake word model (wake_word.model) isn't chosen, installed or loadable: names are found "
+                    "in transcribed text instead")
+        return "the wake word model hears names"
 
     def open_session(self, source: str, agent_id: str | None, mode: str) -> Session:
         s = Session(source=source, agent_id=agent_id, mode=mode,
@@ -1169,6 +1189,20 @@ class Engine:
         hold-to-listen, Listener._may_call)."""
         if self.previewing():
             may_call = False                        # (a voice preview saying a name calls nobody)
+        rid, guess = f"heard-{source}", None
+        if may_call and self.sessions.get(source) is None and "vosk" not in self.detection_modes(source) \
+                and self.models.wake_spotter() is not None and self._might_be_a_call(source, pcm):
+            # names come from the transcript here: show the spinner while speech recognition works
+            guess = self._backup_guess.pop(source, None) or self.main_agent()
+            if guess:
+                self.set_indicator(rid, guess, "thinking", "Checking what you said")
+        try:
+            self._on_utterance(source, pcm, may_call)
+        finally:
+            if guess:
+                self.set_indicator(rid, guess, "idle")
+
+    def _on_utterance(self, source: str, pcm: bytes, may_call: bool) -> None:
         try:
             text = self.transcribe(pcm)
         except ModelUnavailable:
@@ -1191,6 +1225,7 @@ class Engine:
             return
         if self._hears_itself(aid, text):
             return
+        log.info("  heard (whole-sentence transcription, %s): %s", self._why_modes.get(source, "?"), text)
         paused = self._interrupt(aid)
         if rest:
             if paused and self._after_interruption(paused, rest):
@@ -2374,6 +2409,7 @@ class Engine:
             "enabled": self.is_on(),
             "agents": {aid: {"name": a.get("name"), "active": self.agent_active(a)} for aid, a in self.agents().items()},
             "listeners": {src: lst.status for src, lst in self.listeners.items()},
+            "wake": dict(self._why_modes),
             "overlays": self.overlay_status(),
             "keyboard": self.keyboard.status if self.keyboard else "off",
             "hold_to_listen": self.hold_keys(),

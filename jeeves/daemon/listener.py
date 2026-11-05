@@ -466,6 +466,9 @@ class Listener(threading.Thread):
             # name of an inactive agent is ignored when it's heard
             names = eng.wake_names(self.source) if spotter is not None else []
             eos = float(eng.settings.get("general.end_of_speech_seconds", 1.2))
+            if self._cfg is None or self._cfg[0] != modes:
+                log.info("%s: listening with %s (%s)", self.source, ", ".join(sorted(modes)) or "nothing",
+                         getattr(eng, "_why_modes", {}).get(self.source, ""))
             self._cfg, self._cfg_at = (modes, names, eos, spotter), now
             self._hold = eng.hold_keys()
             self._vad = float(eng.settings.get("audio.vad_threshold", 0.012))
