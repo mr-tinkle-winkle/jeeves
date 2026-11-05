@@ -8,7 +8,7 @@ A local-first voice assistant for Linux (NixOS). Named agents respond to spoken 
 
 ## Status
 
-First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (388 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
+First full implementation of `SPEC.md`: daemon, settings GUI, on-screen overlay, the function dictionary with every listed function, a NixOS module and a test suite (389 tests). See [Verified vs. not](#verified-vs-not) for what has run on real hardware and what hasn't.
 
 ## Installing (NixOS)
 
@@ -114,6 +114,7 @@ jeeves overlay --popups   -- Review, Text Request, answers, thoughts, import app
 
 ## Decisions and rationale
 
+- **One listener per microphone; a narrower near-miss band.** An agent set to listen to one exact device that is also the default microphone got a second listener on the same mic, so every name was heard twice (and Whisper ran twice). The microphone listener now hears for such agents (`Engine._is_the_mic`). A wake below the threshold opens a checked listen only within a quarter of it (it was half), and a name only the partial result glimpsed reports 0.4 -- so those no longer open listens at the default 0.6.
 - **Rudimentary agents take a bare value.** Told just "White Knuckle", a one-argument function (a game launcher) used to ask "What game do you want to start?" -- the request is the value, so when one text argument is all that's missing, what was said fills it (`IntentProcessor._whole_request`). The wake model logs each name it hears with every word's confidence and length (`wake model heard ...`).
 - **"g", "gee", "cheese", "juh" no longer wake Jeeves.** The wake grammar holds only the names, so Vosk mapped any short sound onto "jeeves" -- at confidence 1.0, which is why the threshold setting did nothing. A name word's confidence is now scaled by how long it took to say (`WakeRecognizer.long_enough`: a real "Jeeves" ~0.3-0.5 s, a "juh" ~0.1 s), so the threshold separates them (higher = stricter). The indicator waits for the name to stay in the partial result a moment before showing; a clearly-not-a-name sound clears quietly (no red spin). And a confident wake followed by a pause no longer skips speech recognition's check ("cheese." with a pause passed it): only answering the wake-up reply does. Ctrl+S saves the agent on the Agents page.
 - **Names inside names (Jeeves / Evil Jeeves).** The wake model counted "jeeves" inside "evil jeeves" as a call too, and the grammar (names only) turns "hey jeeves" into "evil jeeves" now and then. A name inside a longer one is now one call: the longer when its extra words were heard clearly (confidence >= 0.55), else the shorter (`WakeRecognizer.pick_names`). Speech recognition then has the final word: if the transcript names a different agent than the one woken, the call goes to the one it names (`Engine.named_agent`: the earliest name, the longest of names ending at the same word).

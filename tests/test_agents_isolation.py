@@ -249,14 +249,14 @@ def test_unsure_wake_listens_at_once_and_speech_recognition_confirms_the_name(en
     monkeypatch.setattr(engine, "transcribe", lambda pcm, agent=None: heard["text"])
     handled = []
     monkeypatch.setattr(engine, "handle_text", lambda text, aid, **k: handled.append(text) or {})
-    engine.on_wake("microphone", "jeeves", 0.4, [], name_audio=[b"\1\0" * 480])   # under 0.6, over half
+    engine.on_wake("microphone", "jeeves", 0.5, [], name_audio=[b"\1\0" * 480])   # under 0.6, a near miss
     s = engine.sessions.get("microphone")
-    assert s is not None and s.wake_conf == 0.4 and not s.reply_at                # listening, no "Yes?"
+    assert s is not None and s.wake_conf == 0.5 and not s.reply_at                # listening, no "Yes?"
     s.frames, s.got_speech = [b"\1\0" * 480] * 20, True
     engine.sessions.clear()
     engine._finish_session(s)
     assert handled == ["what time is it"]                                         # the name was said
-    engine.on_wake("microphone", "jeeves", 0.4, [], name_audio=[b"\1\0" * 480])
+    engine.on_wake("microphone", "jeeves", 0.5, [], name_audio=[b"\1\0" * 480])
     s = engine.sessions.pop("microphone")
     s.frames, s.got_speech = [b"\1\0" * 480] * 20, True
     heard["text"] = "the weather is nice"

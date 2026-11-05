@@ -166,3 +166,13 @@ def test_a_rudimentary_agent_told_just_a_name_runs_it(engine):
     ip = IntentProcessor(engine.settings, engine.registry, _Models(llm), engine.history)
     d = ip.decide_one(engine.agents()["jeeves"], f, "White Knuckle.")
     assert d.function == "launch_game" and d.args == {"game": "White Knuckle"} and not d.question
+
+
+def test_a_device_that_is_the_mic_gets_no_second_listener(engine, monkeypatch):
+    engine.settings.set("agents.jeeves.listen_to", "device")
+    engine.settings.set("agents.jeeves.listen_device", "alsa_input.usb-ZOOM")
+    monkeypatch.setattr(engine, "_is_the_mic", lambda dev: dev == "alsa_input.usb-ZOOM")
+    monkeypatch.setattr(engine, "is_on", lambda: True)
+    wanted = engine._wanted_sources()
+    assert "device:alsa_input.usb-ZOOM" not in wanted and "microphone" in wanted
+    assert engine._listens(engine.agents()["jeeves"], "microphone")

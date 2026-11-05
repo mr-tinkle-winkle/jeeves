@@ -286,7 +286,7 @@ class WakeRecognizer:
         self._last_partial = ""
         self.maybe = ""                     # a name just appeared in the partial result (not sure yet)
 
-    UNSURE = 0.45            # confidence reported for a name only the partial result had
+    UNSURE = 0.4             # confidence reported for a name only the partial result had
 
     def _name_in(self, tokens: list[str]) -> bool:
         return any(self._name_in_one(name, tokens) for name in self.names)

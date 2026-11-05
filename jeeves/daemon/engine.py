@@ -170,6 +170,7 @@ class Engine:
         self.speaking_until = 0.0
         self._reply_cache: dict[tuple, tuple[bytes, int]] = {}      # wake-up replies, synthesized once
         self._why_modes: dict[str, str] = {}
+        self._mic_name, self._mic_checked = "", 0.0
         self._wakes: dict[str, list[float]] = {}                       # source -> when the wake model called (last minute)
         self._backup_guess: dict[str, str | None] = {}              # source -> the agent a missed call sounded like
         self._just_said: list[tuple[str, float, float]] = []          # (text, started, seconds) just spoken
@@ -305,6 +306,12 @@ class Engine:
         if self.is_on():
             for a in self.active_agents().values():          # agents listening to one exact device
                 if a.get("listen_to") == "device" and a.get("listen_device"):
+                    if self._is_the_mic(a["listen_device"]):
+                        # that device IS the microphone: the microphone's listener hears for it. A second
+                        # listener on the same mic woke every name twice (and ran Whisper twice)
+                        if self._needs_source("microphone") or self.call_names("microphone"):
+                            wanted.add("microphone")
+                        continue
                     src = f"device:{a['listen_device']}"
                     if self.call_names(src) or self.jump_in.wants(src):
                         wanted.add(src)
@@ -435,10 +442,26 @@ class Engine:
     def active_agents(self) -> dict[str, dict[str, Any]]:
         return {aid: a for aid, a in self.agents().items() if self.agent_active(a)}
 
+    def _is_the_mic(self, device: str) -> bool:
+        """Is this device the one the microphone listener records (the default mic)? Asked of pactl at
+        most every 10 s."""
+        now = time.time()
+        if now - self._mic_checked > 10:
+            from .audio import real_mic_source
+            try:
+                self._mic_name = real_mic_source() or ""
+            except Exception:  # noqa: BLE001
+                self._mic_name = ""
+            self._mic_checked = now
+        return bool(device) and device == self._mic_name
+
     def _listens(self, agent: dict[str, Any], source: str) -> bool:
         lt = agent.get("listen_to", "user")
         if lt == "device":
-            return bool(agent.get("listen_device")) and source == f"device:{agent['listen_device']}"
+            dev = agent.get("listen_device") or ""
+            if source == "microphone" and self._is_the_mic(dev):
+                return True
+            return bool(dev) and source == f"device:{dev}"
         return lt == "both" or (lt == "user" and source == "microphone") or (lt == "desktop" and source == "desktop")
 
     def call_names(self, source: str) -> list[str]:
@@ -924,6 +947,8 @@ class Engine:
         else:
             self.set_indicator(rid, aid, "idle")
 
+    NEAR_MISS = 0.75
+
     def on_wake(self, source: str, name: str, conf: float, after: list[bytes], threshold: float | None = None,
                 words: int = 0, name_audio: list[bytes] | None = None,
                 after_voiced: list[bool] | None = None) -> None:
@@ -958,7 +983,9 @@ class Engine:
             self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
             return
         if conf < thr:
-            if conf >= thr * 0.5 and self.settings.get("wake_word.verify_near_misses", True) and \
+            # (a near miss: within a quarter of the threshold. It was half, and every name the partial
+            # result glimpsed but the finished phrase didn't have (0.45) opened a listen)
+            if conf >= thr * self.NEAR_MISS and self.settings.get("wake_word.verify_near_misses", True) and \
                     self.stt_spells_names(agent):
                 # unsure: start listening right away anyway -- checking with speech recognition first took
                 # seconds before the listen even began. The name's own audio goes in with the request, and
