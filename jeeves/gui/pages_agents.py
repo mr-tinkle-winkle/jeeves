@@ -5,6 +5,7 @@ import copy
 from typing import Any
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from .ui_kit import (CustomPlainTextEdit, ask_text, CustomButton, CustomCheckBox, CustomDoubleSpinBox, CustomGroupBox, CustomLineEdit,
@@ -79,6 +80,8 @@ class AgentsPage(Page):
         self.threshold.setSingleStep(0.05)
         self.threshold.setDecimals(2)
         self.threshold_global.toggled.connect(lambda on: self.threshold.setEnabled(not on))
+        self.threshold.setToolTip("How sure the wake word model must be that it heard the name: higher = stricter "
+                                  "(fewer false wakes, a mumbled name may be missed). 0.6 is the default.")
         g.addWidget(row(self.threshold_global, label("or this agent's threshold:", False), self.threshold))
         self.wake_reply = CustomLineEdit()
         self.wake_reply.setPlaceholderText("Yes? | Hello. | At your service.")
@@ -358,7 +361,12 @@ class AgentsPage(Page):
 
         save = CustomButton("Save agent")
         save.clicked.connect(self.save)
+        save.setToolTip("Save agent (Ctrl+S)")
         self.body_layout.addWidget(save, alignment=Qt.AlignRight)
+        # Ctrl+S anywhere in the window while this page is open (even with the cursor in a text box)
+        self.save_shortcut = QShortcut(QKeySequence(QKeySequence.Save), self)
+        self.save_shortcut.setContext(Qt.WindowShortcut)
+        self.save_shortcut.activated.connect(lambda: self.isVisible() and self.save())
         self.finish()
 
     def _apply_persona(self) -> None:

@@ -117,8 +117,9 @@ class Session:
         """A wake clear enough to take even if speech recognition doesn't spell the name out: a confident
         name followed by a real pause (or by its wake-up reply). A name inside running speech has to
         show up in the transcript ("geez, that was loud" isn't a call)."""
-        gap = (self.first_voice - self.started) if self.first_voice is not None else 99.0
-        return self.wake_conf >= 0.9 and (self.replied or gap >= TRUST_GAP)
+        # (a pause after the name used to be enough: but "cheese." with a pause after it is just as clear
+        # to the wake model, so now only having answered its wake-up reply skips the check)
+        return self.wake_conf >= 0.9 and self.replied
 
     def pcm(self) -> bytes:
         return b"".join(self.frames)

@@ -180,8 +180,8 @@ def test_name_still_sounding_when_the_listen_opens(engine):
 def test_trusted_wakes():
     s = Session("microphone", "jeeves", "request")
     s.wake_conf = 1.0
-    s.first_voice = s.started + 1.0            # a clear name, a pause, then the request
-    assert s.trusted()
+    s.first_voice = s.started + 1.0            # a clear name, a pause, then the request: "cheese." too --
+    assert not s.trusted()                     # speech recognition checks it
     s.first_voice = s.started + 0.1            # the name inside running speech
     assert not s.trusted()
     s.replied = True                           # it said "Yes?" and you answered
@@ -227,11 +227,13 @@ def test_the_name_is_taken_off_the_request(engine):
     assert handled == ["set a timer for 7 minutes"]
 
 
-def test_a_clear_call_counts_even_when_the_name_is_misheard(engine):
+def test_cheese_with_a_pause_after_it_isnt_a_call(engine):
+    # (it used to be: a confident wake followed by a pause skipped the check -- and "cheese." woke him)
+    seen = stages(engine)
     s, stt, handled = _wake_session(engine, "Cheese, set a timer for 7 minutes", gap=1.0)
     engine.end_session(s)
-    assert wait_for(lambda: handled)
-    assert handled == ["Cheese, set a timer for 7 minutes"]
+    assert wait_for(lambda: "misheard" in seen)
+    assert not handled
 
 
 def test_too_little_speech_after_a_doubtful_wake_is_silent(engine):

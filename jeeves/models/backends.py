@@ -320,11 +320,12 @@ class WakeRecognizer:
         if not tokens or not self._name_in(tokens):
             self._seen = 0
             return []
-        if self._seen == 0:                 # first sight of a name: say so at once (the indicator shows)
-            self.maybe = max((n for n in self.names if self._name_in_one(n, tokens)), key=len, default="")
         self._seen += 1
+        if self._seen == 2:                 # the name stayed in it (~60 ms): the indicator shows -- not on
+            # the first glimpse, which a "juh" or a "gee" gives too
+            self.maybe = max((n for n in self.names if self._name_in_one(n, tokens)), key=len, default="")
         followed = not self._name_in(tokens[-1:]) and self._name_in(tokens[:-1])
-        if self._seen < self.PARTIAL_STABLE and not followed:
+        if self._seen < self.PARTIAL_STABLE + 1 and not followed:
             return []
         self._seen = 0
         # FinalResult ends the phrase now; word times keep counting from the stream's start
@@ -342,7 +343,18 @@ class WakeRecognizer:
         self._last_partial = ""
         if words:
             self.speech_end = max(self.speech_end, max(float(w.get("end", 0)) for w in words))
-        return self.pick_names([(w["word"], float(w.get("conf", 0))) for w in words], self.names)
+        return self.pick_names([(w["word"], float(w.get("conf", 0)),
+                                 float(w.get("end", 0)) - float(w.get("start", 0))) for w in words], self.names)
+
+    @staticmethod
+    def long_enough(word: str, seconds: float | None) -> float:
+        """How fully a name word was said, 0..1, by how long it took. The grammar holds only the names, so
+        Vosk maps any short sound onto one -- "g", "gee", even a "juh" came out as "jeeves" at confidence
+        1.0, which is why no threshold setting helped. A real "Jeeves" takes ~0.3-0.5 s; a "juh" ~0.1."""
+        if seconds is None:
+            return 1.0
+        expected = 0.05 + 0.045 * len(word)          # "jeeves": 0.32 s
+        return max(0.0, min(1.0, seconds / expected)) ** 2
 
     EXTRA_WORD_CONF = 0.55   # "evil" in "evil jeeves" must be heard this clearly, or it's plain "jeeves"
 
@@ -353,6 +365,8 @@ class WakeRecognizer:
         heard clearly, else the shorter (the grammar only knows names, so "hey jeeves" can come out as
         "evil jeeves" -- with "evil" barely heard)."""
         spans: list[tuple[int, int, str, float]] = []
+        # (word, confidence[, seconds]): a name word said too briefly to be it scores lower
+        text_words = [(t[0], t[1] * cls.long_enough(t[0], t[2] if len(t) > 2 else None)) for t in text_words]
         for name in names:
             parts = name.split()
             for i in range(len(text_words) - len(parts) + 1):

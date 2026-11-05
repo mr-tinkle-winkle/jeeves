@@ -147,3 +147,10 @@ def test_a_mixed_up_wake_goes_to_the_agent_named(engine, monkeypatch):
     s.feed(b"\0" * 960, True, time.time())
     engine._finish_session(s)
     assert went == [("evil_jeeves", "set a timer for 4 minutes")]
+
+
+def test_a_short_sound_isnt_a_confident_name():
+    from jeeves.models.backends import WakeRecognizer as W
+    juh = W.pick_names([("jeeves", 1.0, 0.12)], ["jeeves"])[0][1]
+    real = W.pick_names([("jeeves", 1.0, 0.42)], ["jeeves"])[0][1]
+    assert juh < 0.3 and real == 1.0

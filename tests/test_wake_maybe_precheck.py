@@ -31,13 +31,14 @@ def test_a_misheard_name_spins_away_red(engine, monkeypatch):
     assert [d["stage"] for t, d in ev if t == "indicator"][-1] == "idle"
 
 
-def test_a_low_confidence_name_that_is_ignored_shows_misheard(engine, monkeypatch):
+def test_a_low_confidence_name_that_is_ignored_goes_quietly(engine, monkeypatch):
     ev = _events(engine)
     monkeypatch.setattr(engine, "agent_by_name", lambda name, source=None: "jeeves")
     engine.wake_maybe("microphone", "jeeves")
     engine.settings.set("wake_word.verify_near_misses", False)
     engine.on_wake("microphone", "jeeves", 0.05, [])
-    assert "misheard" in [d["stage"] for t, d in ev if t == "indicator"]
+    stages = [d["stage"] for t, d in ev if t == "indicator"]
+    assert stages[-1] == "idle" and "misheard" not in stages      # a "juh": not worth a red spin
 
 
 def test_whisper_only_checks_what_sounds_like_a_name(engine, monkeypatch):

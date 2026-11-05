@@ -969,7 +969,7 @@ class Engine:
                 self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
             else:
                 log.info("wake '%s' ignored (confidence %.2f < %.2f)", name, conf, thr)
-                self.clear_maybe(source, misheard=True)
+                self.clear_maybe(source)           # (quietly: clearly not a call -- a "juh", a "gee")
             return
         log.info("wake '%s' (%.2f) on %s", name, conf, source)
         self._start_listen(source, aid, name, after, threshold, words, name_audio, conf, after_voiced)
