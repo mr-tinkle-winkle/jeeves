@@ -313,7 +313,9 @@ class Engine:
                             wanted.add("microphone")
                         continue
                     src = f"device:{a['listen_device']}"
-                    if src not in self.listeners and self._mic_name:
+                    said = self.__dict__.setdefault("_said_devices", set())
+                    if src not in said and self._mic_name:
+                        said.add(src)
                         log.info("%s listens to %s on its own; the microphone listener records %s", a.get("name"),
                                  a["listen_device"], self._mic_name)
                     if self.call_names(src) or self.jump_in.wants(src):
