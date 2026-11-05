@@ -131,8 +131,9 @@ def main(popups: bool = False) -> int:
     app.setWindowIcon(app_icon())              # popups, thoughts, sources and the video player
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    logging.getLogger("jeeves.overlay").info("%s on %s (layer-shell: %s)", "popups" if popups else "indicators",
-                                             QGuiApplication.platformName(), use_layer)
+    from . import __build__
+    logging.getLogger("jeeves.overlay").info("%s on %s (layer-shell: %s, build %s)", "popups" if popups else "indicators",
+                                             QGuiApplication.platformName(), use_layer, __build__)
 
     def target_screen() -> Any:
         """Which monitor overlays appear on (Indicators > Screen): the primary one, the one
@@ -318,9 +319,11 @@ def main(popups: bool = False) -> int:
                 y = scr.y() + pad if corner.startswith("top") else scr.y() + scr.height() - h - pad
                 self.setGeometry(int(x), int(y), int(w), int(h))
             if self.visible_states() or time.time() < max(self.transcript_until, self.response_until):
+                self._empty_since = 0.0
                 present(self, layershell.corner_edges(corner), (pad, pad, pad, pad))
-            else:
-                self.hide()
+            # (nothing to show: _tick hides it a moment later. Hiding at once blinked the surface off
+            # between "transcript" and "thinking" -- a few ms apart -- and some compositors didn't map
+            # it again until it changed size, so the spinner only appeared once it started talking.)
 
         def visible_states(self) -> list[dict[str, Any]]:
             out = []
@@ -337,7 +340,8 @@ def main(popups: bool = False) -> int:
             if st.get("stage") == "idle":
                 self.states.pop(rid, None)
             elif st.get("stage") == "transcript":
-                self.states.pop(rid, None)
+                if rid in self.states:              # heard: the mic becomes the spinner straight away
+                    self.states[rid] = dict(st, stage="thinking", detail="")
                 if self.cfg("stt_output", True):
                     self.transcript = st.get("detail", "")
                     self.transcript_until = time.time() + 4
@@ -345,6 +349,10 @@ def main(popups: bool = False) -> int:
                 self.states[rid] = st
             self.relayout()
             self.update()
+            logging.getLogger("jeeves.overlay").info(
+                "indicator %s %s -> showing %s, window %s %dx%d", rid, st.get("stage"),
+                [s["stage"] for s in self.visible_states()] or "nothing", "up" if self.isVisible() else "down",
+                self.width(), self.height())
 
         def show_response(self, text: str) -> None:
             if not self.cfg("response_text", True):
@@ -369,7 +377,14 @@ def main(popups: bool = False) -> int:
             self.phase = (self.phase + 0.033) % 1000
             if self.isVisible():
                 if not self.visible_states() and time.time() > max(self.transcript_until, self.response_until):
-                    self.hide()
+                    if not getattr(self, "_empty_since", 0.0):
+                        self._empty_since = time.time()
+                    elif time.time() - self._empty_since > 0.25:
+                        self._empty_since = 0.0
+                        self.hide()
+                        logging.getLogger("jeeves.overlay").info("indicator window hidden (nothing to show)")
+                else:
+                    self._empty_since = 0.0
                 self.update()
             else:
                 self.anim.stop()            # (30 wake-ups a second for nothing on screen otherwise)

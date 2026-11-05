@@ -714,6 +714,7 @@ class Engine:
             # said yet -- answering this is the "instant reply about nothing". Listen once more for it.
             if not s.retried:
                 log.info("  heard only '%s': still listening for the request", text)
+                self.set_indicator(s.request_id, s.agent_id, "idle")      # (the new listen has its own)
                 again = self.open_session(s.source, s.agent_id, "request")
                 again.retried, again.manual = True, s.manual
                 self.apply_settings()
@@ -729,8 +730,11 @@ class Engine:
             self._didnt_catch(s)
             return
         log.info("  heard: %s", text)
-        self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id,
-                         manual=s.manual)
+        self.set_indicator(s.request_id, s.agent_id, "thinking")     # on from the intent step, not at "say"
+        res = self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id,
+                               manual=s.manual)
+        if not (isinstance(res, dict) and res.get("id") == s.request_id and not res.get("duplicate")):
+            self.set_indicator(s.request_id, s.agent_id, "idle")   # not run as a request (no agent named, an answer ...)
 
     def strip_name(self, text: str, agent_id: str | None, within: int = 10) -> tuple[bool, str]:
         """(was the agent's name said, the rest after it): "Okay so, Jeeves, set a timer" -> (True,
@@ -1602,6 +1606,8 @@ class Engine:
                         pass
             with self._lock:
                 self.active[entry["id"]] = ctx
+            if not ctx.background:
+                ctx.state("thinking")            # the spinner from the moment it's understood
         if wait or dry_run:
             self._run(ctx, skip_functions or set())
         else:
@@ -2345,7 +2351,9 @@ class Engine:
         return out
 
     def status(self) -> dict[str, Any]:
+        from .. import __build__
         return {
+            "build": __build__,
             "enabled": self.is_on(),
             "agents": {aid: {"name": a.get("name"), "active": self.agent_active(a)} for aid, a in self.agents().items()},
             "listeners": {src: lst.status for src, lst in self.listeners.items()},

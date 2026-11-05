@@ -156,7 +156,20 @@ def _name_score(want: str, name: str) -> float:
         return 0.0
     if w == n:
         return 1.0
-    return max(similarity(w, n), 0.9 if (w in n or n in w) and min(len(w), len(n)) >= 4 else 0.0)
+    plain = max(similarity(w, n), 0.9 if (w in n or n in w) and min(len(w), len(n)) >= 4 else 0.0)
+    kw, kn = sound_key(want), sound_key(name)
+    if len(kw) >= 5 and kw == kn:
+        return max(plain, 0.85)      # sounds the same: speech recognition's "most critical" is Moist Critikal
+    return plain
+
+
+def sound_key(text: str) -> str:
+    """How a name sounds, roughly: consonants only, c/k/q alike, s/z alike, ph = f, doubles once.
+    "most critical" and "moist critikal" both give "mstkrtkl"."""
+    t = _squash(text).replace("ph", "f").replace("ck", "k")
+    t = t.translate(str.maketrans({"c": "k", "q": "k", "z": "s", "1": "i", "0": "o", "3": "e"}))
+    t = re.sub(r"[aeiouyhw]", "", t)
+    return re.sub(r"(.)\1+", r"\1", t)
 
 
 def _try(*args: str, timeout: float = 30, errors: list[Exception] | None = None) -> Any:
@@ -302,6 +315,19 @@ def pick(query: str = "", channel: str = "", newest: bool = False) -> dict[str, 
     if not channel and query:
         channel, query = channel_in(query)
         guessed = bool(channel)
+    if not channel and newest and query:
+        # "the newest, most critical" (no channel given): the words left are most likely a channel
+        rest = re.sub(r"^(?:the\s+)?(?:newest|latest|most recent|new|last)\b[\s,]*", "", query.strip(), flags=re.I)
+        rest = re.sub(r"\s*\b(?:video|vid|upload)s?\b\s*", " ", rest, flags=re.I).strip(" ,.")
+        if rest and len(rest.split()) <= 4:
+            try:
+                cid, cname = find_channel(rest)
+            except FunctionError:
+                cid = ""
+            if cid and _name_score(rest, cname) >= 0.6:
+                vids = channel_uploads(cid)
+                if vids:
+                    return vids[0]
     if channel:
         try:
             cid, cname = find_channel(channel)
@@ -398,6 +424,8 @@ def parse_request(text: str) -> dict[str, Any]:
     t = re.sub(r"^\W*(?:can you\s+|could you\s+|please\s+)?(?:pull up|put on|play|show me|find|open|watch)\s+",
                "", text.strip(), flags=re.I)
     t = re.sub(r"\s+(?:on|from)\s+youtube\b", "", t, flags=re.I).strip(" .?!")
+    # speech recognition punctuates: "the newest, most critical video" -- commas aren't part of a name
+    t = re.sub(r"\s+", " ", re.sub(r"[,;:!?\"“”]+", " ", t)).strip(" .")
     newest = bool(re.search(r"\b(newest|latest|most recent|new|last)\b", t, re.I))
     m = re.search(r"^(?:the\s+)?(?:newest|latest|most recent|new|last)?\s*(?:video|upload|vid)s?\s+(?:from|by|of)\s+"
                   r"(.+?)(?:\s+(?:about|on)\s+(.+))?$", t, re.I)

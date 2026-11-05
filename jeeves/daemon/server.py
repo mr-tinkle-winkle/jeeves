@@ -317,7 +317,8 @@ class Server:
         loop = self.loop
         self.engine.on_exit = lambda: loop.call_soon_threadsafe(stop.set)
         self.engine.start()
-        log.info("jeeves daemon listening on %s", sock)
+        from .. import __build__
+        log.info("jeeves daemon (build %s) listening on %s", __build__, sock)
         # Everything loaded at startup lives as long as the daemon: out of the garbage collector's way
         # (its full sweeps went over all of it every few seconds -- the audio makes a lot of garbage).
         import gc
@@ -326,8 +327,44 @@ class Server:
         loop.call_later(90, lambda: (gc.collect(), gc.freeze()))     # (and what the model preload made)
         async with server:
             await stop.wait()
-        self.engine.stop()
+        log.info("stopping")
+        # Stopping used to hang on a rebuild (systemd waits 90 s, then kills it): a request still
+        # running, a model server still starting (its lock), and Python joining every worker thread
+        # on the way out. Whatever is left after a few seconds isn't worth waiting for.
+        _exit_after(STOP_SECONDS)
         sock.unlink(missing_ok=True)
+        try:
+            await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(None, self.engine.stop), STOP_SECONDS - 1)
+        except asyncio.TimeoutError:
+            log.warning("still stopping after %.0f s: leaving the rest", STOP_SECONDS - 1)
+        log.info("stopped")
+        _exit_now()
+
+
+STOP_SECONDS = 6.0
+
+
+def _exit_now(code: int = 0) -> None:
+    """Out, without waiting on worker threads (concurrent.futures joins them all at exit, and one
+    blocked in a model server or a long request holds the whole process up)."""
+    import sys
+    try:
+        logging.shutdown()
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(code)
+
+
+def _exit_after(seconds: float) -> None:
+    import threading
+
+    def go() -> None:
+        log.warning("didn't stop within %.0f s: exiting anyway", seconds)
+        _exit_now()
+    t = threading.Timer(seconds, go)
+    t.daemon = True
+    t.start()
 
 
 def _strip_entry(res: dict[str, Any]) -> dict[str, Any]:

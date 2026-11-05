@@ -114,6 +114,10 @@ in
         # no multi-gigabyte core dumps when a model server crashes (systemd-coredump chewing on them
         # kept the CPU hot and the user manager slow)
         LimitCORE = 0;
+        # the daemon exits within 6 s of being asked (jeeves/daemon/server.py); its model servers and
+        # overlays go with it (mixed: SIGTERM to the daemon, then SIGKILL to anything left over)
+        TimeoutStopSec = 10;
+        KillMode = "mixed";
       };
     };
   };
