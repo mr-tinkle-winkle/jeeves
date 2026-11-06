@@ -233,3 +233,32 @@ def test_planned_screen_positions_are_absolute_and_land_on_text():
     assert out[0] == {"do": "move", "x": 900, "y": 400, "absolute": True}
     rel = Engine._tidy_plan([{"do": "move", "x": 10, "y": -5}], [("Save", 900, 400)], (0, 0, 1920, 1080))
     assert "absolute" not in rel[0]
+
+
+def test_a_busy_speech_model_isnt_unloaded_under_it(engine):
+    class Inst:
+        busy = 1
+        unloaded = False
+        def unload(self): self.unloaded = True
+    inst = Inst()
+    engine.models.instances["whisper-old"] = inst
+    engine.models.prune()
+    assert not inst.unloaded and "whisper-old" in engine.models.instances
+    inst.busy = 0
+    engine.models.prune()
+    assert inst.unloaded and inst.retired
+
+
+def test_a_swapped_speech_model_isnt_a_crash(engine, monkeypatch):
+    from jeeves.models.backends import BackendError
+
+    class Old:
+        retired = True
+        def transcribe(self, *a, **k): raise BackendError("Remote end closed connection without response")
+
+    class New:
+        def transcribe(self, *a, **k): return "hello"
+    models = iter([Old(), New()])
+    monkeypatch.setattr(engine.models, "stt", lambda agent=None: next(models))
+    assert engine.transcribe(b"\0" * 3200) == "hello"
+    assert not getattr(engine, "_stt_fails", [])

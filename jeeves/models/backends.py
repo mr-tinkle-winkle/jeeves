@@ -193,7 +193,16 @@ class WhisperCppSTT(STT):
     def loaded(self) -> bool:
         return self.server.alive()
 
+    busy = 0                                 # transcriptions in progress (the manager won't unload it meanwhile)
+
     def transcribe(self, pcm: bytes, prompt: str = "", language: str = "en") -> str:
+        self.busy += 1
+        try:
+            return self._transcribe(pcm, prompt, language)
+        finally:
+            self.busy -= 1
+
+    def _transcribe(self, pcm: bytes, prompt: str = "", language: str = "en") -> str:
         if not self.loaded():
             self.load()
         fields = {"response_format": "verbose_json", "temperature": "0.0"}

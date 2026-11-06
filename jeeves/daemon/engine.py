@@ -881,6 +881,10 @@ class Engine:
             try:
                 return stt.transcribe(pcm, prompt=self.stt_prompt(), language=lang)
             except (BackendError, OSError) as exc:
+                if getattr(stt, "retired", False) and attempt == 1:
+                    # the speech model was switched (or unloaded) while it worked: not a crash -- the new one
+                    log.info("speech model changed mid-transcription; trying again with the new one")
+                    continue
                 # crashing again and again (each restart reloading the model): rest it for 5 minutes
                 fails = [t for t in getattr(self, "_stt_fails", []) if now - t < 300] + [now]
                 self._stt_fails = fails

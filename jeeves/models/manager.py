@@ -515,15 +515,26 @@ class ModelManager:
         for kind in KINDS:
             wanted |= self._ids_for_kind(kind)
         dropped = []
+        later = False
         with self._lock:
             for mid in list(self.instances):
                 if mid not in wanted:
+                    if getattr(self.instances[mid], "busy", 0):
+                        # still transcribing: unloading it now cut that off ("Remote end closed connection"),
+                        # which counted as a crash -- switching speech models a few times put it to rest
+                        later = True
+                        continue
                     inst = self.instances.pop(mid)
+                    inst.retired = True
                     try:
                         inst.unload()
                     except Exception:
                         log.exception("unloading %s failed", mid)
                     dropped.append(mid)
+        if later:
+            t = threading.Timer(3.0, self.prune)
+            t.daemon = True
+            t.start()
         if dropped:
             log.info("unloaded models no longer in use: %s", ", ".join(dropped))
             self.publish("models", self.status())
