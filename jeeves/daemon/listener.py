@@ -285,7 +285,9 @@ class Listener(threading.Thread):
         # hold-to-listen: the wake model only runs while the keys are held -- and while a listen is open,
         # where its word decoding helps tell when you've stopped talking (a name doesn't count then)
         if spotter is not None and names and (gate or session is not None):
-            if self.wake_rec is None or names != self.spotter_names or self.wake_owner is not spotter:
+            if self.wake_rec is None or names != self.spotter_names or self.wake_owner is not spotter or \
+                    getattr(spotter, "grammar_version", 0) != getattr(self, "_grammar_version", 0):
+                self._grammar_version = getattr(spotter, "grammar_version", 0)
                 try:
                     self.wake_rec = spotter.recognizer(names)
                 except Exception:
@@ -323,7 +325,9 @@ class Listener(threading.Thread):
             best = max(hits, key=lambda h: h[1])
             w = self._wake_audio(self.wake_rec, best[0])
             eng.on_wake(self.source, best[0], best[1], w["after"], threshold=self.threshold(),
-                        words=w["trailing"], name_audio=w["name"], after_voiced=w["after_voiced"])
+                        words=w["trailing"], name_audio=w["name"], after_voiced=w["after_voiced"],
+                        **({"wake_words": list(self.wake_rec.last_heard)}
+                           if getattr(self.wake_rec, "last_heard", None) else {}))
             if eng.sessions.get(self.source) is not session:
                 return                       # a new listen starts with the audio after the name
         if session is not None and session.suspended:

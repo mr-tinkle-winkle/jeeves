@@ -272,6 +272,12 @@ class ModelManager:
             if self.wake is None or self.wake.entry.id != entry.id:
                 self.wake = VoskWake(entry)
             self.wake.decoys = bool(self.settings.get("wake_word.decoys", True))
+            extra = tuple(self.settings.get("wake_word.extra_decoys", []) or [])
+            if extra != self.wake.extra_decoys:
+                self.wake.extra_decoys = extra
+                self.wake.grammar_version += 1
+            from .backends import WakeRecognizer
+            WakeRecognizer.MIN_SECONDS = float(self.settings.get("wake_word.learned_min_seconds", 0) or 0)
             if not self.wake.loaded():
                 try:
                     self.wake.load()

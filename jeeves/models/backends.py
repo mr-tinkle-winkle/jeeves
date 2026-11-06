@@ -283,7 +283,8 @@ class WakeRecognizer:
         self.model = model                  # keeps the shared model alive while in use
         self.names = names
         own = {w for n in names for w in n.split()}
-        self.decoys = [w for w in (decoys or []) if w not in own]
+        self.decoys = [w for w in dict.fromkeys(decoys or []) if w not in own]
+        self.last_heard: list[tuple[str, float, float]] = []   # the words of the last phrase with a name
         self.rec = _vosk().KaldiRecognizer(model, RATE, json.dumps(names + self.decoys + ["[unk]"]))
         self.rec.SetWords(True)
         # (not SetPartialWords: with word times in partial results Vosk holds partials back by a second
@@ -357,6 +358,7 @@ class WakeRecognizer:
                  for w in words]
         found = self.pick_names(heard, self.names)
         if found:
+            self.last_heard = heard
             log.info("wake model heard %s -> %s", " ".join(f"{w}({c:.2f}, {d:.2f}s)" for w, c, d in heard),
                      ", ".join(f"{n} {c:.2f}" for n, c in found))
         return found
@@ -369,7 +371,12 @@ class WakeRecognizer:
         if seconds is None:
             return 1.0
         expected = 0.05 + 0.045 * len(word)          # "jeeves": 0.32 s
+        learned = WakeRecognizer.MIN_SECONDS        # (from your marked wake-ups: wakeclips.relearn_length)
+        if learned and seconds < learned:
+            return 0.2
         return max(0.0, min(1.0, seconds / expected)) ** 2
+
+    MIN_SECONDS = 0.0
 
     EXTRA_WORD_CONF = 0.55   # "evil" in "evil jeeves" must be heard this clearly, or it's plain "jeeves"
 
@@ -440,9 +447,12 @@ class VoskWake:
             self.load()
         names = sorted({n.lower() for n in names if n.strip()})
         self._warn_unknown(names)
-        return WakeRecognizer(self.model, names, self._known(WakeRecognizer.DECOYS) if self.decoys else [])
+        words = list(WakeRecognizer.DECOYS) + list(self.extra_decoys) if self.decoys else list(self.extra_decoys)
+        return WakeRecognizer(self.model, names, self._known(words))
 
     decoys = True                           # wake_word.decoys (set by the model manager)
+    extra_decoys: tuple[str, ...] = ()      # wake_word.extra_decoys: learned from wake-ups marked "not a call"
+    grammar_version = 0                     # bumped when those change: listeners rebuild their recognizers
 
     def _known(self, words: list[str] | tuple[str, ...]) -> list[str]:
         find = getattr(self.model, "vosk_model_find_word", None) or getattr(self.model, "find_word", None)

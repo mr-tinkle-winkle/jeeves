@@ -170,6 +170,9 @@ class Engine:
         self.speaking_until = 0.0
         self._reply_cache: dict[tuple, tuple[bytes, int]] = {}      # wake-up replies, synthesized once
         self._why_modes: dict[str, str] = {}
+        self._wake_words: dict[str, list[Any]] = {}
+        from .wakeclips import WakeClips
+        self.clips = WakeClips(self.settings, self.training)
         self._mic_name, self._mic_checked = "", 0.0
         self._wakes: dict[str, list[float]] = {}                       # source -> when the wake model called (last minute)
         self._backup_guess: dict[str, str | None] = {}              # source -> the agent a missed call sounded like
@@ -697,6 +700,15 @@ class Engine:
         self.run_async(self.apply_settings)      # the mic may not be needed any more
         took = time.time() - s.started
         speech = s.voiced_frames * FRAME_MS / 1000
+        if s.mode == "request" and s.preroll is not None and not getattr(s, "clip_id", None):
+            # kept to listen back to (Training > Recent wake-ups): what woke it, and what followed
+            try:
+                s.clip_id = self.clips.add(b"".join(s.preroll) + s.pcm(), s.agent_id, s.source,
+                                           getattr(s, "wake_name", ""), s.wake_conf, getattr(s, "wake_words", []))
+                if not s.got_speech:
+                    self.clips.update(s.clip_id, outcome="nothing said after the name")
+            except OSError:
+                log.exception("couldn't keep the wake-up clip")
         log.info("listen ended (%s, %s): %.1fs long, %.2fs of speech%s", s.agent_id, s.mode, took, speech,
                  " -- hit the time limit" if took >= s.max_seconds - 0.5 else "")
         # only a click or a breath: nothing to transcribe. (This used to need 0.3 s of speech, which a short
@@ -704,6 +716,7 @@ class Engine:
         # Speech recognition's own silence filter and the name check below catch the rest.)
         if s.got_speech and (s.mode == "request" and speech < 0.12 or s.mode == "answer" and speech < 0.1):
             log.info("  too little speech to be a request; ignored")
+            self.clips.update(getattr(s, "clip_id", None), outcome="too little speech after the name")
             s.got_speech = False
             if s.interrupting:
                 self._resume(s.interrupting)
@@ -743,6 +756,8 @@ class Engine:
             self.flash_unavailable(s.agent_id, "speech recognition failed (see the log)")
             self.set_indicator(s.request_id, s.agent_id, "idle")
             return
+        clip = getattr(s, "clip_id", None)
+        self.clips.update(clip, heard=text, outcome="heard")
         if s.mode == "request" and s.preroll is not None and spells:
             other = self.named_agent(text, s.source)
             if other is not None and other != s.agent_id:
@@ -759,6 +774,7 @@ class Engine:
                 # the wake model hears "geez", "believes", "cheese" as "Jeeves" now and then; speech
                 # recognition, which heard the whole phrase, says the name wasn't said: not for us
                 log.info("  woke on the name, but speech recognition heard '%s': not the name, ignored", text)
+                self.clips.update(clip, outcome="ignored: speech recognition didn't hear the name")
                 self.set_indicator(s.request_id, s.agent_id, "misheard")       # spins away red
                 rid, aid0 = s.request_id, s.agent_id
                 threading.Timer(0.9, lambda: self.set_indicator(rid, aid0, "idle")).start()
@@ -791,9 +807,11 @@ class Engine:
                 return
         if not text.strip():
             log.info("  nothing understandable in it")
+            self.clips.update(clip, outcome="nothing understandable after the name")
             self._didnt_catch(s)
             return
         log.info("  heard: %s", text)
+        self.clips.update(clip, outcome=f"ran as a request for {s.agent_id}")
         self.set_indicator(s.request_id, s.agent_id, "thinking")     # on from the intent step, not at "say"
         res = self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id,
                                manual=s.manual)
@@ -956,10 +974,11 @@ class Engine:
 
     def on_wake(self, source: str, name: str, conf: float, after: list[bytes], threshold: float | None = None,
                 words: int = 0, name_audio: list[bytes] | None = None,
-                after_voiced: list[bool] | None = None) -> None:
+                after_voiced: list[bool] | None = None, wake_words: list[Any] | None = None) -> None:
         """The wake word model heard a call name. after: the audio since the name (after_voiced: the
         speech detector's verdict on each frame), words: how many words it heard after the name,
         name_audio: the name itself (speech recognition checks it was really said)."""
+        self._wake_words[source] = list(wake_words or [])
         if not self.is_on() or self.previewing():
             return
         now = time.time()
@@ -1036,6 +1055,8 @@ class Engine:
         if name_audio:
             s.preroll = list(name_audio)
         s.wake_conf = conf
+        s.wake_name = name
+        s.wake_words = self._wake_words.pop(source, [])
         if spoke_at is None and self._wake_reply_phrases(self.agents().get(aid, {})) and \
                 conf >= self.threshold(self.agents().get(aid, {})):     # (an unsure name gets no "Yes?")
             # still quiet by then: "Yes?" (Listener.process decides, by whether you've started talking --

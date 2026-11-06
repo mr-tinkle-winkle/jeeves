@@ -23,6 +23,7 @@
 , kdotool
 , sox
 , yt-dlp
+, ffmpeg-headless ? null   # wake-up clips as mp3 (Training > Recent wake-ups); without it they're wav
   # yt-dlp needs a JavaScript runtime to solve YouTube's player challenges (otherwise: missing formats,
   # "sign in to confirm you're not a bot")
 , deno ? null
@@ -81,6 +82,7 @@ py.buildPythonApplication {
       whisper llama piper-tts espeak-ng tesseract wl-clipboard xclip libnotify
       pipewire pulseaudio grim kdotool sox yt-dlp
     ] ++ lib.optional (deno != null) deno
+      ++ lib.optional (ffmpeg-headless != null) ffmpeg-headless
       ++ lib.optional (kdePackages != null && kdePackages ? spectacle) kdePackages.spectacle
       ++ lib.optional (kdePackages != null && kdePackages ? libkscreen) kdePackages.libkscreen
       ++ extraRuntimePackages))

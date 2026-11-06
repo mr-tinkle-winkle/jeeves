@@ -127,7 +127,7 @@ class GeneralPage(Page):
         jf_in.clicked.connect(lambda: (self.jf_state.setText("Signing in..."), daemon.call(
             "jellyfin.sign_in", signed, failed, url=self.jf_url.text().strip(), username=self.jf_user.text().strip(),
             password=self.jf_pw.text())))
-        jf.addWidget(row(self.jf_user, self.jf_pw, jf_in, stretch=0))
+        jf.addWidget(row(self.jf_user, self.jf_pw, jf_in, stretch=(0, 1)))
         jf.addWidget(self.jf_state)
         self.b.choice(jf, "Play in", "jellyfin.open_in",
                       [("The Jellyfin app (opened if it isn't running)", "app"), ("Jeeves' own player", "player")],
@@ -597,6 +597,33 @@ class TrainingPage(Page):
         s.addWidget(row(rec, ev, exp, self.count))
         self.b.list_text(s, "Extra vocabulary", "training.stt_vocabulary", placeholder="Afterglow, Puppetry, Hyprland")
 
+        w = self.section("Recent wake-ups")
+        w.addWidget(label("The last times a name woke an agent: listen to what did it, and say whether it was "
+                          "a call. A real one (with what you said, if speech recognition got it wrong) joins your "
+                          "voice recordings; a false one teaches the wake word model what it really was (\"guh\", "
+                          "\"cheese\" become words it can tell apart from the name), and with a few of each it "
+                          "learns how short a name can be and still count."))
+        self.clips = CustomListWidget()
+        self.clips.setMinimumHeight(220)
+        self.clips.itemDoubleClicked.connect(lambda _i: self.play_clip())
+        w.addWidget(self.clips)
+        play = CustomButton("▶ Play")
+        play.clicked.connect(self.play_clip)
+        good = CustomButton("It was a call")
+        good.clicked.connect(lambda: self.mark_clip(True))
+        bad = CustomButton("Not a call")
+        bad.clicked.connect(lambda: self.mark_clip(False))
+        self.clip_said = CustomLineEdit()
+        self.clip_said.setPlaceholderText("what you actually said (optional)")
+        again = CustomButton("Refresh")
+        again.clicked.connect(self.load_clips)
+        w.addWidget(row(play, good, bad, self.clip_said, again, stretch=3))
+        self.clip_state = QLabel("")
+        self.clip_state.setWordWrap(True)
+        w.addWidget(self.clip_state)
+        self._clips: list[dict[str, Any]] = []
+        self._player: Any = None
+
         i = self.section("What you mean (intent)")
         self.b.check(i, "Show rated history to the intent model", "training.intent_examples_from_ratings")
         self.b.number(i, "Rated examples shown", "training.max_examples", 0, 100, 1)
@@ -627,6 +654,65 @@ class TrainingPage(Page):
                          lambda _e: None)
         self.daemon.call("functions.list", self._funcs, lambda _e: None)
         self.daemon.call("training.intent_list", self._intents, lambda _e: None)
+        self.load_clips()
+
+    # ---- recent wake-ups ------------------------------------------------------
+    def load_clips(self) -> None:
+        self.daemon.call("wake_clips.list", self._show_clips, lambda _e: None)
+
+    def _show_clips(self, items: Any) -> None:
+        keep = self.clips.currentRow()
+        self._clips = items or []
+        self.clips.clear()
+        for c in self._clips:
+            when = time.strftime("%a %H:%M:%S", time.localtime(c.get("time", 0)))
+            mark = {"good": "✓ call  ", "bad": "✗ not a call  "}.get(c.get("verdict") or "", "")
+            words = " ".join(f"{w[0]}({w[1]:.2f}, {w[2]:.2f}s)" for w in c.get("words") or [] if len(w) >= 3)
+            heard = c.get("heard") or "…"
+            said = f"  — you said: “{c['said']}”" if c.get("said") else ""
+            self.clips.addItem(f"{mark}{when}  {c.get('agent') or '?'}: “{heard}”  [{c.get('outcome', '')}]"
+                               f"{'  wake model: ' + words if words else ''}{said}")
+        if 0 <= keep < self.clips.count():
+            self.clips.setCurrentRow(keep)
+
+    def _clip(self) -> dict[str, Any] | None:
+        r = self.clips.currentRow()
+        return self._clips[r] if 0 <= r < len(self._clips) else None
+
+    def play_clip(self) -> None:
+        c = self._clip()
+        if not c or not c.get("path"):
+            self.clip_state.setText("Pick a wake-up first (its clip may still be being written).")
+            return
+        from PySide6.QtCore import QUrl
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+        if self._player is None:
+            self._player = QMediaPlayer(self)
+            self._out = QAudioOutput(self)
+            self._player.setAudioOutput(self._out)
+        self._player.stop()
+        self._player.setSource(QUrl.fromLocalFile(c["path"]))
+        self._player.play()
+
+    def mark_clip(self, good: bool) -> None:
+        c = self._clip()
+        if not c:
+            self.clip_state.setText("Pick a wake-up first.")
+            return
+
+        def done(res: Any) -> None:
+            parts = []
+            if (res or {}).get("recording"):
+                parts.append(f"kept as a voice recording of “{res['recording']}”")
+            if (res or {}).get("decoys"):
+                parts.append("the wake word model now tells these apart from the name: " + ", ".join(res["decoys"]))
+            if (res or {}).get("min_seconds"):
+                parts.append(f"a name now has to take at least {res['min_seconds']:.2f} s to count")
+            self.clip_state.setText(("Marked. " + "; ".join(parts) + ".") if parts else "Marked.")
+            self.clip_said.clear()
+            self.load_clips()
+        self.daemon.call("wake_clips.mark", done, lambda e: self.clip_state.setText(f"Couldn't mark it: {e}"),
+                         id=c["id"], good=good, said=self.clip_said.text().strip())
 
     def _funcs(self, funcs: Any) -> None:
         self.ip_func.clear()

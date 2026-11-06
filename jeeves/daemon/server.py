@@ -241,6 +241,8 @@ class Server:
             "triggers.add": lambda spec, agent=None, request="": e.triggers.add(spec, agent, request),
             "triggers.remove": lambda id: e.triggers.remove(id),
             "training.phrases": e.training.phrases,
+            "wake_clips.list": e.clips.list,
+            "wake_clips.mark": lambda id, good, said="": e.clips.mark(id, bool(good), said),
             "training.record": lambda text: e.training_record(text),
             "training.recordings": e.training.recordings,
             "training.evaluate": lambda: e.training.evaluate(e.models.stt()),
