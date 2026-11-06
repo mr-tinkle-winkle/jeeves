@@ -406,6 +406,18 @@ def main(popups: bool = False) -> int:
                 stage = st["stage"]
                 x = self.width() - size - 6 if right else 6
                 rect = QRectF(x, y, size, size)
+                if stage == "checking":
+                    # speech recognition checking whether a name was said: barely there -- a small faint
+                    # dot, slowly breathing, no label (indicators.checking: subtle | full | off)
+                    a = int(26 + 26 * self._flash(1.6))
+                    c = self.color("thinking")
+                    c.setAlpha(a)
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(c)
+                    d = max(6.0, size * 0.16)
+                    p.drawEllipse(QRectF(rect.center().x() - d / 2, rect.center().y() - d / 2, d, d))
+                    y += size + 8
+                    continue
                 if stage == "listening":
                     self._mic(p, rect, st)
                     self.hits.append((rect, "mic", st["request"]))

@@ -337,6 +337,10 @@ class IndicatorsPage(Page):
         self.b.check(s, "Microphone while listening", "indicators.stt_active")
         self.b.check(s, "What you said (transcript), under the mic", "indicators.stt_output")
         self.b.check(s, "Processing spinner", "indicators.processing")
+        self.b.choice(s, "While checking for a missed name", "indicators.checking",
+                      [("A faint dot (barely visible)", "subtle"), ("The full spinner: \"Checking what you said\"", "full"),
+                       ("Nothing", "off")],
+                      hint="When the wake word model may have missed a call and speech recognition checks what you said.")
         self.b.check(s, "Response text", "indicators.response_text")
         self.b.check(s, "Timers (bottom right)", "indicators.timers")
         self.b.choice(s, "Corner", "indicators.corner", [("Top right", "top-right"), ("Top left", "top-left"),

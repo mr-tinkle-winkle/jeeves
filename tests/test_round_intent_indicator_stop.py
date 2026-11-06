@@ -176,3 +176,16 @@ def test_a_device_that_is_the_mic_gets_no_second_listener(engine, monkeypatch):
     wanted = engine._wanted_sources()
     assert "device:alsa_input.usb-ZOOM" not in wanted and "microphone" in wanted
     assert engine._listens(engine.agents()["jeeves"], "microphone")
+
+
+def test_checking_for_a_missed_name_is_subtle_by_default(engine):
+    ev = _events(engine)
+    engine._checking("backup-microphone", "jeeves")
+    assert [d["stage"] for t, d in ev if t == "indicator"] == ["checking"]
+    engine.settings.set("indicators.checking", "full")
+    engine._checking("backup-microphone", "jeeves")
+    assert ev[-1][1]["stage"] == "thinking" and ev[-1][1]["detail"] == "Checking what you said"
+    engine.settings.set("indicators.checking", "off")
+    n = len(ev)
+    engine._checking("backup-microphone", "jeeves")
+    assert len(ev) == n

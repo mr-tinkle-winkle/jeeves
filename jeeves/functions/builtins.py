@@ -644,7 +644,7 @@ def jellyfin(ctx, title, kind="any", season=None, episode=None):
     j = jf.from_settings(ctx.settings)
     ctx.state("researching", "Looking on Jellyfin")
     want = "show" if (season or episode) and kind == "any" else str(kind or "any")
-    item = j.find(str(title), want)
+    item = j.find(str(title), want, guess=lambda asked, names: _guess_title(ctx, asked, names))
     if item.get("Type") == "Series":
         item = j.episode(item, int(season) if season is not None else None,
                          int(episode) if episode is not None else None)
@@ -685,6 +685,23 @@ def jellyfin(ctx, title, kind="any", season=None, episode=None):
     eng.run_async(lambda: j.report(item, start, started=True))
     where = f", from {start // 60000} minutes in" if start >= 60000 else ""
     return ctx.say(f"Here's {jf.label(item)}{where}.")
+
+
+def _guess_title(ctx, asked, names):
+    """The language model picks which of the library's names was meant (speech recognition's spelling
+    rarely matches a title's: "prime time" for "Primetime")."""
+    if not names:
+        return None
+    ctx.state("researching", "Looking through the whole library")
+    listing = "\n".join(names[:1500])
+    reply = ctx.engine.models.respond(
+        ctx.agent, f"Asked for: {asked}\n\nTitles:\n{listing}",
+        system="Someone asked (by voice, so the spelling may be off) for one of these titles. Reply with that "
+               "title exactly as listed, or NONE if none of them is it. Nothing else.",
+        raw=True, temperature=0.0, max_tokens=40, kind="step")
+    pick = (reply or "").strip().strip('"').splitlines()[0].strip() if reply else ""
+    ctx.think(f"Asked the model which title '{asked}' is: {pick or 'no answer'}")
+    return None if not pick or pick.upper() == "NONE" else pick
 
 
 def _jellyfin_app(ctx, j):

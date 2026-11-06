@@ -128,25 +128,99 @@ class Jellyfin:
                        Fields="UserData,Path,Container,ProductionYear,SeriesName,Chapters,MediaSources")
         return (res or {}).get("Items") or []
 
-    def find(self, query: str, kind: str = "any") -> dict[str, Any]:
-        items = self.search(query, kind)
-        if not items and kind != "any":
-            items = self.search(query, "any")
-        if not items:
-            raise FunctionError(f"Jellyfin has nothing called {query}")
+    def find(self, query: str, kind: str = "any", guess: Any = None) -> dict[str, Any]:
+        """The item asked for, trying harder each step:
+          1. Jellyfin's search for what was said;
+          2. looser searches -- words joined or split ("prime time" / "primetime"), each long word alone --
+             judged by how the names compare with spaces and punctuation ignored, and by sound;
+          3. the whole library's names, compared the same way;
+          4. guess(asked, names) -> a name: the language model picks from the library."""
         want = normalize(query)
+        items = self.search(query, kind) or (self.search(query, "any") if kind != "any" else [])
+        best = self._best(items, want)
+        if best is not None and self.closeness(want, best.get("Name", "")) >= 0.9:
+            return best
+        tried = {query.lower()}
+        loose: list[dict[str, Any]] = list(items)
+        for q in self.variants(query):
+            if q.lower() in tried:
+                continue
+            tried.add(q.lower())
+            loose += self.search(q, kind)
+        best = self._best(loose, want)
+        if best is not None and self.closeness(want, best.get("Name", "")) >= 0.78:
+            return best
+        library = self.everything(kind)
+        best = self._best(library, want)
+        if best is not None and self.closeness(want, best.get("Name", "")) >= 0.78:
+            return best
+        if guess is not None and library:
+            names = list(dict.fromkeys(i.get("Name", "") for i in library if i.get("Name")))
+            picked = guess(query, names)
+            if picked:
+                hit = [i for i in library if normalize(i.get("Name", "")) == normalize(picked)]
+                if hit:
+                    return self._full(hit[0])
+        if items:                                    # nothing close: what Jellyfin's own search liked best
+            return self._best(items, want)
+        raise FunctionError(f"Jellyfin has nothing called {query}")
+
+    @staticmethod
+    def closeness(want: str, name: str) -> float:
+        from .youtube import sound_key
+        a, b = normalize(want), normalize(name)
+        sa, sb = re.sub(r"[^a-z0-9]", "", a), re.sub(r"[^a-z0-9]", "", b)
+        b_short = re.sub(r"^(?:the|a|an) ", "", b)
+        s = max(similarity(a, b), similarity(a, b_short), similarity(sa, sb))
+        if sa and sa == sb:
+            s = 1.0                                  # "prime time" = "Primetime" = "Prime-Time"
+        elif len(sa) >= 4 and (sa in sb or sb in sa):
+            s = max(s, 0.8)
+        ka, kb = sound_key(a), sound_key(b)
+        if len(ka) >= 4 and ka == kb:
+            s = max(s, 0.85)
+        return s
+
+    def _best(self, items: list[dict[str, Any]], want: str) -> dict[str, Any] | None:
+        if not items:
+            return None
 
         def score(it: dict[str, Any]) -> float:
-            name = normalize(it.get("Name", ""))
-            s = similarity(want, name)
-            if want == name:
-                s += 1.0
-            elif want and (want in name or name in want):
-                s += 0.4
+            s = self.closeness(want, it.get("Name", ""))
             if it.get("Type") == "Episode":         # a show asked for by name: the show, not one episode of it
                 s -= 0.3
             return s
         return max(items, key=score)
+
+    @staticmethod
+    def variants(query: str) -> list[str]:
+        words = normalize(query).split()
+        out = ["".join(words)] if len(words) > 1 else []
+        w = words[0] if words else ""
+        if len(words) == 1 and len(w) >= 6:          # "primetime" -> "prime time" (every split point)
+            out += [f"{w[:i]} {w[i:]}" for i in range(3, len(w) - 2)]
+        out += [x for x in words if len(x) >= 4 and x not in ("the", "show", "movie", "with", "from")]
+        out += [x[:4] for x in words if len(x) >= 6]
+        return list(dict.fromkeys(out))[:12]
+
+    def everything(self, kind: str = "any") -> list[dict[str, Any]]:
+        """Every show / movie / book in the library: names only (cached a few minutes)."""
+        import time
+        key = kind
+        cache = self.__dict__.setdefault("_library", {})
+        if key in cache and time.time() - cache[key][0] < 300:
+            return cache[key][1]
+        types = [t for t in KINDS.get(kind, KINDS["any"]) if t not in ("Episode", "Audio")] or KINDS.get(kind)
+        res = self.get("/Items", userId=self.user_id(), Recursive="true", IncludeItemTypes=",".join(types),
+                       Fields="ProductionYear", EnableImages="false", EnableUserData="false", Limit=20000)
+        items = (res or {}).get("Items") or []
+        cache[key] = (time.time(), items)
+        return items
+
+    def _full(self, item: dict[str, Any]) -> dict[str, Any]:
+        """An item from the bare library list, with what playing it needs."""
+        got = self.get(f"/Users/{self.user_id()}/Items/{item['Id']}")
+        return got or item
 
     def episode(self, series: dict[str, Any], season: int | None, number: int | None) -> dict[str, Any]:
         uid = self.user_id()

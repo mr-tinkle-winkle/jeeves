@@ -195,6 +195,9 @@ DEFAULTS: dict[str, Any] = {
         "corner": "top-right",            # top-left | top-right | bottom-left | bottom-right
         "screen": "mouse",                # mouse (the monitor the mouse is on) | primary | an output name
         "stt_active": True,
+        # while speech recognition checks for a name the wake model may have missed:
+        # subtle (a faint dot) | full (the spinner, "Checking what you said") | off
+        "checking": "subtle",
         "stt_output": True,
         "processing": True,
         "timers": True,                   # bottom right, per SPEC

@@ -1179,7 +1179,7 @@ class Engine:
         guess = self._backup_guess.pop(source, None) or self.main_agent() or next(iter(self.active_agents()), None)
         rid = f"backup-{source}"
         if guess:
-            self.set_indicator(rid, guess, "thinking", "Checking what you said")
+            self._checking(rid, guess)
         try:
             self._backup_check(source, pcm, end_frame)
         finally:
@@ -1266,7 +1266,7 @@ class Engine:
             # names come from the transcript here: show the spinner while speech recognition works
             guess = self._backup_guess.pop(source, None) or self.main_agent()
             if guess:
-                self.set_indicator(rid, guess, "thinking", "Checking what you said")
+                self._checking(rid, guess)
         try:
             self._on_utterance(source, pcm, may_call, started, ended)
         finally:
@@ -1286,6 +1286,16 @@ class Engine:
                                              for t in self.triggers.all()):
             return None
         return self.models.wake_spotter()
+
+    def _checking(self, rid: str, agent_id: str) -> None:
+        """While speech recognition checks whether a name was said (a call the wake model may have
+        missed): a barely-visible dot by default; the agent's spinner with "Checking what you said"; or
+        nothing (Settings > Indicators: indicators.checking = subtle | full | off)."""
+        how = self.settings.get("indicators.checking", "subtle")
+        if how == "full":
+            self.set_indicator(rid, agent_id, "thinking", "Checking what you said")
+        elif how != "off":
+            self.set_indicator(rid, agent_id, "checking")
 
     def _woken_during(self, source: str, started: float, ended: float) -> bool:
         """Did the wake word model call an agent while this was being said? Then the call has been handled

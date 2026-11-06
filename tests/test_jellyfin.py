@@ -13,6 +13,7 @@ ITEMS = [
      "UserData": {"PlaybackPositionTicks": 12_000_000_000}, "Chapters": [{"StartPositionTicks": 0, "Name": "Start"}]},
     {"Id": "m2", "Name": "Dune: Part Two", "Type": "Movie", "ProductionYear": 2024},
     {"Id": "b1", "Name": "Project Hail Mary", "Type": "Book", "Container": "epub"},
+    {"Id": "p1", "Name": "Primetime", "Type": "Series"},
 ]
 EPISODES = [{"Id": f"e{s}{e}", "Name": f"Ep {s}.{e}", "Type": "Episode", "SeriesName": "The Office",
              "ParentIndexNumber": s, "IndexNumber": e} for s in (1, 2) for e in (1, 2, 3)]
@@ -47,12 +48,19 @@ class Fake(BaseHTTPRequestHandler):
         if u.path == "/Items":
             kinds = q.get("IncludeItemTypes", "").split(",")
             term = q.get("searchTerm", "").lower()
-            return self._send({"Items": [i for i in ITEMS if i["Type"] in kinds and term.split()[0] in i["Name"].lower()]})
-        if u.path == "/Shows/NextUp":
+            # (like Jellyfin's: every word of the search in the name)
+            return self._send({"Items": [i for i in ITEMS if i["Type"] in kinds and
+                                         all(w in i["Name"].lower() for w in term.split())]})
+        if u.path == "/Shows/NextUp" and q.get("seriesId") == "s1":
             return self._send({"Items": [EPISODES[4]]})
         if u.path == "/Shows/s1/Episodes":
             s = q.get("season")
             return self._send({"Items": [e for e in EPISODES if s is None or e["ParentIndexNumber"] == int(s)]})
+        if u.path.startswith("/Users/u1/Items/"):
+            return self._send(next(i for i in ITEMS if i["Id"] == u.path.rsplit("/", 1)[1]))
+        if u.path == "/Shows/p1/Episodes" or (u.path == "/Shows/NextUp" and q.get("seriesId") == "p1"):
+            return self._send({"Items": [{"Id": "pe1", "Name": "Pilot", "Type": "Episode", "SeriesName": "Primetime",
+                                          "ParentIndexNumber": 1, "IndexNumber": 1}]})
         if u.path == "/Items/b1/Download":
             return self._send(None, raw=b"EPUBDATA")
         self.send_response(404)
@@ -173,3 +181,20 @@ def test_no_app_falls_back_to_the_player(engine, server, monkeypatch):
     ev = _plays(engine)
     engine.handle_text("Jeeves, play the movie Dune on Jellyfin", wait=True)
     assert [d for t, d in ev if t == "video"]
+
+
+def test_spelling_that_doesnt_match_the_title_still_finds_it(engine, server, monkeypatch):
+    _setup(engine, server, monkeypatch)
+    ev = _plays(engine)
+    engine.handle_text("Jeeves, put on prime time on Jellyfin", wait=True)
+    assert [d for t, d in ev if t == "video"][-1]["title"] == "Primetime, season 1 episode 1: Pilot"
+
+
+def test_the_model_picks_from_the_library_when_nothing_is_close(engine, server, monkeypatch):
+    _setup(engine, server, monkeypatch)
+    ev = _plays(engine)
+    asked = []
+    monkeypatch.setattr(engine.models, "respond", lambda agent, prompt, **k: asked.append(prompt) or "The Office")
+    engine.handle_text("Jeeves, put on that paper company show on Jellyfin", wait=True)
+    assert asked and "Primetime" in asked[0]
+    assert [d for t, d in ev if t == "video"][-1]["title"].startswith("The Office")
