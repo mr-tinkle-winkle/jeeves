@@ -619,6 +619,31 @@ def youtube(ctx, action="play", query="", channel="", newest=False, seconds=None
 
 
 @full(
+    "math",
+    "Works out arithmetic: sums, percentages, powers, roots (\"what's 2+2\", \"15 percent of 80\").",
+    args=[Arg("expression", "string", "The sum, as said", said=True)],
+    how="No model and no looking up: the words become a sum (number words too) and a small calculator works "
+        "it out. + - × ÷, percent (of), powers, squared / cubed, square and cube roots, factorial, sin / cos / "
+        "tan (degrees), log, pi.",
+    keywords=["plus", "minus", "times", "divided by", "percent of", "square root", "to the power of", "squared"],
+    examples=["Jeeves, what's 2+2?", "Jeeves, what's fifteen percent of eighty?", "Jeeves, square root of 144."],
+    default_enabled=True, category="info",
+)
+def math_function(ctx, expression):
+    from .partials import calc
+    expr = calc.to_expression(str(expression or ""))
+    if expr is None:
+        raise FunctionError("I couldn't make a sum out of that")
+    value = calc.evaluate(expr) if not ctx.dry_run else 0
+    shown = calc.pretty(value)
+    ctx.trace("worked_out", expression=expr, value=shown)
+    if ctx.dry_run:
+        return f"<{expr} = ?>"
+    approx = isinstance(value, float) and float(shown.replace(",", "")) != value
+    return ctx.say(("About " if approx else "") + shown + ".")
+
+
+@full(
     "jellyfin",
     "Plays a show, movie, audiobook or music from your Jellyfin server, or opens a book from it.",
     args=[Arg("title", "string", "The show, movie or book, as said"),
@@ -897,8 +922,11 @@ def research(ctx, question, depth=""):
     rules = (f"Answer the user's question from the sources below. {_answer_shape(question + ' ' + goal)} Use only "
              "sources about the right thing (the same game, item or person) and nothing they don't say" +
              ("; where they don't state it, estimate from what they do say." if estimate else
-              "; if they don't answer it, say so in a sentence.") +
-             " No background or history unless asked. Put the source's number after each fact, like [2].")
+              "; if they don't answer it but you know the answer for certain (simple facts, arithmetic), just "
+              "give it; otherwise say in one short sentence that you couldn't find it.") +
+             " Never talk about the sources themselves -- what they cover, what they don't, that they were "
+             "provided. No background or history unless asked. Plain spoken sentences: no labels, headings "
+             "or lists. Put the source's number after each fact, like [2].")
     answer = ctx.engine.models.respond(
         ctx.agent, question, system=f"{rules}\n\n{before}{background}Sources:\n{fit(sources, 9000, urls=False)}",
         ctx=ctx, temperature=0.3, kind="answer")
@@ -908,6 +936,7 @@ def research(ctx, question, depth=""):
         show_sources(ctx, question, "", sources)
         return ctx.say(f"I found {len(sources)} page{'s' if len(sources) != 1 else ''} about it but couldn't put "
                        "an answer together. They're in the sources window.")
+    answer = tidy_answer(answer)
     spoken = re.sub(r"\s*\[\d+(?:\s*[,-]\s*\d+)*\]", "", answer).strip()
     show_sources(ctx, question, answer, sources)
     ctx.trace("say", text=spoken)
@@ -993,6 +1022,47 @@ def _earlier_exchange(ctx, question: str) -> str:
     return f"they asked \"{r['text']}\" and you answered \"{r['result']}\"."
 
 
+META = re.compile(r"\b(?:the|these|those|provided|given|available|supplied)\s+(?:provided\s+|given\s+)?"
+                  r"(?:sources?|results?|pages?|articles?|search results)\b|\bnone of the (?:sources|results|pages)\b|"
+                  r"\bthe sources? (?:do(?:es)?n't|do(?:es)? not|are|is|focus|discuss|mention)\b", re.I)
+
+
+def tidy_answer(answer: str) -> str:
+    """What's said, without what the user doesn't need: "[Answer]" / "Detail:" labels small models put in,
+    and sentences about the sources themselves ("none of the provided sources discuss arithmetic; they're
+    about gaming guides ...") -- kept only when nothing else is left (then it IS the answer: not found)."""
+    text = re.sub(r"(?im)^\s*(?:\[(?:answer|detail|details|summary|note)\]|\**(?:answer|detail|details|summary|note)"
+                  r"\**\s*:)\s*", "", answer.strip())
+    text = re.sub(r"\[(?:answer|detail|details|summary|note)\]\s*", "", text, flags=re.I)
+    parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+    kept = [p for p in parts if p.strip() and not META.search(p)]
+    if not kept:
+        return text.strip()
+    # said twice ("4. The answer is 4.") or filler about the question ("This is a basic arithmetic
+    # calculation."): once is enough
+    seen: list[str] = []
+    lean = []
+    for p in kept:
+        core = re.sub(r"\s*\[\d+(?:\s*[,-]\s*\d+)*\]", "", p).strip()
+        if not core:                       # a citation on its own: it belongs to the sentence before
+            if lean and p.strip() not in lean[-1]:
+                lean[-1] = lean[-1].rstrip() + " " + p.strip()
+            continue
+        if re.match(r"^(?:this|that|it) is (?:a|an|just a) (?:basic|simple|common|straightforward|easy|standard)\b",
+                    core, re.I):
+            continue
+        key = re.sub(r"^(?:the answer is|it's|it is|that's|that is|so)\s+", "", core.lower()).strip(" .!")
+        if key and key in seen:
+            continue
+        seen.append(key)
+        lean.append(p)
+    kept = lean or kept
+    out = " ".join(p.strip() for p in kept)
+    # (the question restated as a sentence of its own: 'The question "what is 2+2?" is a basic ...')
+    out = re.sub(r"^The question\s+[\"“][^\"”]+[\"”]\s+is\s+[^.]*\.\s*", "", out).strip() or out
+    return out
+
+
 def _answer_shape(question: str) -> str:
     from .research import kind_of, wants_estimate
     if wants_estimate(question):
@@ -1001,7 +1071,7 @@ def _answer_shape(question: str) -> str:
     if kind_of(question) == "howto":
         return ("They want to know how to do it: give the steps in order in 2 to 5 short sentences, with the exact "
                 "keys, timings or requirements.")
-    return "Give the answer first, then at most two sentences of the detail that matters most."
+    return "Give the answer first, then at most two sentences of the detail that matters most (if any matters)."
 
 
 def show_sources(ctx, question: str, answer: str, sources: list[dict]) -> None:

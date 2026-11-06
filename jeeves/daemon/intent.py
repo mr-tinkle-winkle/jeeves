@@ -396,6 +396,16 @@ class IntentProcessor:
         core = self.strip_address(agent, text)
         low = core.lower()
         name = agent.get("name", "Jeeves")
+        if "math" in by_name:
+            from ..functions.partials import calc
+            expr = calc.to_expression(core)
+            if expr is not None:
+                try:
+                    calc.evaluate(expr)
+                    # a sum: worked out, not researched ("what's 2+2" searched the web for 80 s)
+                    return Decision("math", {"expression": core}, 0.97, "", "rules")
+                except calc.MathError:
+                    pass
         if "jellyfin" in by_name and re.search(r"\bjellyfin\b", low):
             from ..functions.partials.jellyfin import parse_request as jf_parse
             args = jf_parse(core)

@@ -4,7 +4,7 @@ gpt-oss, DeepSeek-R1... -- other models just answer).
   1  Instant              never thinks: the fastest answers
   2  Thinks when needed   answers straight away, and thinks first when the question calls for it
                           (why/how something works, plans, comparisons, maths, estimates, long questions)
-                          and for research and screen answers
+                          and for research and screen answers -- not for short, plain questions
   3  Instant when it can  thinks first, except for the easy things (greetings, thanks, short commands,
                           small talk)
   4  Always thinks        thinks hard before every answer, and for every step of research too
@@ -54,5 +54,7 @@ def think_for(n: int, kind: str, text: str = "") -> bool | str:
     if kind in ("step", "intent"):
         return False
     if n == 2:
-        return kind == "answer" or hard(text)
+        # (an easy question doesn't need it even from sources: "what's 2+2" spent 6 minutes thinking on a
+        # slower computer)
+        return hard(text) or (kind == "answer" and not easy(text) and len(text.split()) > 8)
     return not easy(text)

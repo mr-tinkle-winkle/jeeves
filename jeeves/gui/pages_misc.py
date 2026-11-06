@@ -434,6 +434,20 @@ class AccountsPage(Page):
 
 
 # ---------------------------------------------------------------------------
+def entry_details(e: dict[str, Any]) -> str:
+    """One request, everything about it: what was said, what ran, what it said, its sources and every step
+    (the Activity page shows this; so does clicking a request in an agent's history)."""
+    lines = [f"Request: {e.get('text')}", f"Agent: {e.get('agent')}   Source: {e.get('source')}",
+             f"Function: {e.get('function')} {json.dumps(e.get('args'))}   Status: {e.get('status')}",
+             f"Response: {e.get('response')}", "", "Trace:"]
+    for t in e.get("trace", []):
+        rest = {k: v for k, v in t.items() if k not in ("t", "kind")}
+        lines.append(f"  {t.get('t', 0):6.2f}s  {t.get('kind'):<14} {json.dumps(rest, default=str)}")
+    if e.get("sources"):
+        lines[4:4] = ["Sources:"] + [f"  [{s['n']}] {s['title']} — {s['url']}" for s in e["sources"]] + [""]
+    return "\n".join(lines)
+
+
 class HistoryPage(Page):
     def __init__(self, daemon: Any) -> None:
         super().__init__("History", "Rate responses so agents learn what you mean. Ratings, comments and the "
@@ -501,15 +515,7 @@ class HistoryPage(Page):
         if not (0 <= i < len(self.items)):
             return
         e = self.items[i]
-        lines = [f"Request: {e.get('text')}", f"Agent: {e.get('agent')}   Source: {e.get('source')}",
-                 f"Function: {e.get('function')} {json.dumps(e.get('args'))}   Status: {e.get('status')}",
-                 f"Response: {e.get('response')}", "", "Trace:"]
-        for t in e.get("trace", []):
-            rest = {k: v for k, v in t.items() if k not in ("t", "kind")}
-            lines.append(f"  {t.get('t', 0):6.2f}s  {t.get('kind'):<14} {json.dumps(rest, default=str)}")
-        if e.get("sources"):
-            lines[4:4] = ["Sources:"] + [f"  [{s['n']}] {s['title']} — {s['url']}" for s in e["sources"]] + [""]
-        self.detail.setPlainText("\n".join(lines))
+        self.detail.setPlainText(entry_details(e))
         self.sources_btn.setEnabled(bool(e.get("sources")))
         self.comment.setText(e.get("comment") or "")
         self.should.setCurrentIndex(max(0, self.should.findData(e.get("should_use"))))

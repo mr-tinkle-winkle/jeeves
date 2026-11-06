@@ -1140,19 +1140,61 @@ class OverviewPage(Page):
             self.daemon.call("history.list", self._got, lambda _e: None, limit=8, agent=self.aid)
 
     def _got(self, items: Any) -> None:
-        fill_history(self.recent, self.recent_lay, items or [], self._theme)
+        fill_history(self.recent, self.recent_lay, items or [], self._theme, getattr(self, "daemon", None))
         self.relayout()
 
 
-def fill_history(box: QWidget, lay: QVBoxLayout, items: list[dict[str, Any]], theme: Theme) -> None:
-    """Rows of past requests: when, what was said, what came of it."""
+class _HistoryRow(QWidget):
+    """A past request; clicked, it opens to show everything about it (as the Activity page does)."""
+
+    def __init__(self, entry: dict[str, Any], lay: QVBoxLayout, daemon: Any = None) -> None:
+        super().__init__()
+        self.entry, self.lay, self.daemon = entry, lay, daemon
+        self.detail: QWidget | None = None
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Click to see what happened")
+
+    def mouseReleaseEvent(self, ev: Any) -> None:
+        if ev.button() != Qt.LeftButton:
+            return super().mouseReleaseEvent(ev)
+        if self.detail is not None:
+            self.detail.deleteLater()
+            self.detail = None
+        else:
+            from .pages_misc import entry_details
+            from .ui_kit import CustomButton, CustomPlainTextEdit
+            box = QWidget()
+            v = QVBoxLayout(box)
+            v.setContentsMargins(4, 0, 4, 10)
+            text = CustomPlainTextEdit()
+            text.setReadOnly(True)
+            text.setPlainText(entry_details(self.entry))
+            text.setMinimumHeight(260)
+            v.addWidget(text)
+            if self.entry.get("sources") and self.daemon is not None:
+                src = CustomButton("Show sources")
+                src.clicked.connect(lambda: self.daemon.call("ui.popup", None, None, kind="sources",
+                                                             data={"request": self.entry["id"]}))
+                v.addWidget(src, alignment=Qt.AlignLeft)
+            self.lay.insertWidget(self.lay.indexOf(self) + 1, box)
+            self.detail = box
+        w = self.parentWidget()
+        while w is not None and not isinstance(w, Page):
+            w = w.parentWidget()
+        if w is not None:
+            w.relayout()                          # the page grows (or shrinks) to fit it
+
+
+def fill_history(box: QWidget, lay: QVBoxLayout, items: list[dict[str, Any]], theme: Theme,
+                 daemon: Any = None) -> None:
+    """Rows of past requests: when, what was said, what came of it -- click one for the whole of it."""
     m = theme.motion
     with bulk(box):
         clear_layout(lay)
         if not items:
             lay.addWidget(label("Nothing yet.", False))
         for e in items:
-            row = QWidget()
+            row = _HistoryRow(e, lay, daemon)
             h = QHBoxLayout(row)
             h.setContentsMargins(4, 9, 4, 9)
             when = label(time.strftime("%H:%M", time.localtime(e.get("time", 0))), False)
@@ -1202,7 +1244,8 @@ class AgentHistoryPage(Page):
             self.show_agent(self.aid)
 
     def _got(self, items: Any) -> None:
-        self.after_fade(lambda: (fill_history(self.box, self.lay, items or [], self._theme), self.relayout()))
+        self.after_fade(lambda: (fill_history(self.box, self.lay, items or [], self._theme, self.daemon),
+                                 self.relayout()))
 
 
 # ---------------------------------------------------------------------------- the theme picker

@@ -117,7 +117,8 @@ def test_jeenius_scale():
     t = jeenius.think_for
     assert t(1, "answer", "explain why the sky is blue") is False
     assert t(2, "chat", "hi there") is False and t(2, "chat", "explain why the sky is blue") is True
-    assert t(2, "answer", "who won") is True and t(2, "step", "explain why") is False
+    assert t(2, "answer", "who won") is False and t(2, "step", "explain why") is False   # (short, plain: no thinking)
+    assert t(2, "answer", "who won the most recent season of the big competitive cooking show") is True
     assert t(3, "chat", "thanks") is False and t(3, "chat", "what's a good name for my cat") is True
     assert t(4, "chat", "hi") == "high" and t(4, "step", "x") is True
 
