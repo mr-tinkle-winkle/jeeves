@@ -123,6 +123,9 @@ DEFAULTS: dict[str, Any] = {
         "watch_keyboard_for_keybinds": True,  # evdev, read-only, for keybinds + abort
         "history_limit": 500,
         "unclear_confidence": 0.45,       # below this the intent is "unclear"
+        # how sure it must be that words after a name ARE a request before it acts on them (below: ignored as
+        # talk to someone else). Lower = acts on more of what it isn't sure about
+        "act_confidence": 0.8,
         "notifications": True,
     },
     "wake_word": {

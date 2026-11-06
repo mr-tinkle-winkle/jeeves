@@ -86,6 +86,9 @@ def simple_actions(ctx: Any, instruction: str) -> list[dict[str, Any]] | None:
     if m:
         kind = (m.group(1) or "").strip(" -")
         target = (text[m.start(2):] if m.group(2) else "").strip()
+        # "click Save on my screen" / "... on the screen": where it is isn't part of its name
+        target = re.sub(r"\s+(?:on|in)\s+(?:my|the|this)\s+(?:screen|monitor|display|desktop)$", "", target,
+                        flags=re.I).strip()
         button = {"right": "BTN_RIGHT", "middle": "BTN_MIDDLE"}.get(kind, "BTN_LEFT")
         clicks = [{"do": "button", "button": button, "state": "tap"}]
         if kind == "double":

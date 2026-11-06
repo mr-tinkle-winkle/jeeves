@@ -36,6 +36,10 @@ class GeneralPage(Page):
         self.b.number(s, "Longest single request", "general.max_request_seconds", 5, 600, 5, 0, suffix=" s")
         self.b.number(s, "Below this confidence, ask a clarifying question", "general.unclear_confidence",
                       0, 1, 0.05, 2)
+        self.b.number(s, "Confidence required to do something", "general.act_confidence", 0.0, 1.0, 0.05, 2,
+                      hint="How sure Jeeves must be that what you said after his name was a request to him "
+                           "before acting on it; below this it's ignored as talk to someone else. Lower it if "
+                           "he ignores requests, raise it if he answers conversation.")
         self.b.choice(s, "Speech detection", "audio.speech_detector",
                       [("Speech detector (hears you over music, games and typing)", "auto"),
                        ("Level meter (anything louder than the background)", "level")],

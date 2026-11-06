@@ -189,3 +189,47 @@ def test_checking_for_a_missed_name_is_subtle_by_default(engine):
     n = len(ev)
     engine._checking("backup-microphone", "jeeves")
     assert len(ev) == n
+
+
+def test_confidence_required_to_do_something(engine):
+    from jeeves.daemon.intent import Decision
+
+    class Ctx:
+        entry = {"source": "voice:microphone"}
+        def trace(self, *a, **k): pass
+        def think(self, *a, **k): pass
+    unsure = Decision(None, {}, 0.6, "", "model", not_for_me=True)        # 60% sure it isn't for him
+    assert engine._misfire(Ctx(), "uh can you pause it", unsure)           # 0.4 < 0.8: ignored
+    engine.settings.set("general.act_confidence", 0.3)
+    assert not engine._misfire(Ctx(), "uh can you pause it", unsure)       # 0.4 >= 0.3: done
+    sure = Decision(None, {}, 0.95, "", "model", not_for_me=True)
+    assert engine._misfire(Ctx(), "yeah the game was crazy", sure)         # 0.05: still ignored
+
+
+def test_a_run_never_leaves_keys_held(engine, monkeypatch):
+    from jeeves.daemon import control as c
+    pressed = []
+
+    class Dev:
+        def write(self, t, code, v): pressed.append((code, v))
+        def syn(self): pass
+    ctl = engine.control
+    monkeypatch.setattr(ctl, "_ensure", lambda: None)
+    ctl._kbd = ctl._mouse = Dev()
+    monkeypatch.setattr(c.e, "ecodes", {"KEY_LEFTCTRL": 29, "KEY_S": 31, "KEY_W": 17, "BTN_LEFT": 272}, raising=False)
+    ctl.run_actions([{"do": "key", "key": "KEY_LEFTCTRL", "state": "down"}, {"do": "key", "key": "KEY_S"}])
+    assert ctl.held() == ["KEY_LEFTCTRL"]       # pressed and never let go in the plan: "hold" on purpose
+    ctl.release_all()
+    import pytest
+    with pytest.raises(Exception):
+        ctl.run_actions([{"do": "key", "key": "KEY_LEFTCTRL", "state": "down"}, {"do": "nonsense"}])
+    assert ctl.held() == []                     # cut short: let go
+
+
+def test_planned_screen_positions_are_absolute_and_land_on_text():
+    from jeeves.daemon.engine import Engine
+    out = Engine._tidy_plan([{"do": "move", "x": 905, "y": 410}, {"do": "button", "button": "BTN_LEFT"}],
+                            [("Save", 900, 400), ("Cancel", 1200, 400)], (0, 0, 1920, 1080))
+    assert out[0] == {"do": "move", "x": 900, "y": 400, "absolute": True}
+    rel = Engine._tidy_plan([{"do": "move", "x": 10, "y": -5}], [("Save", 900, 400)], (0, 0, 1920, 1080))
+    assert "absolute" not in rel[0]

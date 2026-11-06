@@ -1998,7 +1998,22 @@ class Engine:
         if not self.settings.get("general.ignore_chatter", True):
             return False
         from .intent import looks_like_chatter
-        return decision.not_for_me or (decision.function in (None, "local_response") and looks_like_chatter(text))
+        # How sure it is that this IS a request: the intent model's own say when it calls the words not
+        # meant for the agent (1 - how sure it is of that), or a fair doubt when they only read like chatter.
+        # Below "Confidence required to do something" (general.act_confidence) it's ignored. 0.8 is how it
+        # always behaved; lower it and it acts on more of what it isn't sure about.
+        if decision.not_for_me:
+            sure = 1.0 - max(0.0, min(1.0, float(decision.confidence or 0.7)))
+        elif decision.function in (None, "local_response") and looks_like_chatter(text):
+            sure = 0.3
+        else:
+            return False
+        need = float(self.settings.get("general.act_confidence", 0.8))
+        ctx.trace("request_confidence", confidence=round(sure, 2), required=need)
+        if sure >= need:
+            ctx.think(f"Not sure this was for me ({sure:.2f}), but that's enough (needs {need:.2f}): doing it")
+            return False
+        return True
 
     def _worth_asking(self, question: str, text: str) -> bool:
         """A clarifying question is only worth it when it asks for something new -- not when it
@@ -2450,7 +2465,14 @@ class Engine:
                 info.append(f"Focused app: {f.app} ({f.title}) at x={f.x} y={f.y} size {f.w}x{f.h}.")
         except dk.DesktopUnavailable:
             pass
-        if shutil.which("tesseract") and re.search(r"\b(click|press|button|select|open)\b", instruction, re.I):
+        targets: list[tuple[str, int, int]] = []
+        box = None
+        # the screen's text for anything that isn't plain keys / typing (it used to be only for "click",
+        # "press", "button", "select", "open" -- "tap the", "hit the", "go to" got no screen at all, and the
+        # model made coordinates up)
+        keys_only = re.match(r"^\s*(?:type|press|hold|release|let go|scroll)\b", instruction, re.I) and \
+            not re.search(r"\b(click|button|icon|link|on (?:the|my) screen)\b", instruction, re.I)
+        if shutil.which("tesseract") and not keys_only:
             try:
                 from ..functions.partials.screen import Mapper, _group_lines, _image_size, ocr_words, screenshot
                 shot = screenshot()
@@ -2459,12 +2481,14 @@ class Engine:
                     lines = _group_lines(ocr_words(shot))[:120]
                 finally:
                     shot.unlink(missing_ok=True)
-                bx, by, bw, bh = mp.box
-                info.append(f"The desktop spans x={bx}..{bx + bw - 1}, y={by}..{by + bh - 1} "
-                            "(use absolute moves with these coordinates).")
-                info.append("Text on screen (centre x,y): " + "; ".join(
-                    "'{}'@{},{}".format(l["text"], *mp.point(l["x"] + l["w"] / 2, l["y"] + l["h"] / 2))
-                    for l in lines))
+                bx, by, bw, bh = box = mp.box
+                info.append(f"The desktop spans x={bx}..{bx + bw - 1}, y={by}..{by + bh - 1}. To point at "
+                            "something, use an absolute move to its coordinates below "
+                            '({"do":"move","x":X,"y":Y,"absolute":true}).')
+                for l in lines:
+                    px, py = mp.point(l["x"] + l["w"] / 2, l["y"] + l["h"] / 2)
+                    targets.append((l["text"], int(px), int(py)))
+                info.append("Text on screen (centre x,y): " + "; ".join(f"'{t}'@{x},{y}" for t, x, y in targets))
             except Exception as exc:
                 ctx.think(f"Couldn't read the screen: {exc}")
         prompt = (f"Plan keyboard/mouse actions for: {instruction}\n\n" + "\n".join(info) +
@@ -2479,8 +2503,33 @@ class Engine:
             actions = None
         if not isinstance(actions, list):
             raise FunctionError("couldn't plan those actions")
+        actions = self._tidy_plan(actions, targets, box, ctx)
         ctx.trace("planned", actions=actions)
         return actions
+
+    @staticmethod
+    def _tidy_plan(actions: list[Any], targets: list[tuple[str, int, int]], box: Any, ctx: Any = None) -> list[Any]:
+        """Small models get the coordinates nearly right and the rest wrong: a move to a screen position
+        given without "absolute" (so it was taken as relative -- the mouse flew off somewhere), or a few
+        pixels beside the text it meant. Moves that are clearly screen positions become absolute, and
+        land on the nearest text on screen when one is close."""
+        out = []
+        for a in actions:
+            if isinstance(a, dict) and a.get("do") == "move" and box is not None:
+                a = dict(a)
+                x, y = float(a.get("x", 0)), float(a.get("y", 0))
+                bx, by, bw, bh = box
+                inside = bx <= x < bx + bw and by <= y < by + bh
+                if "absolute" not in a and inside and (x > 40 or y > 40):
+                    a["absolute"] = True
+                if a.get("absolute") and targets:
+                    t, tx, ty = min(targets, key=lambda t: (t[1] - x) ** 2 + (t[2] - y) ** 2)
+                    if (tx - x) ** 2 + (ty - y) ** 2 <= 90 ** 2 and (tx, ty) != (x, y):
+                        if ctx is not None:
+                            ctx.think(f"Moved the planned point onto '{t}' ({tx},{ty}; the plan said {x:.0f},{y:.0f})")
+                        a["x"], a["y"] = tx, ty
+            out.append(a)
+        return out
 
     # ------------------------------------------------------------------ overlay process
     def _overlay_argv(self, popups: bool) -> list[str]:

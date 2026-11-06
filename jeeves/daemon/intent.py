@@ -28,7 +28,8 @@ Use only the functions below. For an argument with listed values, use one of the
 don't need. Take the likeliest meaning: people speak casually. Only if it can't be done without a missing
 detail (a timer with no length), reply {{"function": null, "question": "<ask for just that detail>"}}.
 If it isn't a request to {agent} at all -- the user talking to someone else or thinking aloud ("yeah I guess
-man, the game tonight was crazy") -- reply {{"function": null, "not_for_me": true}}.{research}
+man, the game tonight was crazy") -- reply {{"function": null, "not_for_me": true, "sure": <0..1: how sure you are
+it isn't for {agent}>}}.{research}
 Reply with JSON only: {{"function": "<name>", "args": {{...}}}}
 
 {dictionary}
@@ -328,7 +329,8 @@ class IntentProcessor:
                 err = "Your answer wasn't valid JSON."
             else:
                 name = data.get("function")
-                conf = _num(data.get("confidence"), 0.7)
+                conf = _num(data.get("sure") if data.get("not_for_me") and "sure" in data else
+                            data.get("confidence"), 0.7)
                 if not name:
                     return Decision(None, {}, conf, str(data.get("question") or ""), "model", notes,
                                     not_for_me=bool(data.get("not_for_me")))

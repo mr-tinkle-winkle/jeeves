@@ -251,9 +251,11 @@ class Control:
             k, shift = mapped
             if shift:
                 self.key("KEY_LEFTSHIFT", "down")
-            self.key(k, "tap", hold=0.01)
-            if shift:
-                self.key("KEY_LEFTSHIFT", "up")
+            try:
+                self.key(k, "tap", hold=0.01)
+            finally:
+                if shift:
+                    self.key("KEY_LEFTSHIFT", "up")     # (never left held if the tap fails)
             time.sleep(per_letter)
 
     def axis(self, axis: str, value: float) -> None:
@@ -301,8 +303,32 @@ class Control:
 
     # ---- action lists (Control Mode function) -----------------------------
     def run_actions(self, actions: list[dict[str, Any]], ctx: Any = None) -> int:
+        """Runs the actions; afterwards nothing it pressed is left held -- unless an action asked for that
+        on purpose ({"do":"key","state":"down"} with nothing letting it go: "hold W"). Keys used to stay
+        down when a run was cut short (aborted, an error, a model's plan that pressed but never released)."""
         if not isinstance(actions, list):
             raise FunctionError("actions must be a list")
+        before = set(self.held())
+        meant = {key_name(str(a.get("key") or a.get("button") or "")) for a in actions
+                 if isinstance(a, dict) and a.get("do") in ("key", "button") and a.get("state") == "down"
+                 and not any(isinstance(b, dict) and b.get("state") == "up" and
+                             key_name(str(b.get("key") or b.get("button") or "")) ==
+                             key_name(str(a.get("key") or a.get("button") or "")) for b in actions)}
+        finished = False
+        try:
+            n = self._run(actions, ctx)
+            finished = True
+            return n
+        finally:
+            keep = (before | meant) if finished else before
+            stray = [k for k in self.held() if k not in keep]
+            for k in stray:
+                try:
+                    self.key(k, "up")
+                except (FunctionError, OSError):
+                    pass
+
+    def _run(self, actions: list[dict[str, Any]], ctx: Any = None) -> int:
         n = 0
         for a in actions:
             if ctx is not None:
