@@ -40,7 +40,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         from .pages_agents import AgentsPage
         from .pages_functions import FunctionsPage
-        from .pages_misc import (AccountsPage, DryRunPage, GeneralPage, HistoryPage, IndicatorsPage, TrainingPage,
+        from .pages_misc import (AccountsPage, DryRunPage, GeneralPage, HistoryPage, IndicatorsPage, LogsPage, TrainingPage,
                                  WikipediaPage)
         from .pages_models import ModelsPage
         from .shell import (AgentHeader, AgentHistoryPage, LookPage, OverviewPage, Sidebar, ThemedTabs, TitleBar,
@@ -153,13 +153,28 @@ class MainWindow(QMainWindow):
         sv.addWidget(self.settings_stack, 1)
 
         self.history_page = HistoryPage(self.daemon)
+        self.logs_page = LogsPage(self.daemon)
+        # Activity: the requests, and the Logs (everything about how Jeeves runs here)
+        self.activity_view = QWidget()
+        av = QVBoxLayout(self.activity_view)
+        av.setContentsMargins(0, 0, 0, 0)
+        av.setSpacing(max(6, pad // 2))
+        self.activity_pages = [("requests", "Requests", self.history_page), ("logs", "Logs", self.logs_page)]
+        self.activity_tabs = ThemedTabs([(k, t) for k, t, _p in self.activity_pages])
+        self.activity_tabs.picked.connect(self._activity_tab)
+        av.addWidget(self.activity_tabs)
+        self.activity_stack = QStackedWidget()
+        for _k, _t, page in self.activity_pages:
+            self.activity_stack.addWidget(page)
+        av.addWidget(self.activity_stack, 1)
         self.models_page = ModelsPage(self.daemon, send)
         self.stack = QStackedWidget()
-        for v in (self.agent_view, self.history_page, self.models_page, self.settings_view):
+        for v in (self.agent_view, self.activity_view, self.models_page, self.settings_view):
             self.stack.addWidget(v)
         # every page, for whatever wants to visit them all
         self.pages: list[tuple[str, Any]] = [("Agent", self.overview), ("Agent settings", self.agents_page),
                                              ("Agent history", self.agent_history), ("Activity", self.history_page),
+                                             ("Logs", self.logs_page),
                                              ("Models", self.models_page)] + \
             [(t, p) for _k, t, p in self.settings_pages]
 
@@ -228,10 +243,18 @@ class MainWindow(QMainWindow):
         switch(self.settings_stack, i)
         self._refresh_current()
 
+    def _activity_tab(self, key: str) -> None:
+        from .motion import switch
+        i = next(i for i, (k, _t, _p) in enumerate(self.activity_pages) if k == key)
+        switch(self.activity_stack, i)
+        self._refresh_current()
+
     def current_page(self) -> Any:
         v = self.stack.currentWidget()
         if v is self.agent_view:
             return self.agent_stack.currentWidget()
+        if v is self.activity_view:
+            return self.activity_stack.currentWidget()
         if v is self.settings_view:
             return self.settings_stack.currentWidget()
         return v
@@ -243,8 +266,11 @@ class MainWindow(QMainWindow):
             switch(self.stack, 0)
             tab = {id(self.overview): "overview", id(self.agent_history): "history"}.get(id(page), "personality")
             self._open_agent_tab(tab)
-        elif page is self.history_page:
+        elif page in (self.history_page, self.logs_page):
             switch(self.stack, 1)
+            key = "requests" if page is self.history_page else "logs"
+            self.activity_tabs.set_current(key)
+            self._activity_tab(key)
         elif page is self.models_page:
             switch(self.stack, 2)
         else:

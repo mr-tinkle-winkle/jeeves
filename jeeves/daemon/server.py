@@ -243,6 +243,9 @@ class Server:
             "triggers.remove": lambda id: e.triggers.remove(id),
             "training.phrases": e.training.phrases,
             "wake_clips.list": e.clips.list,
+            "diagnostics.report": lambda: __import__("jeeves.daemon.diagnostics", fromlist=["write"]).write(e),
+            "diagnostics.speed_test": lambda: __import__("jeeves.daemon.diagnostics", fromlist=["x"]).start_speed_test(e),
+            "diagnostics.speed_status": lambda: dict(__import__("jeeves.daemon.diagnostics", fromlist=["x"]).SPEED),
             "wake_clips.mark": lambda id, good, said="": e.clips.mark(id, bool(good), said),
             "training.record": lambda text: e.training_record(text),
             "training.recordings": e.training.recordings,
@@ -359,6 +362,9 @@ class Server:
         gc.collect()
         gc.freeze()
         loop.call_later(90, lambda: (gc.collect(), gc.freeze()))     # (and what the model preload made)
+        # the Logs page's report, fresh for this start (once the models have had a minute to load)
+        from . import diagnostics
+        loop.call_later(60, lambda: self.engine.run_async(lambda: diagnostics.write(self.engine)))
         (paths.runtime_dir() / "daemon.pid").write_text(str(os.getpid()))
         async with server:
             await stop.wait()
@@ -419,6 +425,8 @@ def main(start_io: bool = True) -> None:
     faulthandler.enable(sys.stderr, all_threads=True)    # native crashes leave a traceback in the journal
     logging.basicConfig(level=os.environ.get("JEEVES_LOG", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from . import diagnostics
+    diagnostics.install()                      # (the Logs page keeps what it logs)
     asyncio.run(Server(start_io=start_io).serve())
 
 

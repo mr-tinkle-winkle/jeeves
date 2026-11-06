@@ -30,6 +30,11 @@ from .download import env_threads, free_port, model_dir
 
 log = logging.getLogger("jeeves.models")
 
+# How fast the models actually ran, for the Logs page (Activity > Logs): the last calls of each kind.
+import collections as _collections
+STATS: dict[str, "_collections.deque[dict[str, Any]]"] = {"llm": _collections.deque(maxlen=40),
+                                                         "stt": _collections.deque(maxlen=40)}
+
 
 class BackendError(RuntimeError):
     pass
@@ -71,6 +76,15 @@ class ManagedServer:
         self.name = name
         self.proc: subprocess.Popen | None = None
         self.port = 0
+        self.cmd: list[str] = []
+        self.started_at = 0.0
+        self.load_seconds = 0.0
+        # its own output: kept (the start, where it says which GPU and how many layers it put there, and
+        # the last lines) for the Logs page, and read all the time -- a pipe nobody reads fills up, and
+        # then the server stops dead the next time it writes
+        import collections
+        self.head: list[str] = []
+        self.tail: collections.deque[str] = collections.deque(maxlen=60)
 
     @property
     def base(self) -> str:
@@ -79,19 +93,23 @@ class ManagedServer:
     def start(self, cmd: list[str], health: str, timeout: float = 180.0) -> None:
         self.stop()
         log.info("starting %s: %s", self.name, " ".join(cmd))
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                     preexec_fn=_child_setup)
+        self.cmd, self.started_at = list(cmd), time.time()
+        self.head, self.tail = [], type(self.tail)(maxlen=60)
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, preexec_fn=_child_setup)
+        reader = threading.Thread(target=self._drain, daemon=True, name=f"jeeves-{self.name}-output")
+        reader.start()
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                err = (self.proc.stderr.read() or b"").decode(errors="replace")[-800:] if self.proc.stderr else ""
+                reader.join(timeout=1)
+                err = "\n".join(list(self.tail)[-12:])
                 self.proc = None
-                raise BackendError(f"{self.name} exited while loading: {err.strip()}")
+                raise BackendError(f"{self.name} exited while loading: {err.strip()[-800:]}")
             try:
                 with urllib.request.urlopen(self.base + health, timeout=2) as r:
                     if r.status == 200:
-                        # stop collecting stderr into a pipe nobody reads
-                        threading.Thread(target=self._drain, daemon=True).start()
+                        self.load_seconds = time.time() - self.started_at
                         return
             except (urllib.error.URLError, OSError):
                 pass
@@ -102,8 +120,13 @@ class ManagedServer:
     def _drain(self) -> None:
         p = self.proc
         if p and p.stderr:
-            for _ in iter(lambda: p.stderr.readline(), b""):
-                pass
+            for raw in iter(lambda: p.stderr.readline(), b""):
+                line = raw.decode(errors="replace").rstrip()
+                if not line:
+                    continue
+                if len(self.head) < 120:
+                    self.head.append(line)
+                self.tail.append(line)
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -197,10 +220,19 @@ class WhisperCppSTT(STT):
 
     def transcribe(self, pcm: bytes, prompt: str = "", language: str = "en") -> str:
         self.busy += 1
+        t0 = time.time()
+        ok = False
         try:
-            return self._transcribe(pcm, prompt, language)
+            text = self._transcribe(pcm, prompt, language)
+            ok = True
+            return text
         finally:
             self.busy -= 1
+            took = time.time() - t0
+            STATS["stt"].append({"at": t0, "model": getattr(getattr(self, "entry", None), "id", "?"),
+                                 "audio_s": round(len(pcm) / 32000, 2), "took_s": round(took, 2),
+                                 "speed": round((len(pcm) / 32000) / took, 1) if took > 0 else None,
+                                 "ok": ok, "busy_at_once": self.busy + 1})
 
     def _transcribe(self, pcm: bytes, prompt: str = "", language: str = "en") -> str:
         if not self.loaded():
@@ -532,7 +564,18 @@ class LLM:
             self.load()
         budget = max_tokens + (self.REASONING_ALLOWANCE * (2 if think == "high" else 1) if self.thinks or think
                                else 0)
+        t0 = time.time()
+        self._last_timings = None
         content, thought = self._chat_once(messages, budget, temperature, json_mode, on_token, cancelled, think)
+        took = time.time() - t0
+        tm = self._last_timings or {}
+        STATS["llm"].append({"at": t0, "model": self.model_name, "took_s": round(took, 2), "think": bool(think),
+                             "prompt_chars": sum(len(str(m.get("content", ""))) for m in messages),
+                             "answer_chars": len(content), "thought_chars": len(thought),
+                             "prompt_tokens": tm.get("prompt_n"), "made_tokens": tm.get("predicted_n"),
+                             "read_tok_s": round(tm["prompt_per_second"], 1) if tm.get("prompt_per_second") else None,
+                             "write_tok_s": round(tm["predicted_per_second"], 1) if tm.get("predicted_per_second")
+                             else None, "stream": on_token is not None})
         if thought:
             self.thinks = True
         if not content and thought and not (cancelled and cancelled()):
@@ -555,6 +598,7 @@ class LLM:
         if on_token is None:
             try:
                 data = _post_json(self.base + "/v1/chat/completions", body)
+                self._last_timings = data.get("timings")          # (llama-server: tokens per second)
                 msg = data["choices"][0]["message"]
             except (OSError, ValueError, KeyError, IndexError, http.client.HTTPException) as exc:
                 raise BackendError(f"model server failed: {exc}") from exc
@@ -577,7 +621,10 @@ class LLM:
                     if payload == "[DONE]":
                         break
                     try:
-                        d = json.loads(payload)["choices"][0].get("delta", {})
+                        chunk = json.loads(payload)
+                        if chunk.get("timings"):
+                            self._last_timings = chunk["timings"]
+                        d = chunk["choices"][0].get("delta", {})
                     except (ValueError, KeyError, IndexError):
                         continue
                     # a thinking model's reasoning: shown in the thoughts view, never spoken

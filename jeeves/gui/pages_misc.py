@@ -448,6 +448,62 @@ def entry_details(e: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+class LogsPage(Page):
+    """Everything about how Jeeves runs on this computer, ready to copy and send to whoever's helping."""
+
+    def __init__(self, daemon: Any) -> None:
+        super().__init__("Logs", "How Jeeves runs here: the computer and GPU, what each model runs on and how "
+                                 "fast, where the time went in recent requests, listening, the settings that "
+                                 "matter for speed, and the warnings since it started. Made fresh a minute after "
+                                 "each start (also in ~/.local/state/jeeves/diagnostics.txt). Nothing private: "
+                                 "no keys or passwords.")
+        self.daemon = daemon
+        self.text = CustomPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setMinimumHeight(520)
+        f = self.text.font()
+        f.setFamily("monospace")
+        self.text.setFont(f)
+        self.body_layout.addWidget(self.text)
+        again = CustomButton("Refresh")
+        again.clicked.connect(lambda: self.refresh({}, set()))
+        copy = CustomButton("Copy all")
+        copy.clicked.connect(self.copy)
+        test = CustomButton("Run a speed test")
+        test.setToolTip("Times the same small job on each model (loads them if they aren't), then remakes the report")
+        test.clicked.connect(self.speed_test)
+        self.state = QLabel("")
+        self.body_layout.addWidget(row(again, copy, test, self.state, stretch=3))
+        self.finish()
+
+    def refresh(self, settings: dict[str, Any], locked: set[str]) -> None:
+        self.state.setText("Gathering...")
+        self.daemon.call("diagnostics.report", self._got,
+                         lambda e: self.state.setText(f"Couldn't get it from the daemon: {e}"))
+
+    def _got(self, text: Any) -> None:
+        self.text.setPlainText(str(text or ""))
+        self.state.setText(time.strftime("Made %H:%M:%S"))
+
+    def speed_test(self) -> None:
+        self.state.setText("Timing each model (up to a few minutes on a slow computer)...")
+        self.daemon.call("diagnostics.speed_test", lambda _r: QTimer.singleShot(3000, self._poll),
+                         lambda e: self.state.setText(f"Speed test failed: {e}"))
+
+    def _poll(self) -> None:
+        def got(st: Any) -> None:
+            if (st or {}).get("running"):
+                QTimer.singleShot(3000, self._poll)
+            else:
+                self.refresh({}, set())
+        self.daemon.call("diagnostics.speed_status", got, lambda _e: None)
+
+    def copy(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(self.text.toPlainText())
+        self.state.setText("Copied: paste it wherever you're sending it.")
+
+
 class HistoryPage(Page):
     def __init__(self, daemon: Any) -> None:
         super().__init__("History", "Rate responses so agents learn what you mean. Ratings, comments and the "
