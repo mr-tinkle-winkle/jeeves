@@ -1154,8 +1154,14 @@ class _HistoryRow(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Click to see what happened")
 
+    def mousePressEvent(self, ev: Any) -> None:
+        if ev.button() == Qt.LeftButton:
+            ev.accept()                       # (or the release never comes here: the labels on it don't take it)
+            return
+        super().mousePressEvent(ev)
+
     def mouseReleaseEvent(self, ev: Any) -> None:
-        if ev.button() != Qt.LeftButton:
+        if ev.button() != Qt.LeftButton or not self.rect().contains(ev.position().toPoint()):
             return super().mouseReleaseEvent(ev)
         if self.detail is not None:
             self.detail.deleteLater()

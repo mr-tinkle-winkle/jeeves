@@ -26,6 +26,49 @@ def running() -> bool:
         return False
 
 
+def _old_pid() -> int | None:
+    """The daemon process that's still there (also one shutting down -- it no longer answers)."""
+    try:
+        pid = int((paths.runtime_dir() / "daemon.pid").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    try:                                            # (a recycled pid that isn't ours)
+        cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ")
+        if b"jeeves" not in cmd:
+            return None
+    except OSError:
+        pass
+    return pid
+
+
+def wait_gone(timeout: float = 15.0) -> bool:
+    """Until the old daemon has exited. Switching on while it was still shutting down (up to 6 s) did
+    nothing: systemd still counted the unit as running, so "start" was a no-op -- and then it exited."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _old_pid() is None and not _unit_busy():
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _unit_busy() -> bool:
+    if not has_unit():
+        return False
+    try:
+        st = subprocess.run(["systemctl", "--user", "is-active", UNIT], capture_output=True, text=True,
+                            timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return st in ("deactivating", "activating") and not running()
+
+
 def has_unit() -> bool:
     if not shutil.which("systemctl"):
         return False
@@ -56,6 +99,7 @@ def start(timeout: float = 60.0) -> None:
     """Start the daemon and wait until it answers."""
     if running():
         return
+    wait_gone()
     if has_unit():
         try:
             subprocess.run(["systemctl", "--user", "reset-failed", UNIT], capture_output=True, timeout=10)
@@ -107,6 +151,7 @@ def power_off() -> None:
         deadline = time.time() + 15
         while time.time() < deadline and running():
             time.sleep(0.2)
+        wait_gone(max(1.0, deadline - time.time()))   # (gone, not just no longer answering: see wait_gone)
         return
     _save_enabled(False)
 

@@ -27,6 +27,7 @@ log = logging.getLogger("jeeves.server")
 class Server:
     def __init__(self, start_io: bool = True) -> None:
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.stopping = False
         self.subscribers: dict[asyncio.StreamWriter, set[str]] = {}
         self.engine = Engine(publish=self.publish, start_io=start_io)
         self.methods: dict[str, Callable[..., Any]] = self._methods()
@@ -295,7 +296,9 @@ class Server:
                     await writer.drain()
                     continue
                 if method == "ping":                    # answered here: never waits behind busy workers
-                    writer.write(encode({"id": rid, "result": "pong"}))
+                    # (while it shuts down it says so: `jeeves on` then waits for it to go and starts a
+                    # new one, instead of switching on a daemon that's on its way out)
+                    writer.write(encode({"id": rid, "result": "stopping" if getattr(self, "stopping", False) else "pong"}))
                     await writer.drain()
                     continue
                 fn = self.methods.get(method)
@@ -356,8 +359,10 @@ class Server:
         gc.collect()
         gc.freeze()
         loop.call_later(90, lambda: (gc.collect(), gc.freeze()))     # (and what the model preload made)
+        (paths.runtime_dir() / "daemon.pid").write_text(str(os.getpid()))
         async with server:
             await stop.wait()
+            self.stopping = True
         log.info("stopping")
         # Stopping used to hang on a rebuild (systemd waits 90 s, then kills it): a request still
         # running, a model server still starting (its lock), and Python joining every worker thread
@@ -376,6 +381,12 @@ STOP_SECONDS = 6.0
 
 
 def _exit_now(code: int = 0) -> None:
+    try:
+        pidfile = paths.runtime_dir() / "daemon.pid"
+        if pidfile.exists() and pidfile.read_text().strip() == str(os.getpid()):
+            pidfile.unlink()
+    except OSError:
+        pass
     """Out, without waiting on worker threads (concurrent.futures joins them all at exit, and one
     blocked in a model server or a long request holds the whole process up)."""
     import sys

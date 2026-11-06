@@ -262,3 +262,16 @@ def test_a_swapped_speech_model_isnt_a_crash(engine, monkeypatch):
     monkeypatch.setattr(engine.models, "stt", lambda agent=None: next(models))
     assert engine.transcribe(b"\0" * 3200) == "hello"
     assert not getattr(engine, "_stt_fails", [])
+
+
+def test_switching_on_waits_for_the_old_daemon_to_go(monkeypatch, tmp_path):
+    import subprocess as sp
+    from jeeves import service
+    monkeypatch.setattr(service.paths, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(service, "has_unit", lambda: False)
+    old = sp.Popen(["sleep", "1.2"])                           # a daemon still shutting down
+    (tmp_path / "daemon.pid").write_text(str(old.pid))
+    monkeypatch.setattr(service, "_old_pid", lambda: None if old.poll() is not None else old.pid)
+    t = time.time()
+    assert service.wait_gone(5)
+    assert time.time() - t >= 1.0
