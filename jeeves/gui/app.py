@@ -376,6 +376,8 @@ class MainWindow(QMainWindow):
                 return
             self.settings = res.get("value", {})
             self.locked = set(res.get("locked", []))
+            from . import autosave
+            autosave.set_enabled((self.settings.get("gui") or {}).get("autosave", True))
             self.power.blockSignals(True)
             self.power.setChecked(bool(self.settings.get("general", {}).get("enabled", True)))
             self.power.setEnabled("general.enabled" not in self.locked)
@@ -470,6 +472,21 @@ class MainWindow(QMainWindow):
         handler = getattr(page, "on_event", None)
         if handler:
             handler(topic, data)
+
+    def closeEvent(self, event: Any) -> None:
+        """Changes still waiting to be saved are saved before the window goes."""
+        import time
+        from PySide6.QtWidgets import QApplication
+        from .autosave import AutoSave
+        waiting = [a for a in self.findChildren(AutoSave) if a.pending()]
+        for a in waiting:
+            a.flush()
+        if waiting:
+            end = time.time() + 0.6               # (the save goes over the socket in the background)
+            while time.time() < end:
+                QApplication.processEvents()
+                time.sleep(0.02)
+        super().closeEvent(event)
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)

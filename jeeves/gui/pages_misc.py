@@ -27,6 +27,10 @@ class GeneralPage(Page):
                                              "settings for running commands.")
         self.daemon = daemon
         self.b = Binder(send)
+        sw = self.section("This window")
+        self.b.check(sw, "Save changes automatically", "gui.autosave",
+                     hint="Agents, your functions and the Look page's colors save a moment after you change "
+                          "something (no need to press Save). The other pages always save each change at once.")
         s = self.section("Listening")
         self.b.number(s, "Stop listening after this much silence", "general.end_of_speech_seconds", 0.3, 10, 0.1, 1,
                       suffix=" s")

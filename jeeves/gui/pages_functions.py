@@ -165,6 +165,15 @@ class FunctionsPage(Page):
         e.addLayout(btns)
         self.editor_box.setVisible(False)
         self.body_layout.addWidget(self.editor_box)
+        # a function you're editing is saved as you go once it's valid JSON (a new one: once you've saved it
+        # the first time -- its name isn't half-typed then)
+        from .autosave import AutoSave
+        self.ed_note = label("")
+        e.addWidget(self.ed_note)
+        self.autosave = AutoSave(self.editor_box, state=lambda: self._parsed(quiet=True),
+                                 save=self._save_quiet,
+                                 ready=lambda: self.editor_box.isVisible() and not self.ed_name.isEnabled()
+                                 and self._parsed(quiet=True) is not None)
 
         self.list = QWidget()
         self.list_layout = QVBoxLayout(self.list)
@@ -227,6 +236,9 @@ class FunctionsPage(Page):
 
     # ---- editor -------------------------------------------------------
     def edit_function(self, f: dict[str, Any] | None) -> None:
+        if self.autosave.pending():
+            self.autosave.flush()
+        self.ed_note.setText("")
         self.editor_box.setVisible(True)
         self.ed_name.setText(f["name"] if f else "")
         self.ed_name.setEnabled(f is None)
@@ -234,13 +246,15 @@ class FunctionsPage(Page):
         self.ed_kw.setText(", ".join(f["keywords"]) if f else "")
         self.ed_args.setPlainText(json.dumps(f["args"], indent=1) if f else "[]")
         self.ed_steps.setPlainText(json.dumps(f["steps"], indent=2) if f else EXAMPLE_STEPS)
+        self.autosave.loaded()
 
-    def _parsed(self) -> dict[str, Any] | None:
+    def _parsed(self, quiet: bool = False) -> dict[str, Any] | None:
         try:
             args = json.loads(self.ed_args.toPlainText() or "[]")
             steps = json.loads(self.ed_steps.toPlainText())
         except ValueError as exc:
-            show_message(self, "Functions", f"That isn't valid JSON: {exc}")
+            if not quiet:
+                show_message(self, "Functions", f"That isn't valid JSON: {exc}")
             return None
         return {"name": self.ed_name.text().strip(), "kind": "full", "description": self.ed_desc.text().strip(),
                 "keywords": [k.strip() for k in self.ed_kw.text().split(",") if k.strip()], "args": args,
@@ -261,11 +275,24 @@ class FunctionsPage(Page):
             show_message(self, "Functions", "A function needs a name and a description.")
             return
 
+        self.autosave.timer.stop()
+
         def saved(_r: Any) -> None:
             self.editor_box.setVisible(False)
             self._sig = None
             self.refresh({}, set())
         self.daemon.call("functions.save", saved, None, function=data)
+
+    def _save_quiet(self) -> None:
+        data = self._parsed(quiet=True)
+        if data is None or not data["name"] or not data["description"]:
+            return
+
+        def done(_r: Any) -> None:
+            import time
+            self.ed_note.setText(time.strftime("Saved automatically %H:%M:%S"))
+            self._sig = None
+        self.daemon.call("functions.save", done, lambda e: self.ed_note.setText(f"Couldn't save: {e}"), function=data)
 
     def delete_function(self, name: str) -> None:
         self._sig = None

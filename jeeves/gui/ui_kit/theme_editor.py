@@ -165,6 +165,7 @@ class ThemeEditorGroup(QWidget):
         color = QColorDialog.getColor(start, self)
         if color.isValid():
             edit.setText(color.name())
+            edit.textEdited.emit(color.name())     # (picked by you: counts as an edit, e.g. for autosave)
 
 
 def settings_field_names() -> tuple[str, ...]:

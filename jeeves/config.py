@@ -256,6 +256,9 @@ DEFAULTS: dict[str, Any] = {
     "training": {"stt_vocabulary": [], "intent_examples_from_ratings": True, "max_examples": 12},
     "triggers": [],                       # see jeeves.daemon.triggers
     "theme": None,                        # filled from ThemeSettings() by the GUI on first save
+    # the settings window: autosave = pages with a Save button (agents, your functions, the Look page's
+    # colors) save a moment after each change; the other pages always save each change at once
+    "gui": {"autosave": True},
 }
 
 # ---------------------------------------------------------------------------

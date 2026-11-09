@@ -4,9 +4,9 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from .ui_kit import (CustomPlainTextEdit, ask_text, CustomButton, CustomCheckBox, CustomDoubleSpinBox, CustomGroupBox, CustomLineEdit,
                      CustomSpinBox, show_message)
@@ -362,7 +362,18 @@ class AgentsPage(Page):
         save = CustomButton("Save agent")
         save.clicked.connect(self.save)
         save.setToolTip("Save agent (Ctrl+S)")
-        self.body_layout.addWidget(save, alignment=Qt.AlignRight)
+        self.saved_note = QLabel("")
+        self.body_layout.addWidget(row(self.saved_note, save, stretch=0), alignment=Qt.AlignRight)
+        # saved as you go: a moment after an edit (Settings > General > Save changes automatically)
+        from .autosave import AutoSave
+        import time as _time
+        self._loaded_parts: set[str] = set()
+        self._autosaved_at = 0.0
+        self.autosave = AutoSave(self, state=lambda: self._collect() if self.current in self.agents else None,
+                                 save=self._save_quiet,
+                                 ready=lambda: {"functions", "models", "devices"} <= self._loaded_parts
+                                 and self.current in self.agents)
+        self._now = _time.time
         # Ctrl+S anywhere in the window while this page is open (even with the cursor in a text box)
         self.save_shortcut = QShortcut(QKeySequence(QKeySequence.Save), self)
         self.save_shortcut.setContext(Qt.WindowShortcut)
@@ -395,7 +406,14 @@ class AgentsPage(Page):
 
     # ------------------------------------------------------------------
     def refresh(self, settings: dict[str, Any], locked: set[str]) -> None:
-        self.agents = copy.deepcopy(settings.get("agents") or {})
+        incoming = copy.deepcopy(settings.get("agents") or {})
+        if self.current in incoming and self.current in self.agents and self._now() - self._autosaved_at < 6 \
+                and set(incoming) == set(self.agents):
+            # our own autosave coming back: don't fill the form in again under the cursor
+            self.agents = incoming
+            self.locked = locked
+            return
+        self.agents = incoming
         self.global_voice = ((settings.get("models") or {}).get("tts_voice")) or ""
         self.locked = locked
         self.picker.clear()
@@ -417,11 +435,14 @@ class AgentsPage(Page):
             self.func_checks[f["name"]] = cb
             self.func_layout.addWidget(cb)
         self._fill_rud_functions()
+        self._loaded_parts.add("functions")
         self.select(self.current)
         if self.on_loaded:
             self.on_loaded()
 
     def _got_models(self, st: Any) -> None:
+        self._loaded_parts.add("models")
+        QTimer.singleShot(0, self._settled)
         self.catalog = (st or {}).get("catalog", [])
         kinds = {"stt": "stt", "intent": "llm", "tts": "tts", "tts_voice": "voice", "local_response": "llm"}
         for kind, cbox in self.model_boxes.items():
@@ -542,6 +563,8 @@ class AgentsPage(Page):
             self.voice_status.setText(f"Downloading {m['name']}… (progress on the Models page)")
 
     def select(self, aid: str | None) -> None:
+        if self.autosave.pending() and aid != self.current:
+            self.autosave.flush()                  # (the agent you were on keeps its changes)
         self.current = aid
         a = self.agents.get(aid or "")
         self.form.setEnabled(a is not None)
@@ -636,6 +659,14 @@ class AgentsPage(Page):
         if lk:
             self.form.setToolTip("This agent is declared in NixOS")
 
+        QTimer.singleShot(0, self._settled)
+
+    def _settled(self) -> None:
+        """The form shows the agent as saved: new inputs are watched, and this is the baseline."""
+        self.autosave.watch()
+        if not self.autosave.pending():         # (an edit waiting to be saved isn't forgotten)
+            self.autosave.loaded()
+
     def _sources_changed(self) -> None:
         from ..functions.custom_sources import parse
         sites, problems = parse(self.sources_edit.toPlainText())
@@ -706,6 +737,8 @@ class AgentsPage(Page):
         self.device.setCurrentIndex(max(0, self.device.findData(want)))
 
     def _got_devices(self, res: Any) -> None:
+        self._loaded_parts.add("devices")
+        QTimer.singleShot(0, self._settled)
         self.devices = (res or {}).get("devices", [])
         self.outputs = (res or {}).get("outputs", [])
         self._fill_devices()
@@ -755,8 +788,26 @@ class AgentsPage(Page):
     def save(self) -> None:
         if not self.current:
             return
+        self.autosave.timer.stop()
         self.daemon.call("agents.save", lambda _r: show_message(self, "Agents", "Saved."), None,
                          id=self.current, agent=self._collect())
+        self.autosave.loaded()
+
+    def _save_quiet(self) -> None:
+        """The autosave: no "Saved." box, a note beside the Save button instead."""
+        aid, agent = self.current, self._collect()
+        self._autosaved_at = self._now()
+
+        def done(_r: Any) -> None:
+            import time
+            self.saved_note.setText(time.strftime("Saved automatically %H:%M:%S"))
+        self.daemon.call("agents.save", done, lambda e: show_message(self, "Agents", f"Couldn't save: {e}"),
+                         id=aid, agent=agent)
+
+    def hideEvent(self, ev: Any) -> None:
+        if self.autosave.pending():
+            self.autosave.flush()              # (leaving the page: what's pending is saved first)
+        super().hideEvent(ev)
 
     def add_agent(self) -> None:
         name, ok = ask_text(self, "New agent", "Its name (also the first name you call it by):",

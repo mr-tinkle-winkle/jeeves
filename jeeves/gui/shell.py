@@ -10,12 +10,12 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QAbstractButton, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from . import motion
 from .themes import AGENT_COLORS, LOOKS, Look, words
 from .ui_kit import Theme, contrast_text, rounded_rect_path
-from .widgets import Page, bulk, clear_layout, label
+from .widgets import Page, bulk, clear_layout, label, row as hrow
 
 ACTIVE = ("listening", "transcript", "thinking", "researching", "asking", "watching", "responding")
 
@@ -1360,10 +1360,27 @@ class LookPage(Page):
         self.body_layout.addWidget(self.frame)
         self.editor = ThemeEditorGroup(current=get_settings(), defaults=JEEVES_THEME_DEFAULTS)
         self.body_layout.addWidget(self.editor)
-        save = CustomButton("Save these colors")
+        save = CustomButton("Save and apply")
         save.clicked.connect(self.save)
-        self.body_layout.addWidget(save, alignment=Qt.AlignRight)
+        self.look_note = QLabel("")
+        self.body_layout.addWidget(hrow(self.look_note, save, stretch=0), alignment=Qt.AlignRight)
+        # saved as you go -- without re-theming the window under you each time; "Save and apply" shows it
+        from .autosave import AutoSave
+        self.autosave = AutoSave(self.editor, state=self._target, save=self._save_quiet)
+        self.autosave.loaded()
         self.finish()
+
+    def _target(self) -> Any:
+        from .ui_kit import ThemeSettings, get_settings
+        target = ThemeSettings(**asdict(get_settings()))
+        self.editor.apply_to(target)
+        return asdict(target)
+
+    def _save_quiet(self) -> None:
+        import time
+        self.daemon.call("settings.set", lambda _r: self.look_note.setText(
+            time.strftime("Saved %H:%M:%S -- \"Save and apply\" to see it everywhere")), self._failed,
+            changes={"theme": self._target()})
 
     def pick(self, look: Look) -> None:
         from .ui_kit import get_settings
@@ -1382,6 +1399,7 @@ class LookPage(Page):
 
     def save(self) -> None:
         from .ui_kit import ThemeSettings, get_settings
+        self.autosave.timer.stop()
         target = ThemeSettings(**asdict(get_settings()))
         bad = self.editor.apply_to(target)
         if bad:
