@@ -38,3 +38,20 @@ def test_model_server_output_is_always_read(tmp_path):
         time.sleep(0.05)
     assert any("19999" in ln for ln in srv.tail) and len(srv.head) == 120     # (1.6 MB: never stuck on a full pipe)
     srv.proc.kill()
+
+
+def test_what_stands_out_on_a_cpu_only_amd_machine(engine):
+    from jeeves.daemon import diagnostics
+    from jeeves.models.backends import STATS
+    STATS["llm"].clear()
+    STATS["stt"].clear()
+    for _ in range(3):
+        STATS["llm"].append({"at": 0, "model": "q", "took_s": 29, "think": False, "prompt_chars": 1, "answer_chars": 1,
+                             "thought_chars": 0, "prompt_tokens": 1, "made_tokens": 111, "read_tok_s": 3,
+                             "write_tok_s": 4.0, "stream": False})
+        STATS["stt"].append({"at": 0, "model": "w", "audio_s": 5, "took_s": 10, "speed": 0.5, "ok": True,
+                             "busy_at_once": 2})
+    hw = {"gpus": [{"vendor": "amd", "vram_mb": 16304}], "llama_gpu": [], "gpu_usable": False}
+    text = "\n".join(diagnostics.findings(engine, hw))
+    assert 'services.jeeves.acceleration = "vulkan"' in text
+    assert "4.0 tokens/s" in text and "0.5x realtime" in text and "several at once" in text

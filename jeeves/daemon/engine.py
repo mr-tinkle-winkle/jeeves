@@ -454,7 +454,10 @@ class Engine:
         """Is this device the one the microphone listener records (the default mic)? Asked of pactl at
         most every 10 s."""
         now = time.time()
-        if now - self._mic_checked > 10:
+        chosen = self.settings.get("audio.microphone", "") or ""
+        if chosen:                                   # (the microphone picked in Settings is what it records)
+            self._mic_name = chosen
+        elif now - self._mic_checked > 10:
             from .audio import real_mic_source
             try:
                 self._mic_name = real_mic_source() or ""

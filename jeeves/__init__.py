@@ -12,4 +12,4 @@ The package is split the way SPEC.md asks:
 __version__ = "0.1.0"
 # which round of changes this is: `jeeves version` prints it, the daemon logs it when it starts and the
 # overlay when it starts -- so it's easy to tell whether a rebuild picked the new code up
-__build__ = "2026-11-08a"
+__build__ = "2026-11-09a"

@@ -312,6 +312,53 @@ def listening(engine: Any) -> list[str]:
     return out or ["(not listening)"]
 
 
+def findings(engine: Any, hw: dict[str, Any]) -> list[str]:
+    """What stands out, in plain words: the usual reasons it's slow, checked against the numbers."""
+    from ..models.backends import STATS
+    out: list[str] = []
+    gpus = [g for g in hw.get("gpus") or [] if (g.get("vram_mb") or 0) >= 3000]
+    if gpus and not hw.get("llama_gpu"):
+        vendor = gpus[0].get("vendor", "")
+        how = {"amd": '"vulkan" (or "rocm")', "nvidia": '"cuda" (or "vulkan")'}.get(vendor, '"vulkan"')
+        out.append(f"! The GPU ({vendor.upper() or 'a GPU'}, {max(g.get('vram_mb') or 0 for g in gpus)} MB) is NOT "
+                   "used: the llama.cpp / whisper.cpp installed are CPU-only builds, so every model runs on the CPU. "
+                   f"Fix: in the NixOS config set  services.jeeves.acceleration = {how};  and rebuild.")
+    writes = sorted(s["write_tok_s"] for s in STATS["llm"] if s.get("write_tok_s") and s["write_tok_s"] < 10000
+                    and (s.get("made_tokens") or 0) > 5)
+    if writes and writes[len(writes) // 2] < 10:
+        out.append(f"! The language model writes {writes[len(writes) // 2]} tokens/s (median): a sentence takes "
+                   "several seconds. A GPU gives 30-150+; on a CPU, a smaller model or fewer competing programs help.")
+    stt = [s for s in STATS["stt"] if s.get("ok") and s.get("speed")]
+    if stt:
+        med = sorted(s["speed"] for s in stt)[len(stt) // 2]
+        if med < 1.5:
+            out.append(f"! Speech recognition runs at {med}x realtime (median): {1 / med:.1f} s for each second "
+                       "you speak. A GPU, or a smaller speech model (whisper-small / base), is much faster.")
+        if any(s.get("busy_at_once", 1) > 1 for s in stt):
+            out.append("! Speech recognition was asked to do several at once: more than one listener heard the same "
+                       "speech (two listeners on one microphone, or Summary transcribing desktop audio too).")
+    srcs = [src for src in engine.listeners if src.startswith("device:")]
+    mic = engine._mic_name or (engine.settings.get("audio.microphone", "") or "")
+    for src in srcs:
+        if mic and src == f"device:{mic}":
+            out.append(f"! Two listeners on the same microphone ({mic}): every word is processed twice. "
+                       "Set the agent to listen to \"the user\" instead of that device.")
+    try:
+        load1 = os.getloadavg()[0]
+        n = os.cpu_count() or 1
+        if load1 > n * 0.5:
+            out.append(f"! The computer is busy: load average {load1:.0f} on {n} threads (other programs, or the "
+                       "models themselves) -- Jeeves gets what's left.")
+    except OSError:
+        pass
+    sm = engine.settings.get("summary", {}) or {}
+    if sm.get("enabled") and "desktop" in (sm.get("sources") or []) and sm.get("transcriber") == "whisper":
+        out.append("! Summary transcribes desktop audio with speech recognition: every sound playing keeps it busy.")
+    if not engine.settings.get("wake_word.model"):
+        out.append("! No wake word model: every sound goes through speech recognition to find names (Models page).")
+    return out or ["Nothing stands out."]
+
+
 def report(engine: Any) -> str:
     from .. import __build__, __version__
     hw = engine.models.hardware() if hasattr(engine.models, "hardware") else {}
@@ -321,6 +368,7 @@ def report(engine: Any) -> str:
                     f"Python {sys.version.split()[0]}; {platform.platform()}",
                     f"session: {os.environ.get('XDG_CURRENT_DESKTOP', '?')} on {os.environ.get('XDG_SESSION_TYPE', '?')}",
                     "daemon " + _proc_line(me)]),
+        ("What stands out", findings(engine, hw)),
         ("Computer", cpu() + memory()),
         ("GPU", gpu(hw)),
         ("Models", models(engine)),

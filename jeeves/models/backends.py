@@ -52,6 +52,23 @@ def _find(*names: str) -> str | None:
 CPU_SET: set[int] | None = None
 
 
+def physical_cores() -> int:
+    """Real cores (SMT siblings counted once)."""
+    seen: set[tuple[str, str]] = set()
+    try:
+        import glob
+        for d in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/topology"):
+            try:
+                pkg = open(d + "/physical_package_id").read().strip()
+                core = open(d + "/core_id").read().strip()
+            except OSError:
+                continue
+            seen.add((pkg, core))
+    except Exception:  # noqa: BLE001
+        pass
+    return len(seen) or max(1, (os.cpu_count() or 2) // 2)
+
+
 def _child_setup() -> None:
     """In each model server before it runs: only the allowed cores (Minimum untouched CPU), and no
     core dump when it crashes -- a crashed whisper/llama server is gigabytes, and systemd-coredump
@@ -683,8 +700,12 @@ class LlamaCppLLM(LLM):
             raise BackendError("llama.cpp isn't installed (llama-server not found)")
         model = model_dir(self.entry) / self.entry.files[0].path
         self.server.port = free_port()
+        # writing tokens is limited by memory bandwidth, not cores: past the physical cores (SMT
+        # siblings) more threads only fight each other and everything else -- a 16-core / 32-thread CPU
+        # wrote 4 tokens/s with 31 threads. Reading the prompt (batch) does use them all.
+        every = env_threads(self.threads)
         cmd = [exe, "-m", str(model), "--host", "127.0.0.1", "--port", str(self.server.port), "-c",
-               str(self.ctx_size), "-t", str(env_threads(self.threads))]
+               str(self.ctx_size), "-t", str(max(1, min(every, physical_cores()))), "-tb", str(every)]
         # gpu_layers: a number, or a function(model_path, ctx_size) -> number (Auto)
         ngl = self.gpu_layers(model, self.ctx_size) if callable(self.gpu_layers) else int(self.gpu_layers or 0)
         cmd += ["-ngl", str(ngl)]

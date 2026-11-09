@@ -194,6 +194,10 @@ class ModelManager:
                                                gpu_share=1.0 - keep["gpu_percent"] / 100.0, fixed=fixed)
             self.gpu_offload[entry.id] = dict(info, model=entry.name)
             log.info("GPU layers for %s: %s (%s)", entry.id, n, info.get("why"))
+            if info.get("why") == "no GPU backend in llama.cpp":
+                log.warning("there's a GPU, but this llama.cpp / whisper.cpp can't use it (CPU-only builds): every "
+                            "model runs on the CPU. On NixOS set services.jeeves.acceleration = \"vulkan\"; "
+                            "(\"cuda\" for NVIDIA, \"rocm\" for AMD also work) and rebuild")
             self.publish("models", self.status())
             of = info.get("of")
             if of and info.get("model_mb"):
