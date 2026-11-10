@@ -140,3 +140,69 @@ def test_a_follow_up_doesnt_search_and_load_the_same_things_again(engine, monkey
     engine.settings.set("research.cache_minutes", 0)                 # off: everything is fetched fresh
     research.search_many(ctx, ["Parkour Reborn"])
     assert len(searches) == n_search + 1
+
+
+def test_asking_to_be_told_how_is_looked_up_not_guessed(engine):
+    from jeeves.daemon.engine import looks_factual
+    agent = engine.agents()["jeeves"]
+    for q in ("tell me how to do the Parkour Reborn Wumpy", "can you tell me how to do a wumpy in parkour reborn",
+              "explain what a wumpy is in Parkour Reborn", "do you know who wrote Dune",
+              "show me how to get the Master Sword", "i want to know when the Eiffel Tower was built"):
+        assert looks_factual(q, agent), q
+    for q in ("tell me a joke", "tell me how you are doing", "tell me what you think", "tell me what time it is",
+              "tell me a story about dragons", "how are you"):
+        assert not looks_factual(q, agent), q
+    engine.models.respond = lambda *a, **k: (_ for _ in ()).throw(AssertionError("a rule decides: no model"))
+    functions = engine.registry.enabled_for(agent)
+    d = engine.intent.rule_decide(agent, "tell me how to do the Parkour Reborn Wumpy", functions)
+    assert d is not None and d.function == "research" and "Wumpy" in d.args["question"]
+
+
+def test_thoughts_keep_the_choice_the_reasoning_and_the_answer_apart(engine):
+    ctx = _ctx(engine)
+    events = []
+    engine.publish = lambda topic, data: events.append((topic, data))
+    intent = ctx.stream("intent")
+    for tok in ('{"function": "local_response", ', '"args": {"question": "hi"}}'):
+        intent(tok)
+    answer = ctx.stream("answer")
+    answer.thought("The user says hi. ")
+    answer.thought("Greet them.")
+    answer("Good ")
+    answer("evening.")
+    ctx.think("Searching the web for: wumpy")
+    assert ctx.thought_kinds == ["intent", "reasoning", "answer", ""]
+    assert ctx.thoughts[1] == "The user says hi. Greet them." and ctx.thoughts[2] == "Good evening."
+    news = [d["new"] for t, d in events if t == "thoughts"]
+    assert news == [True, False, True, False, True, False, True]
+    got = engine.thoughts(ctx.entry["id"])
+    assert got["kinds"] == [] or got["kinds"] == ctx.thought_kinds      # (only while the request is active)
+
+
+def test_organized_thoughts_have_sections():
+    from jeeves.thoughts_view import organize, render
+    thoughts = ['{"function": "research", "args": {"question": "how to do the Parkour Reborn Wumpy", "depth": "quick"}}',
+                "Question: How do I do a 'wumpy' in the game Parkour Reborn?\nContext: Parkour Reborn\nTo look up: wumpy",
+                "First, what is Parkour Reborn?", "Searching the web for: Parkour Reborn",
+                "- Parkour Reborn Wiki (https://parkour-reborn.fandom.com/wiki/Home)",
+                "- Parkour Reborn on Roblox (https://www.roblox.com/games/1)", "  A parkour movement game on Roblox.",
+                "  its wiki: https://parkour-reborn.fandom.com", "Probably: a movement technique",
+                "Reading the wiki: Movement", "  found wumpy on this page",
+                "That answers it (Movement).", "Let me see what the page says. ", "A wumpy is a wall jump <b>.",
+                "Reading https://example.org/guides/wumpy_guide", "  couldn't read it: 403"]
+    kinds = ["intent"] + [""] * 11 + ["reasoning", "answer", "", ""]
+    secs = organize(thoughts, kinds)
+    types = [s["type"] for s in secs]
+    assert types == ["decision", "plan", "context", "search", "note", "read", "done", "thinking", "answer", "read"]
+    assert secs[0]["function"] == "research" and secs[0]["args"]["depth"] == "quick"
+    assert secs[1]["context"] == "Parkour Reborn" and secs[1]["terms"] == "wumpy"
+    assert len(secs[3]["results"]) == 2 and secs[3]["notes"][0].startswith("A parkour movement game")
+    assert secs[5]["target"] == "Movement" and secs[5]["notes"] == ["found wumpy on this page"]
+    assert secs[9]["notes"] == ["couldn't read it: 403"]
+    page = render(secs)
+    assert "DECIDED TO USE" in page and "Research" in page and "&lt;b&gt;" in page and "<b>." not in page
+    assert 'href="https://parkour-reborn.fandom.com/wiki/Home"' in page and "example.org › wumpy guide" in page
+    # words still arriving: an unfinished choice is shown as it is, and old thoughts without kinds still sort
+    assert organize(['{"function": "resea'], ["intent"])[0]["raw"] == '{"function": "resea'
+    assert organize(['{"function": "timers", "args": {}}'])[0]["function"] == "timers"
+    assert "Nothing yet" in render([], live=True)

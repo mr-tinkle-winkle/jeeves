@@ -599,7 +599,7 @@ class LLM:
             log.info("%s thought without answering (%d tokens allowed); asking again with more room",
                      self.model_name, budget)
             if on_token is not None:
-                on_token("\n[ran out of room while thinking -- trying again]\n")
+                getattr(on_token, "thought", on_token)("\n[ran out of room while thinking -- trying again]\n")
             content, _ = self._chat_once(messages, max_tokens + 3 * self.REASONING_ALLOWANCE, temperature,
                                          json_mode, on_token, cancelled, think)
         return content
@@ -648,7 +648,8 @@ class LLM:
                     thought = d.get("reasoning_content") or ""
                     if thought:
                         thoughts.append(thought)
-                        on_token(thought)
+                        # (a callback with a .thought of its own gets the reasoning there, apart from the answer)
+                        getattr(on_token, "thought", on_token)(thought)
                     delta = d.get("content") or ""
                     if delta:
                         out.append(delta)

@@ -31,6 +31,7 @@ class FunctionContext:
         self.suspend_event = threading.Event()      # set = suspended (right-click > Suspend)
         self.spoke = False
         self.thoughts: list[str] = []
+        self.thought_kinds: list[str] = []              # per thought: "" (a step), intent, reasoning, answer
         self.looking_at: str = ""
         self.playback = None
         self.saying = ""                                # the sentence being spoken right now
@@ -81,15 +82,28 @@ class FunctionContext:
             self.engine.set_indicator(self.entry["id"], self.agent_id, stage, detail, **extra)
         self.trace("stage", stage=stage, detail=detail)
 
-    def think(self, text: str, append: bool = False, looking_at: str | None = None) -> None:
-        if append and self.thoughts:
-            self.thoughts[-1] += text
-        else:
+    def think(self, text: str, append: bool = False, looking_at: str | None = None, kind: str = "") -> None:
+        """A line for the thoughts view. append: more of the last thought (a model's words as they come)
+        -- of the same kind; another kind starts a new thought, so the function chosen, the reasoning and
+        the answer stay apart. kind: "" (a step a function reports), intent, reasoning or answer."""
+        new = not (append and self.thoughts and self.thought_kinds[-1] == kind)
+        if new:
             self.thoughts.append(text)
+            self.thought_kinds.append(kind)
+        else:
+            self.thoughts[-1] += text
         if looking_at is not None:
             self.looking_at = looking_at
         self.engine.publish("thoughts", {"request": self.entry["id"], "text": text, "append": append,
-                                         "looking_at": self.looking_at})
+                                         "kind": kind, "new": new, "looking_at": self.looking_at})
+
+    def stream(self, kind: str) -> Any:
+        """A token callback for a model call: its words go to the thoughts view as `kind` (intent, answer),
+        its reasoning as reasoning."""
+        def on_token(t: str) -> None:
+            self.think(t, append=True, kind=kind)
+        on_token.thought = lambda t: self.think(t, append=True, kind="reasoning")     # type: ignore[attr-defined]
+        return on_token
 
     # ---- output ------------------------------------------------------------
     def show(self, text: str) -> None:

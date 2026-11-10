@@ -381,6 +381,10 @@ class IndicatorsPage(Page):
                       hint="When the wake word model may have missed a call and speech recognition checks what you said.")
         self.b.check(s, "Response text", "indicators.response_text")
         self.b.check(s, "Timers (bottom right)", "indicators.timers")
+        self.b.check(s, "Organize Thoughts", "indicators.organize_thoughts",
+                     hint="Observe Thoughts shows sections -- what the agent decided to do, its thinking, each "
+                          "search with its results, each page it read, and the answer as it's written -- "
+                          "instead of one run of plain text. The window has the same switch.")
         self.b.choice(s, "Corner", "indicators.corner", [("Top right", "top-right"), ("Top left", "top-left"),
                                                          ("Bottom right", "bottom-right"),
                                                          ("Bottom left", "bottom-left")])

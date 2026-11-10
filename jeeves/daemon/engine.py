@@ -120,10 +120,22 @@ FACT_WORDS = (r"boss|build|item|weapon|armou?r|quest|mission|level|map|patch|upd
               r"population|capital|founded|invented")
 
 
+ASK_LEAD = re.compile(
+    r"^\s*(?:(?:please|hey|ok(?:ay)?|so|and|now)[\s,]+)*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"
+    r"(?:tell\s+me|show\s+me|teach\s+me|remind\s+me|explain(?:\s+to\s+me)?|let\s+me\s+know|"
+    r"i\s+(?:want|need|would\s+like|wanna)\s+to\s+know|i'd\s+like\s+to\s+know|do\s+you\s+know|"
+    r"i'?m\s+wondering|i\s+was\s+wondering|give\s+me\s+(?:the\s+)?(?:steps|instructions)\s+(?:for|on))"
+    r"(?:\s+again)?[\s,:]+(?:exactly\s+|just\s+)?", re.I)
+
+
 def looks_factual(text: str, agent: dict[str, Any] | None = None) -> bool:
     """A question that needs facts (better looked up than guessed): a wh-/how question naming
     something specific (a capitalised name, a number) or using game/product/fact words."""
     t = text.strip()
+    # "tell me how to do the Parkour Reborn Wumpy", "can you explain what a wumpy is": the question inside
+    lead = ASK_LEAD.match(t)
+    if lead and re.match(r"(who|what|when|where|which|why|how)\b", t[lead.end():], re.I):
+        t = t[lead.end():]
     low = t.lower()
     if not re.match(r"^(who|what|when|where|which|why|how|is|are|does|do|did|can|should|was|were|tell me about|"
                     r"explain)\b", low):
@@ -1808,9 +1820,10 @@ class Engine:
         ctx = self.active.get(request_id)
         if ctx is None:
             entry = self.history.get(request_id) or {}
-            return {"thoughts": [], "looking_at": "", "trace": entry.get("trace", []), "text": entry.get("text", ""),
-                    "source": entry.get("source", "")}
-        return {"thoughts": ctx.thoughts, "looking_at": ctx.looking_at, "trace": ctx.entry["trace"],
+            return {"thoughts": [], "kinds": [], "looking_at": "", "trace": entry.get("trace", []),
+                    "text": entry.get("text", ""), "source": entry.get("source", "")}
+        return {"thoughts": ctx.thoughts, "kinds": list(getattr(ctx, "thought_kinds", [])),
+                "looking_at": ctx.looking_at, "trace": ctx.entry["trace"],
                 "text": ctx.entry.get("text", ""), "source": ctx.entry.get("source", "")}
 
     # ------------------------------------------------------------------ requests
@@ -1975,6 +1988,11 @@ class Engine:
                 ctx.say("Sorry, I still don't follow.")
                 return
             entry["function"], entry["args"], entry["confidence"] = decision.function, decision.args, decision.confidence
+            if decision.method != "model":           # (the model's own choice is in the thoughts as it wrote it)
+                ctx.think(json.dumps({"function": decision.function, "args": decision.args,
+                                      "chosen by": {"rules": "a rule (no model needed)", "keywords": "keywords",
+                                                    "fallback": "best guess"}.get(decision.method, decision.method)},
+                                     ensure_ascii=False, default=str), kind="intent")
             self.publish("request", {"id": entry["id"], "function": decision.function, "args": decision.args})
             if ctx.dry_run:
                 self._dry_run_body(ctx, decision)

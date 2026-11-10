@@ -36,6 +36,10 @@ Build `2026-11-10b` (first round; nothing in it has been measured on real hardwa
   `research.online_wikipedia`), disambiguation pages passed over, BM25 passage ranking, searches / pages /
   subject context kept for follow-ups (`research.cache_minutes`).
 - Settings added: Listening & Keys > Reply speed, and > Looking things up (research depth, time limit).
+- Build `2026-11-10c`: "tell me how to..." / "can you explain what..." requests go to research (they were answered
+  from nothing by `local_response`); Observe Thoughts has an organized view (`thoughts_view.py`,
+  `indicators.organize_thoughts`), fed by a kind per thought (intent / reasoning / answer / step). The Thoughts
+  window itself (`overlay.py: Thoughts`) has no automated test: only `organize`/`render` and the kinds do.
 - To measure next on a real setup: the `speech` trace's `synth_s` before/after with Kokoro and Piper; how often
   `wikipedia_first` ends a research and whether its answers are right; `in_character_skipped` counts on
   CPU-only setups.

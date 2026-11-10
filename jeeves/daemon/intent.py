@@ -147,7 +147,7 @@ class IntentProcessor:
         for _attempt in range(2):
             try:
                 raw = llm.chat(messages, max_tokens=200, temperature=0.1, json_mode=True, think=False,
-                               on_token=(lambda t: ctx.think(t, append=True)) if ctx else None,
+                               on_token=_stream(ctx, "intent"),
                                cancelled=ctx.is_cancelled if ctx else None)
             except BackendError as exc:
                 notes.append(f"intent model failed ({exc}); used keyword matching")
@@ -317,7 +317,7 @@ class IntentProcessor:
                 from ..models import jeenius
                 think = jeenius.think_for(jeenius.level(agent, self.settings), "intent", text)
                 raw = llm.chat(messages, max_tokens=400, temperature=0.1, json_mode=True, think=think,
-                               on_token=(lambda t: ctx.think(t, append=True)) if ctx else None,
+                               on_token=_stream(ctx, "intent"),
                                cancelled=ctx.is_cancelled if ctx else None)
             except BackendError as exc:
                 notes.append(f"intent model failed ({exc}); used keyword matching")
@@ -644,3 +644,11 @@ def _num(v: Any, default: float) -> float:
         return max(0.0, min(1.0, float(v)))
     except (TypeError, ValueError):
         return default
+
+
+def _stream(ctx: Any, kind: str) -> Any:
+    """The thoughts view's token callback for a model call (None without a request)."""
+    if not ctx:
+        return None
+    make = getattr(ctx, "stream", None)
+    return make(kind) if make is not None else (lambda t: ctx.think(t, append=True))

@@ -212,6 +212,9 @@ DEFAULTS: dict[str, Any] = {
         "processing": True,
         "timers": True,                   # bottom right, per SPEC
         "response_text": True,
+        # Observe Thoughts: sections (what it decided, its thinking, each search and page, the answer)
+        # instead of one run of plain text
+        "organize_thoughts": True,
         "size": 56,
         "colors": dict(INDICATOR_COLORS),
     },

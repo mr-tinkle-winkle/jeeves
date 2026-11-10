@@ -809,6 +809,9 @@ def main(popups: bool = False) -> int:
             return lab
 
     class Thoughts(Popup):
+        """Observe Thoughts. Organized (Settings > Indicators > Organize Thoughts, or the switch here):
+        sections for what the agent decided, its thinking, each search and page, and the answer
+        (thoughts_view.py). Otherwise the plain text as it was written."""
         current: "Thoughts | None" = None
 
         @classmethod
@@ -821,6 +824,7 @@ def main(popups: bool = False) -> int:
         def __init__(self, rid: str, st: dict[str, Any]) -> None:
             super().__init__(f"{st.get('agent_name', 'Agent')} — thoughts")
             self.rid = rid
+            self.items: list[list[str]] = []        # [kind, text] per thought
             self.title = self.heading(f"{st.get('agent_name', 'Agent')} is {st.get('stage', 'thinking')}")
             self.said = QLabel("")                  # what it was asked, as in the ledger
             self.said.setWordWrap(True)
@@ -834,8 +838,53 @@ def main(popups: bool = False) -> int:
             self.text = CustomPlainTextEdit()
             self.text.setReadOnly(True)
             self.lay.addWidget(self.text, 1)
-            self.resize(560, 420)
+            self.view = CustomTextBrowser()
+            self.view.setOpenLinks(False)
+            self.view.anchorClicked.connect(self._clicked)
+            self.lay.addWidget(self.view, 1)
+            self.organized = CustomCheckBox("Organize Thoughts")
+            self.organized.setChecked(bool((settings.get("indicators") or {}).get("organize_thoughts", True)))
+            self.organized.toggled.connect(self._toggled)
+            self.lay.addWidget(self.organized)
+            self._render_soon = QTimer(self)
+            self._render_soon.setSingleShot(True)
+            self._render_soon.setInterval(120)       # words arrive many times a second: draw a few times
+            self._render_soon.timeout.connect(self._render)
+            self._show_mode()
+            self.resize(600, 520)
             daemon.call("request.thoughts", self._fill, lambda _e: None, request=rid)
+
+        def _show_mode(self) -> None:
+            on = self.organized.isChecked()
+            self.view.setVisible(on)
+            self.text.setVisible(not on)
+            self.looking.setVisible(not on and bool(self.looking.text()))
+
+        def _toggled(self, on: bool) -> None:
+            daemon.call("settings.set", None, lambda _e: None, changes={"indicators.organize_thoughts": bool(on)})
+            self._show_mode()
+            self._render()
+
+        def _plain(self) -> str:
+            return "".join(t if t.endswith("\n") else t + "\n" for _k, t in self.items)
+
+        def _render(self) -> None:
+            if not self.organized.isChecked():
+                return
+            from .thoughts_view import organize, render
+            t = self.theme
+            bar = self.view.verticalScrollBar()
+            at_end = bar.value() >= bar.maximum() - 4
+            pos = bar.value()
+            self.view.setHtml(render(organize([x[1] for x in self.items], [x[0] for x in self.items]),
+                                     accent=t.accent().name(), muted=t.muted().name(), text=t.text().name(),
+                                     card=t.surface().name(), live=True))
+            bar.setValue(bar.maximum() if at_end else pos)
+
+        def _clicked(self, url: Any) -> None:
+            if url.toString().startswith(("http://", "https://")):
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(url)
 
         def _fill(self, res: Any) -> None:
             if not isinstance(res, dict):
@@ -847,19 +896,33 @@ def main(popups: bool = False) -> int:
                 self.said.setText(f"<span style='color:{self.theme.muted().name()}'>{how}:</span> "
                                   f"“{_h.escape(res['text'])}”")
                 self.said.show()
-            self.text.setPlainText("".join(t if t.endswith("\n") else t + "\n" for t in res.get("thoughts", [])))
+            thoughts = list(res.get("thoughts", []))
+            kinds = list(res.get("kinds") or []) + [""] * len(thoughts)
+            self.items = [[k, t] for k, t in zip(kinds, thoughts)]
+            self.text.setPlainText(self._plain())
             if res.get("looking_at"):
                 self.looking.setText(f"Looking at: {res['looking_at']}")
+            self._show_mode()
+            self._render()
 
         def on_thought(self, data: dict[str, Any]) -> None:
             if data.get("request") != self.rid:
                 return
+            text, kind = data.get("text", ""), data.get("kind", "") or ""
+            more = bool(data.get("append")) and not data.get("new", False) and bool(self.items)
+            if more:
+                self.items[-1][1] += text
+            else:
+                self.items.append([kind, text])
             cur = self.text.textCursor()
             cur.movePosition(cur.MoveOperation.End)
-            cur.insertText(data.get("text", "") if data.get("append") else "\n" + data.get("text", ""))
+            cur.insertText(text if more else "\n" + text)
             self.text.setTextCursor(cur)
             if data.get("looking_at"):
                 self.looking.setText(f"Looking at: {data['looking_at']}")
+                self.looking.setVisible(not self.organized.isChecked())
+            if self.organized.isChecked() and not self._render_soon.isActive():
+                self._render_soon.start()
 
     class SourcesBox(Popup):
         """A researched answer with its sources: [n] markers jump to the source, titles open the page

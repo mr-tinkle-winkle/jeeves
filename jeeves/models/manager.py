@@ -329,7 +329,10 @@ class ModelManager:
                 from ..daemon.watcher import image_parts
                 messages[-1] = {"role": "user", "content": image_parts(watcher.latest_images) + [
                     {"type": "text", "text": messages[-1]["content"]}]}
-        on_token = (lambda t: ctx.think(t, append=True)) if ctx is not None else None
+        on_token = None
+        if ctx is not None:
+            make = getattr(ctx, "stream", None)
+            on_token = make("answer") if make is not None else (lambda t: ctx.think(t, append=True))
         cancelled = ctx.is_cancelled if ctx is not None else None
         max_tokens = max_tokens or int(self.settings.get("models.local_response.max_tokens", 512))
         try:
