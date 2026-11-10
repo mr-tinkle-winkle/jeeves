@@ -235,12 +235,24 @@ class Playback:
     """Plays PCM to one or more targets; ``pause``/``resume``/``stop`` work while
     playing (clicking the 'responding' indicator toggles pause)."""
 
-    def __init__(self, pcm: bytes, rate: int, targets: list[str]) -> None:
+    def __init__(self, pcm: bytes, rate: int, targets: list[str], more_coming: bool = False) -> None:
         self.pcm, self.rate, self.targets = pcm, rate, targets or [""]
         self.paused = threading.Event()
         self.stopped = threading.Event()
         self.done = threading.Event()
         self.error: str | None = None
+        # more_coming: the rest of the speech is still being made (``add`` appends it, ``complete`` ends
+        # it), so the first sentence plays while the later ones are synthesized
+        self._complete = threading.Event()
+        if not more_coming:
+            self._complete.set()
+
+    def add(self, pcm: bytes) -> None:
+        """More audio for a playback started with more_coming (same rate)."""
+        self.pcm += pcm
+
+    def complete(self) -> None:
+        self._complete.set()
 
     def play(self) -> None:
         """Feeds the players at about real time (a little ahead), so pause and stop act at once and a
@@ -267,9 +279,15 @@ class Playback:
             ahead = 0.4                  # seconds fed ahead of what's playing
             start = time.monotonic()
             fed = 0.0
-            for i in range(0, len(self.pcm), step):
-                if self.stopped.is_set():
-                    break
+            i = 0
+            while not self.stopped.is_set():
+                if i >= len(self.pcm):
+                    if self._complete.is_set() and i >= len(self.pcm):
+                        break
+                    self.stopped.wait(0.02)          # the next sentence isn't ready yet: a pause between
+                    if fed - (time.monotonic() - start) < 0:      # sentences, not a rush to catch up after
+                        start = time.monotonic() - fed
+                    continue
                 while self.paused.is_set() and not self.stopped.is_set():
                     self.stopped.wait(0.05)
                     start += 0.05
@@ -277,6 +295,7 @@ class Playback:
                 if lag > 0:
                     self.stopped.wait(lag)
                 chunk = self.pcm[i:i + step]
+                i += step
                 for p in procs:
                     try:
                         assert p.stdin is not None

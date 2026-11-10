@@ -195,3 +195,114 @@ def test_research_looks_for_what_you_may_have_meant(engine, monkeypatch):
     ctx = FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("what is a Wumpie", "jeeves", "text"))
     sources, _ = builtins._research_until_found(ctx, "what is a Wumpie", "", "", {})
     assert sources and "think you mean" in said[-1]
+
+
+def _ctx(engine):
+    from jeeves.daemon.context import FunctionContext
+    from jeeves.daemon.history import new_entry
+    return FunctionContext(engine, "jeeves", engine.agents()["jeeves"], new_entry("x", "jeeves", "text"))
+
+
+def test_lines_said_often_are_reworded_without_the_model(engine):
+    from jeeves.daemon import engine as eng_mod
+    engine.settings.set("persona.every_line", True)
+    said = _said(engine)
+    calls = []
+
+    def respond(agent, line, **kw):
+        calls.append(line)
+        return f"Variant {len(calls)}: it is done."
+    engine.models.respond = respond
+    ctx = _ctx(engine)
+    for _ in range(eng_mod.CHARACTER_VARIANTS + 4):
+        ctx.say("Done.")
+    assert len(calls) == eng_mod.CHARACTER_VARIANTS          # then reused: no more model calls
+    assert all(s.startswith("Variant") for s in said)
+    ctx.say("Paused.")                                       # another line still goes to the model
+    assert len(calls) == eng_mod.CHARACTER_VARIANTS + 1
+
+
+def test_a_model_too_slow_for_rewording_says_the_plain_line(engine, monkeypatch):
+    from jeeves.daemon import engine as eng_mod
+    engine.settings.set("persona.every_line", True)
+    engine.settings.set("persona.every_line_max_seconds", 2.0)
+    said = _said(engine)
+    clock = [1000.0]
+    monkeypatch.setattr(eng_mod.time, "time", lambda: clock[0])
+    calls = []
+
+    def respond(agent, line, **kw):
+        calls.append(line)
+        clock[0] += 9.0                                      # CPU-only: nine seconds per rewording
+        return f"Verily: {line}"
+    engine.models.respond = respond
+    ctx = _ctx(engine)
+    for n in range(2):
+        ctx.say(f"Line {n}.")
+    assert len(calls) == 2
+    ctx.say("Line 2.")
+    assert said[-1] == "Line 2." and len(calls) == 2         # two slow ones: plain from here on
+    assert any(t["kind"] == "in_character_skipped" for t in ctx.entry["trace"])
+    for n in range(3, 3 + eng_mod.CHARACTER_RETRY_EVERY):
+        ctx.say(f"Line {n}.")
+    assert len(calls) == 3                                   # ...but it's tried again now and then
+    engine.settings.set("persona.every_line_max_seconds", 0)
+    ctx.say("Line 99.")
+    assert said[-1] == "Verily: Line 99."                    # 0 = always reword
+
+
+def test_long_replies_are_split_at_sentences_for_speaking():
+    from jeeves.daemon.engine import resample, speech_chunks
+    assert speech_chunks("Timer set for 2:00.") == ["Timer set for 2:00."]
+    long = ("The Eiffel Tower is 330 metres tall. It was finished in 1889 for the World's Fair. "
+            "About 7 million people visit it each year, e.g. from the U.S. and Japan. It is repainted every seven years.")
+    parts = speech_chunks(long)
+    assert len(parts) >= 2 and " ".join(parts) == long
+    assert parts[0] == "The Eiffel Tower is 330 metres tall. It was finished in 1889 for the World's Fair."
+    one = "a " * 200
+    assert speech_chunks(one) == [one.strip()]               # one sentence: whole
+    assert len(resample(b"\x01\x00" * 100, 16000, 8000)) == 100
+
+
+def test_a_long_reply_starts_playing_before_the_rest_is_synthesized(engine, monkeypatch):
+    from jeeves.daemon import audio, engine as eng_mod
+    made, fed = [], []
+    gate = threading.Event()
+
+    def synth(agent, text):
+        made.append(text)
+        if len(made) > 1:
+            gate.wait(5)                                     # the rest is slow to make
+        return (b"\x10\x20" * 800 * len(made), 16000)
+    engine._synth = synth
+
+    class Proc:
+        pid, returncode, args = 1, 0, ["fake"]
+
+        class stdin:
+            @staticmethod
+            def write(b):
+                fed.append(b)
+                if len(b"".join(fed)) >= 1600:
+                    gate.set()                               # the opening is already playing: now the rest arrives
+
+            flush = close = staticmethod(lambda: None)
+        stderr = None
+        wait = terminate = kill = lambda self, **k: 0
+    monkeypatch.setattr(audio.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(audio, "_drain", lambda p, out: None)
+    monkeypatch.setattr(audio, "_player", lambda *a, **k: ["fake"])
+    monkeypatch.setattr(eng_mod.Engine, "voice_targets", lambda self, agent: [""])
+    ctx = _ctx(engine)
+    text = ("The Eiffel Tower is 330 metres tall and stands in Paris. It was finished in 1889 for the World's Fair. "
+            "About 7 million people visit it each year. It is repainted every seven years by hand.")
+    engine.speak(ctx, text)
+    assert len(made) >= 2 and " ".join(made) == text
+    assert len(b"".join(fed)) == sum(1600 * n for n in range(1, len(made) + 1))     # every part was played
+    speech = next(t for t in ctx.entry["trace"] if t["kind"] == "speech")
+    assert speech["parts"] == len(made)
+    engine.settings.set("audio.stream_speech", False)
+    made.clear()
+    fed.clear()
+    engine.speak(ctx, text)
+    assert made == [text]

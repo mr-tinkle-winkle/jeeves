@@ -36,6 +36,8 @@ def engine():
     # the tests' scripted models answer in order: rewording every plain line in character would use
     # their answers up (tests/test_main_lobotomy_ticks.py covers it)
     e.settings.set("persona.every_line", False)
+    # no test reaches the internet: wikipedia.org isn't asked (tests/test_round_speed_lookups.py covers it)
+    e.settings.set("research.online_wikipedia", False)
     yield e
     e.timers.stop()
     e.pool.shutdown(wait=False, cancel_futures=True)

@@ -70,33 +70,54 @@ class Wikipedia:
             self._archive_path = f
         return self._archive
 
-    def lookup(self, query: str, max_chars: int = 6000) -> dict[str, Any] | None:
-        archive = self._open()
-        if archive is None:
-            return None
+    def _candidates(self, archive: Any, query: str, n: int = 5) -> list[str]:
+        """Paths of the articles the query may mean: titles that start like it, then the full-text hits."""
         lz = _libzim()
-        path = None
+        paths_found: list[str] = []
         try:
             sugg = lz.suggestion.SuggestionSearcher(archive).suggest(query)
-            hits = list(sugg.getResults(0, 1))
-            path = hits[0] if hits else None
+            paths_found += list(sugg.getResults(0, n))
         except Exception:
-            path = None
-        if path is None:
-            try:
-                search = lz.search.Searcher(archive).search(lz.search.Query().set_query(query))
-                hits = list(search.getResults(0, 1))
-                path = hits[0] if hits else None
-            except Exception:
-                path = None
-        if path is None:
-            return None
+            pass
+        try:
+            search = lz.search.Searcher(archive).search(lz.search.Query().set_query(query))
+            paths_found += list(search.getResults(0, n))
+        except Exception:
+            pass
+        return list(dict.fromkeys(paths_found))
+
+    def _read(self, archive: Any, path: str) -> tuple[str, str]:
         entry = archive.get_entry_by_path(path)
         if entry.is_redirect:
             entry = entry.get_redirect_entry()
         item = entry.get_item()
-        text = html_to_text(bytes(item.content).decode("utf-8", "replace"))
-        return {"title": entry.title, "text": text[:max_chars]}
+        return entry.title, html_to_text(bytes(item.content).decode("utf-8", "replace"))
+
+    def lookup(self, query: str, max_chars: int = 6000, about: str = "") -> dict[str, Any] | None:
+        """The article the query most likely means. "X may refer to:" pages are passed over (the first
+        hit for a plain name is often one), and of the candidates the one whose title shares the most
+        words with the query -- and with `about`, the question being answered -- is read."""
+        archive = self._open()
+        if archive is None:
+            return None
+        want = set(_words(query)) | set(_words(about))
+        best: tuple[float, str, str] | None = None
+        for rank, path in enumerate(self._candidates(archive, query)[:6]):
+            try:
+                title, text = self._read(archive, path)
+            except Exception:
+                continue
+            if is_disambiguation(title, text):
+                continue
+            words = set(_words(title))
+            score = len(want & words) / max(1, len(words)) - 0.05 * rank
+            if title.strip().lower() == query.strip().lower():
+                score += 2.0
+            if best is None or score > best[0]:
+                best = (score, title, text)
+        if best is None:
+            return None
+        return {"title": best[1], "text": best[2][:max_chars]}
 
     # ---- download / update ---------------------------------------------------
     def latest(self) -> tuple[str, str]:
@@ -151,6 +172,19 @@ class Wikipedia:
             self._set(state="error", error=str(exc))
         finally:
             self._cancel = None
+
+
+def _words(text: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in
+            ("the", "and", "for", "what", "who", "how", "was", "were", "are", "does", "did", "when", "where", "why")]
+
+
+def is_disambiguation(title: str, text: str) -> bool:
+    """A page that only lists what a name can mean ("Mercury may refer to:")."""
+    if "(disambiguation)" in title.lower():
+        return True
+    return re.search(r"\b(?:may|can|could|might)(?: also)? (?:refer to|mean|stand for)\b\s*:?", text[:400], re.I) \
+        is not None and len(re.findall(r"\n", text[:3000])) >= 4
 
 
 def _libzim():

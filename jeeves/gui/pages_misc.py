@@ -53,6 +53,36 @@ class GeneralPage(Page):
                       hint="Only for the level meter. Raise it if background noise keeps Jeeves listening; lower "
                            "it if quiet speech is missed.")
 
+        sp = self.section("Reply speed")
+        self.b.check(sp, "Start speaking long answers at their first sentence", "audio.stream_speech",
+                     hint="The first sentence plays while the rest of the answer is still being turned into "
+                          "speech, instead of waiting for all of it. Off: the whole answer is made first.")
+        self.b.number(sp, "Skip in-character rewording when it takes longer than",
+                      "persona.every_line_max_seconds", 0, 30, 0.5, 1, suffix=" s",
+                      hint="Plain lines (\"Timer set for 2:00.\") are reworded in the agent's character by the "
+                           "language model. When the model is too slow for that (no GPU, or a game using it), "
+                           "the plain line is said instead, and rewording is tried again every few lines. "
+                           "0 = always reword. Lines an agent says often are reused without asking the model.")
+
+        rs = self.section("Looking things up")
+        self.b.choice(rs, "How far research goes", "research.depth",
+                      [("Quick: one round of searching, up to 3 pages (fastest)", "quick"),
+                       ("Normal: a second search if the first doesn't answer it, up to 5 pages each", "normal"),
+                       ("Deep: three rounds, up to 8 pages each (slowest, most thorough)", "deep")],
+                      hint="Reading stops as soon as a page answers the question, so the deeper settings only "
+                           "take longer when the answer is hard to find.")
+        self.b.number(rs, "Stop reading more pages after", "research.max_seconds", 10, 600, 5, 0, suffix=" s")
+        self.b.check(rs, "Wikipedia first for plain facts", "research.wikipedia_first",
+                     hint="\"How tall is the Eiffel Tower\", \"who wrote Dune\": the Wikipedia article is read "
+                          "first, and the web is only searched if it doesn't answer. Not used for how-tos, games' "
+                          "inner workings, estimates or anything recent.")
+        self.b.check(rs, "Use wikipedia.org when Wikipedia isn't downloaded", "research.online_wikipedia",
+                     hint="No account or key. With a downloaded Wikipedia (Wikipedia page) that copy is read "
+                          "instead and nothing is sent.")
+        self.b.number(rs, "Remember searches and pages for", "research.cache_minutes", 0, 240, 5, 0, suffix=" min",
+                      hint="A follow-up about the same thing doesn't search and load the same pages again; what "
+                           "a game, app or person is stays known for 12 times as long. In memory only; 0 = off.")
+
         k = self.section("Keybinds")
         k.addWidget(label("Press Record and hold the keys, or type Linux key names joined with +, e.g. "
                           "KEY_LEFTMETA+KEY_J (mouse buttons too: BTN_SIDE, BTN_EXTRA). Keybinds need read access "

@@ -159,3 +159,50 @@ def test_a_long_list_goes_in_at_once_and_the_page_fits_it(qapp):
         pass
     assert hidden.isHidden()                                       # a hidden container stays hidden
     page.close()
+
+
+def test_models_page_offers_downloads_for_selected_models_that_are_missing(qapp, engine):
+    from jeeves.gui.pages_models import ModelsPage
+    calls = []
+
+    class D:
+        def call(self, method, *a, **k):
+            calls.append((method, k.get("id")))
+    page = ModelsPage(D(), lambda changes: None)
+    st = engine.models.status()
+    for m in st["catalog"]:
+        m["installed"] = m["id"] in ("qwen3-1.7b", "espeak-ng", "espeak-en")
+        m["runtime"] = True
+    settings = engine.settings.effective()
+    settings["models"]["intent"]["model"] = "qwen3-1.7b"
+    settings["models"]["local_response"]["model"] = "qwen3-8b"
+    settings["models"]["stt"]["model"] = "whisper-base-en"
+    page._settings = settings
+    page._got(st)
+    button = lambda box: page.dl_buttons[id(box)][1]
+    assert not button(page.kind_boxes["intent"]).isVisibleTo(page)          # downloaded: no button
+    assert button(page.kind_boxes["local_response"]).isVisibleTo(page)
+    assert button(page.kind_boxes["local_response"]).text().startswith("Download model")
+    assert not button(page.kind_boxes["vision"]).isVisibleTo(page)          # (none)
+    assert {m["id"] for m in page.selected_missing()} == {"qwen3-8b", "whisper-base-en"}
+    assert page.missing_row.isVisibleTo(page) and "2 selected models" in page.missing_label.text()
+    button(page.kind_boxes["local_response"]).click()
+    assert calls == [("models.download", "qwen3-8b")]
+    assert button(page.kind_boxes["local_response"]).text().startswith("Cancel")
+    page.download_all.click()                                               # only what isn't already on its way
+    assert calls[1:] == [("models.download", "whisper-base-en")]
+    assert not page.download_all.isEnabled()
+    page.on_event("download", {"model": "qwen3-8b", "state": "downloading", "done": 50, "total": 100,
+                               "file": 1, "files": 1})
+    assert "50%" in button(page.kind_boxes["local_response"]).text()
+    for m in st["catalog"]:
+        m["installed"] = m["installed"] or m["id"] in ("qwen3-8b", "whisper-base-en")
+    st["downloads"] = {}
+    page._got(st)
+    assert not page.missing_row.isVisibleTo(page)
+    assert not button(page.kind_boxes["local_response"]).isVisibleTo(page)
+    # picking a model that isn't downloaded shows the button at once
+    box = page.kind_boxes["vision"]
+    i = next(i for i in range(box.count()) if box.itemData(i) and not page._entry(box.itemData(i))["installed"])
+    box.setCurrentIndex(i)
+    assert button(box).isVisibleTo(page) and page.missing_row.isVisibleTo(page)

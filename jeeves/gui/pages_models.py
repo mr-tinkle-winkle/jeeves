@@ -53,6 +53,16 @@ class ModelsPage(Page):
         self.rec_layout = QVBoxLayout(self.rec_box)
         self.rec_layout.setContentsMargins(0, 0, 0, 0)
         r.addWidget(self.rec_box)
+        self.missing_label = label("")
+        self.download_all = CustomButton("Download all selected models")
+        self.download_all.clicked.connect(self._download_all)
+        self.missing_row = QWidget()
+        mh = QHBoxLayout(self.missing_row)
+        mh.setContentsMargins(0, 6, 0, 0)
+        mh.addWidget(self.missing_label, 1)
+        mh.addWidget(self.download_all, 0)
+        self.missing_row.setVisible(False)
+        r.addWidget(self.missing_row)
 
         k = self.section("Minimum untouched")
         k.addWidget(label("What the AIs must always leave for your games, browser and desktop. Models that "
@@ -81,6 +91,8 @@ class ModelsPage(Page):
                       [("Vosk keyword spotter (light, recommended)", "vosk"),
                        ("Transcribe everything with the STT model", "stt-match")])
         self.wake_model = self.b.choice(w, "Wake word model", "wake_word.model", [("(none)", None)])
+        self.dl_buttons: dict[int, tuple[Any, CustomButton]] = {}
+        self._download_beside(self.wake_model)
         self.b.check(w, "Use one global threshold (agents can still override)", "wake_word.global_threshold_enabled")
         self.b.number(w, "Global threshold", "wake_word.global_threshold", 0.05, 1.0, 0.05, 2,
                       hint="How sure the model must be that you said a name. Higher = fewer false starts.")
@@ -89,9 +101,11 @@ class ModelsPage(Page):
         for kind, (title, cat_kind, path) in KIND_TITLES.items():
             s = self.section(title)
             self.kind_boxes[kind] = self.b.choice(s, "Model", path, [("(none)", None)])
+            self._download_beside(self.kind_boxes[kind])
             if kind == "tts":
                 self.voice_box = self.b.choice(s, "Voice", "models.tts_voice", [("(none)", None)],
                                                hint="Voices belong to a TTS engine; agents can pick their own.")
+                self._download_beside(self.voice_box)
             self.b.list_text(s, "Unload while these apps are open", f"models.{kind}.unload_when_open",
                              placeholder="steam, blender",
                              hint="Using it meanwhile flashes the indicator red and queues the request.")
@@ -163,6 +177,93 @@ class ModelsPage(Page):
         cat.addWidget(self.catalog_box)
         self.rows: dict[str, tuple[QLabel, CustomButton]] = {}
         self.finish()
+
+    # ------------------------------------------------------------------ downloads beside the choosers
+    def _download_beside(self, box: Any) -> None:
+        """A "Download model" button in the chooser's row, shown while its selection isn't downloaded."""
+        btn = CustomButton("Download model")
+        btn.setVisible(False)
+        btn.clicked.connect(lambda _=False, box=box: self._download_shown(box))
+        box.parentWidget().layout().insertWidget(2, btn, 0)
+        box.currentIndexChanged.connect(lambda _i: self._update_download_buttons())
+        self.dl_buttons[id(box)] = (box, btn)
+
+    def _entry(self, mid: Any) -> dict[str, Any] | None:
+        return next((m for m in self.catalog if m["id"] == mid), None) if mid else None
+
+    def _downloading(self, mid: str) -> dict[str, Any] | None:
+        dl = getattr(self, "_st", {}).get("downloads", {}).get(mid)
+        return dl if dl and dl.get("state") == "downloading" else None
+
+    def _download_shown(self, box: Any) -> None:
+        mid = box.currentData()
+        if self._entry(mid) is None:
+            return
+        if self._downloading(mid):
+            self.daemon.call("models.cancel", None, None, id=mid)
+        else:
+            self._start_download(mid)
+
+    def _start_download(self, mid: str) -> None:
+        self.daemon.call("models.download", None, None, id=mid)
+        # shown at once; the daemon's progress events take over from here
+        self._st = getattr(self, "_st", {})
+        self._st.setdefault("downloads", {})[mid] = {"model": mid, "state": "downloading", "done": 0, "total": 0}
+        self._update_download_buttons()
+
+    def selected_missing(self) -> list[dict[str, Any]]:
+        """The models chosen in this page's dropdowns that aren't downloaded (each once)."""
+        out: list[dict[str, Any]] = []
+        for box, _btn in self.dl_buttons.values():
+            m = self._entry(box.currentData())
+            if m is not None and not m["installed"] and m.get("runtime", True) and m not in out:
+                out.append(m)
+        return out
+
+    def _download_all(self) -> None:
+        missing = self.selected_missing()
+        ids = {m["id"] for m in missing}
+        for m in missing:
+            # a voice that lives inside an engine comes with the engine: one download, not two of the same file
+            if not m.get("files") and m.get("tts_model") in ids:
+                continue
+            if not self._downloading(m["id"]):
+                self._start_download(m["id"])
+
+    def _update_download_buttons(self) -> None:
+        for box, btn in self.dl_buttons.values():
+            m = self._entry(box.currentData())
+            show = m is not None and not m["installed"] and m.get("runtime", True)
+            if show:
+                dl = self._downloading(m["id"])
+                if dl:
+                    pct = f" {100 * dl['done'] / dl['total']:.0f}%" if dl.get("total") else ""
+                    btn.setText(f"Cancel{pct}")
+                else:
+                    size = self._size(m)
+                    btn.setText(f"Download model ({human(size)})" if size else "Download model")
+            btn.setVisible(show)
+        missing = self.selected_missing()
+        if missing:
+            busy = [m for m in missing if self._downloading(m["id"])]
+            targets = {(m["id"] if m.get("files") or not m.get("tts_model") else m["tts_model"]): self._size(m)
+                       for m in missing}
+            total = sum(targets.values())
+            names = ", ".join(m["name"] for m in missing)
+            n = len(missing)
+            self.missing_label.setText(
+                f"<b>{n} selected model{'s' if n != 1 else ''} not downloaded</b>"
+                f"{f' ({human(total)})' if total else ''}: {names}"
+                + (f" — downloading {len(busy)}" if busy else ""))
+            self.download_all.setEnabled(len(busy) < n)
+        self.missing_row.setVisible(bool(missing))
+
+    def _size(self, m: dict[str, Any]) -> int:
+        """Megabytes to fetch: a voice inside an engine (no files of its own) costs the engine."""
+        if m.get("files") or not m.get("tts_model"):
+            return int(m.get("size_mb") or 0)
+        parent = self._entry(m["tts_model"])
+        return int((parent or {}).get("size_mb") or 0)
 
     def _gpu_layers_row(self, layout: QVBoxLayout) -> None:
         """Auto / CPU only / All / a number."""
@@ -261,6 +362,7 @@ class ModelsPage(Page):
             f"<b>Now:</b> light models — {hy.get('reason') or 'other programs are busy'}" if hy.get("light") else
             "<b>Now:</b> full models")
         self.b.load(self._settings, self._locked)
+        self._update_download_buttons()
         self.after_fade(self._render_catalog)
 
     def _fill_light(self) -> None:
@@ -347,6 +449,7 @@ class ModelsPage(Page):
                 self._fill(self.kind_boxes[kind], cat_kind)
             self._fill(self.voice_box, "voice")
             self.b.load(self._settings, self._locked)
+            self._update_download_buttons()
 
     def _use(self, path: str, mid: str) -> None:
         m = next((m for m in self.catalog if m["id"] == mid), None)
@@ -472,6 +575,10 @@ class ModelsPage(Page):
 
     def on_event(self, topic: str, data: Any) -> None:
         if topic == "download" and data:
+            if data.get("model"):
+                self._st = getattr(self, "_st", {})
+                self._st.setdefault("downloads", {})[data["model"]] = data
+                self._update_download_buttons()
             row = self.rows.get(data.get("model"))
             if row is None:
                 return

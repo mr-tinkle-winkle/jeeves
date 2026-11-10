@@ -52,6 +52,47 @@ from .wikipedia import Wikipedia
 log = logging.getLogger("jeeves.engine")
 
 
+CHARACTER_VARIANTS = 3        # rewordings kept per plain line before they're reused without the model
+CHARACTER_RETRY_EVERY = 8     # while the model is too slow for rewording: every Nth line tries it again
+
+
+def speech_chunks(text: str, first: int = 40, later: int = 220, least: int = 140) -> list[str]:
+    """A reply split for speaking: a short opening (whole sentences, at least ``first`` characters) and
+    then groups of sentences of about ``later`` characters, so the opening can play while the rest is
+    being synthesized. Short replies (under ``least`` characters, or one sentence) stay whole."""
+    text = text.strip()
+    if len(text) < least:
+        return [text]
+    sentences = [x for x in re.split(r"(?<=[.!?…])[\"'”’)]*\s+(?=[\"'“‘(]?[A-Z0-9])", text) if x.strip()]
+    if len(sentences) < 2:
+        return [text]
+    parts: list[str] = []
+    cur = ""
+    for sent in sentences:
+        limit = first if not parts else later
+        if cur and len(cur) >= limit:
+            parts.append(cur)
+            cur = sent
+        else:
+            cur = f"{cur} {sent}".strip()
+    if cur:
+        if parts and len(cur) < 25:
+            parts[-1] = f"{parts[-1]} {cur}"         # no two-word tail synthesized on its own
+        else:
+            parts.append(cur)
+    return parts if len(parts) > 1 else [text]
+
+
+def resample(pcm: bytes, rate: int, to: int) -> bytes:
+    """16-bit mono PCM at another rate (nearest sample: only for a voice that changed mid-reply)."""
+    import array as _array
+    a = _array.array("h", pcm[: len(pcm) // 2 * 2])
+    if not a or rate == to or rate <= 0:
+        return pcm
+    n = int(len(a) * to / rate)
+    return _array.array("h", (a[min(len(a) - 1, int(k * rate / to))] for k in range(n))).tobytes()
+
+
 def muted(agent: dict[str, Any] | None, kind: str) -> bool:
     """Agent > Voice > Mute: "audio" = it never speaks; "visual" = nothing of it on screen. (A
     rudimentary agent's older Mute switch counts as audio.)"""
@@ -2075,13 +2116,38 @@ class Engine:
         if muted(agent, "audio"):
             ctx.trace("muted")                       # audio mute: never speaks (on screen only)
             return
+        # a long answer starts with its first sentence while the rest is still being synthesized
+        parts = speech_chunks(text) if self.settings.get("audio.stream_speech", True) else [text]
+        t_synth = time.time()
         try:
-            pcm, rate = self._synth(agent, text)
+            pcm, rate = self._synth(agent, parts[0])
         except Exception as exc:   # speech failing must never lose the answer
             ctx.trace("tts_failed", reason=str(exc))
             self._tts_problem(f"Text to speech failed: {exc}")
             return
-        pb = Playback(pcm, rate, self.voice_targets(agent))
+        first_wait = time.time() - t_synth
+        if len(parts) > 1:
+            pb = Playback(pcm, rate, self.voice_targets(agent), more_coming=True)
+            first_seconds = len(pcm) / (2 * rate)
+
+            def rest() -> None:
+                try:
+                    for n, part in enumerate(parts[1:], 1):
+                        if pb.stopped.is_set():
+                            break
+                        more, r = self._synth(agent, part)
+                        pb.add(more if r == rate else resample(more, r, rate))
+                        left = sum(len(p) for p in parts[n + 1:])
+                        done_chars = max(1, sum(len(p) for p in parts[:n + 1]))
+                        ctx.saying_for = pb.seconds() * (1 + left / done_chars)
+                except Exception as exc:  # noqa: BLE001 -- what was made so far is still said
+                    ctx.trace("tts_failed", reason=str(exc), part="rest")
+                    self._tts_problem(f"Text to speech failed partway through: {exc}")
+                finally:
+                    pb.complete()
+            threading.Thread(target=rest, daemon=True, name="speech-rest").start()
+        else:
+            pb = Playback(pcm, rate, self.voice_targets(agent))
         peak = pb.peak()
         if peak < 40 and text.strip():               # the voice came out silent: say it in eSpeak NG instead
             log.warning("speech for %r came out silent (peak %d); using eSpeak NG", text[:60], peak)
@@ -2089,16 +2155,22 @@ class Engine:
             try:
                 from ..models import voicefx
                 from ..models.backends import EspeakTTS
+                if len(parts) > 1:
+                    pb.stop()                        # (ends the first-sentence playback's background work)
+                    parts = [text]
                 pcm, rate = EspeakTTS().synth(text, None, voicefx.style_of(agent))
                 pb = Playback(pcm, rate, self.voice_targets(agent))
             except Exception as exc:  # noqa: BLE001
                 self._tts_problem(f"The voice came out silent and eSpeak NG failed too: {exc}")
         log.info("  speaking %.1f s to %s (peak %d)", pb.seconds(), ", ".join(t or "default output"
                                                                               for t in pb.targets), pb.peak())
-        ctx.trace("speech", seconds=round(pb.seconds(), 2), targets=pb.targets, peak=pb.peak())
+        ctx.trace("speech", seconds=round(pb.seconds(), 2), targets=pb.targets, peak=pb.peak(),
+                  synth_s=round(first_wait, 2), parts=len(parts))
         ctx.playback = pb
         ctx.saying = text
         ctx.saying_since, ctx.saying_for = time.time(), len(pcm) / (2 * rate)
+        if len(parts) > 1:                           # (an estimate until the rest is made)
+            ctx.saying_for = first_seconds * len(text) / max(1, len(parts[0]))
         with self._lock:
             self.speaking += 1          # desktop listening ignores Jeeves' own voice meanwhile
         try:
@@ -2132,6 +2204,26 @@ class Engine:
             return line
         if len(line) > 400:
             return line
+        import hashlib
+        import random
+        import re as _re
+        key = hashlib.sha1(f"{ctx.agent_id}\0{agent.get('prompt', '')}\0{line}".encode()).hexdigest()
+        cache = self.__dict__.setdefault("_character_lines", {})
+        known = cache.get(key) or []
+        if len(known) >= CHARACTER_VARIANTS:         # said often ("Done.", "Paused."): no model call
+            ctx.trace("in_character", line=line, cached=True)
+            return random.choice(known)
+        # a model too slow for it (CPU-only, busy GPU) says the plain line rather than hold up every reply;
+        # it's tried again now and then, so it comes back when the model is quick again
+        budget = float(self.settings.get("persona.every_line_max_seconds", 2.5) or 0)
+        took = self.__dict__.setdefault("_character_took", [])
+        if budget > 0 and len(took) >= 2 and sorted(took[-3:])[len(took[-3:]) // 2] > budget:
+            self._character_skips = getattr(self, "_character_skips", 0) + 1
+            if self._character_skips % CHARACTER_RETRY_EVERY:
+                ctx.trace("in_character_skipped", line=line, recent_s=[round(t, 1) for t in took[-3:]],
+                          budget_s=budget)
+                return random.choice(known) if known else line
+        t0 = time.time()
         try:
             out = self.models.respond(
                 agent, line, system=(
@@ -2141,15 +2233,20 @@ class Engine:
                 ctx=None, raw=False, temperature=0.8, max_tokens=90, kind="step")
         except Exception:  # noqa: BLE001 -- no model: the plain line
             return line
+        took.append(time.time() - t0)
+        del took[:-6]
         out = (out or "").strip().strip('"“”')
         if not out or len(out) > max(160, len(line) * 4):
             return line
-        import re as _re
         need = set(_re.findall(r"\d+(?::\d+)?", line))
         if need and not need <= set(_re.findall(r"\d+(?::\d+)?", out)):
             ctx.trace("in_character_dropped_facts", line=line, rewrite=out)
             return line                              # a number went missing: the plain line is right
-        ctx.trace("in_character", line=line)
+        if out not in known:
+            cache[key] = known + [out]
+            while len(cache) > 400:
+                cache.pop(next(iter(cache)))
+        ctx.trace("in_character", line=line, took_s=round(took[-1], 2))
         return out
 
     def previewing(self) -> bool:

@@ -172,23 +172,64 @@ def rank(results: list[dict[str, str]], question: str, prefer: list[str] | tuple
     return sorted(useful, key=score, reverse=True)
 
 
+def _stem(word: str) -> str:
+    """A word without its ending, so "jumps", "jumping" and "jumped" count as "jump"."""
+    for end in ("ing", "ies", "ed", "es", "s"):
+        if len(word) > len(end) + 3 and word.endswith(end):
+            return word[: -len(end)]
+    return word
+
+
+def _terms(text: str) -> list[str]:
+    return [_stem(w) for w in keywords(text)]
+
+
+def bm25(docs: list[str], query: str, k1: float = 1.4, b: float = 0.6) -> list[float]:
+    """How well each text answers the query (Okapi BM25): a query word that is rare among the texts
+    counts for more than one that is in all of them (on a page about a game, the game's name is
+    everywhere and says nothing about which paragraph has the answer), repeats count less and less,
+    and long texts don't win by length. Query words next to each other in a text add a little."""
+    import math
+    q = list(dict.fromkeys(_terms(query)))
+    if not q or not docs:
+        return [0.0] * len(docs)
+    toks = [_terms(d) for d in docs]
+    avg = sum(len(t) for t in toks) / len(toks) or 1.0
+    n = len(docs)
+    df = {w: sum(1 for t in toks if w in t) for w in q}
+    idf = {w: math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5)) for w in q}
+    pairs = set(zip(q, q[1:]))
+    out = []
+    for t in toks:
+        if not t:
+            out.append(0.0)
+            continue
+        score = 0.0
+        for w in q:
+            tf = t.count(w)
+            if tf:
+                score += idf[w] * tf * (k1 + 1) / (tf + k1 * (1 - b + b * len(t) / avg))
+        if score and pairs:
+            score *= 1 + 0.25 * len(pairs & set(zip(t, t[1:])))
+        out.append(score)
+    return out
+
+
 def relevant_passages(text: str, question: str, extra: str = "", limit: int = 4000) -> str:
-    """The parts of a page that talk about the question, in page order, up to limit chars."""
+    """The parts of a page that talk about the question, in page order, up to limit chars. The question's
+    own words decide; `extra` (the search queries, the terms) counts for less."""
     if len(text) <= limit:
         return text
-    kws = keywords(question + " " + extra)
     chunks = [c.strip() for c in re.split(r"\n\s*\n|(?<=[.!?])\s+(?=[A-Z])", text) if len(c.strip()) > 30]
     if not chunks:
         return text[:limit]
-    scored = []
-    for i, c in enumerate(chunks):
-        low = c.lower()
-        hits = sum(low.count(k) for k in kws)
-        distinct = sum(1 for k in kws if k in low)
-        scored.append((distinct * 3 + min(hits, 10), i))
+    main = bm25(chunks, question)
+    more = bm25(chunks, extra) if extra.strip() else [0.0] * len(chunks)
+    scored = [(m + 0.4 * x, -i) for i, (m, x) in enumerate(zip(main, more))]
     keep, total = set(), 0
-    for sc, i in sorted(scored, reverse=True):
-        if sc == 0 or total >= limit:
+    for sc, neg in sorted(scored, reverse=True):
+        i = -neg
+        if sc <= 0 or total >= limit:
             break
         for j in (i - 1, i, i + 1):                 # a little context around each hit
             if 0 <= j < len(chunks) and j not in keep and total < limit:
@@ -275,10 +316,69 @@ def best_of(sources: list[dict[str, Any]], question: str, n: int = 5) -> list[di
     """The n sources that talk most about the question, in their original order."""
     if len(sources) <= n:
         return sources
+    scores = bm25([f"{s.get('title', '')}\n{s['text']}" for s in sources], question)
     kws = set(keywords(question))
-    ranked = sorted(range(len(sources)), key=lambda i: -sum(1 for k in kws if k in sources[i]["text"].lower()))
+    ranked = sorted(range(len(sources)), key=lambda i: (-scores[i],
+                                                        -sum(1 for k in kws if k in sources[i]["text"].lower()), i))
     keep = set(ranked[:n])
     return [s for i, s in enumerate(sources) if i in keep]
+
+
+# ---------------------------------------------------------------------------- what was just looked up
+class Recent:
+    """What research fetched a moment ago, kept for a while (research.cache_minutes; 0 = nothing kept):
+    a follow-up about the same thing ("and how do I do the other one?") doesn't search for the game,
+    find its wiki and load the same pages all over again. Per daemon, in memory only."""
+
+    LIMITS = {"search": 80, "page": 24, "context": 60}
+    KEEP = {"search": 1.0, "page": 1.5, "context": 12.0}      # times research.cache_minutes
+
+    def __init__(self) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._data: dict[str, dict[str, tuple[float, Any]]] = {k: {} for k in self.LIMITS}
+
+    def get(self, settings: Any, kind: str, key: str) -> Any:
+        import time as _time
+        minutes = float(settings.get("research.cache_minutes", 20) or 0)
+        if minutes <= 0:
+            return None
+        with self._lock:
+            hit = self._data[kind].get(key)
+            if hit is None:
+                return None
+            if _time.time() - hit[0] > minutes * 60 * self.KEEP[kind]:
+                self._data[kind].pop(key, None)
+                return None
+            return hit[1]
+
+    def put(self, settings: Any, kind: str, key: str, value: Any) -> None:
+        import time as _time
+        if float(settings.get("research.cache_minutes", 20) or 0) <= 0:
+            return
+        with self._lock:
+            store = self._data[kind]
+            store.pop(key, None)
+            store[key] = (_time.time(), value)
+            while len(store) > self.LIMITS[kind]:
+                store.pop(next(iter(store)))
+
+    def clear(self) -> None:
+        with self._lock:
+            for store in self._data.values():
+                store.clear()
+
+
+def recent(ctx: Any) -> Recent:
+    eng = ctx.engine
+    got = getattr(eng, "_research_recent", None)
+    if got is None:
+        got = Recent()
+        try:
+            eng._research_recent = got
+        except AttributeError:
+            pass
+    return got
 
 
 def _squash(text: str) -> str:
@@ -299,12 +399,21 @@ def search_many(ctx: Any, queries: list[str], count: int = 6) -> list[dict[str, 
     if ctx.dry_run:
         return []
 
+    kept = recent(ctx)
+
     def one(q: str) -> tuple[list[dict[str, str]], list[str]]:
         problems: list[str] = []
+        key = f"{count}\0{q.strip().lower()}"
+        had = kept.get(ctx.settings, "search", key)
+        if had:
+            return [dict(r) for r in had], ["searched a moment ago"]
         try:
-            return web.search(ctx.settings, q, count, problems), problems
+            results = web.search(ctx.settings, q, count, problems)
         except Exception as exc:  # noqa: BLE001 -- one search failing doesn't stop the others
             return [], [str(exc)]
+        if results:
+            kept.put(ctx.settings, "search", key, [dict(r) for r in results])
+        return results, problems
     with ThreadPoolExecutor(max_workers=min(4, len(queries)), thread_name_prefix="jeeves-search") as pool:
         done = list(pool.map(one, queries))
     out: list[dict[str, str]] = []
@@ -327,9 +436,17 @@ def prefetch(ctx: Any, urls: list[str]) -> dict[str, Any]:
     from .partials import web
     pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jeeves-fetch")
 
+    kept = recent(ctx)
+
     def load(url: str) -> tuple[str, str]:
+        had = kept.get(ctx.settings, "page", url)
+        if had:
+            return had, ""
         try:
-            return web.request_website(ctx, url, raw=True, max_chars=600000, timeout=8), ""
+            page = web.request_website(ctx, url, raw=True, max_chars=600000, timeout=8)
+            if len(page) > 500:
+                kept.put(ctx.settings, "page", url, page)
+            return page, ""
         except FunctionError as exc:
             return "", str(exc)
         except Exception as exc:  # noqa: BLE001
@@ -342,6 +459,15 @@ def prefetch(ctx: Any, urls: list[str]) -> dict[str, Any]:
 def learn_context(ctx: Any, subject: str, notes: list[str], results_all: list[dict[str, str]]) -> str | None:
     """Look the subject up and note what it is. Returns its wiki (a MediaWiki base URL) if one shows up."""
     from .partials.web import request_website, wiki_base
+    kept = recent(ctx)
+    had = kept.get(ctx.settings, "context", subject.strip().lower())
+    if had:                                            # looked up a little while ago: it's still what it was
+        note, wiki = had
+        if note:
+            notes.append(note)
+        ctx.think(f"{subject}: {note or 'looked up earlier'}" + (f"\n  its wiki: {wiki}" if wiki else ""))
+        ctx.trace("context_remembered", subject=subject, wiki=wiki)
+        return wiki
     ctx.think(f"First, what is {subject}?")
     found = search_many(ctx, [subject, f"{subject} wiki"])
     results_all += found
@@ -377,6 +503,9 @@ def learn_context(ctx: Any, subject: str, notes: list[str], results_all: list[di
         wiki = find_wiki(subject)
     if wiki:
         ctx.think(f"  its wiki: {wiki}")
+    note = next((n for n in notes if n.startswith(f"{subject}: ")), None)
+    if note or wiki:
+        kept.put(ctx.settings, "context", subject.strip().lower(), (note, wiki))
     return wiki
 
 
@@ -453,6 +582,67 @@ def pick_pages(ctx, goal: str, terms: list[str], guess: str, titles: list[str], 
         words = set(keywords(" ".join(terms) + " " + guess + " " + goal))
         out = [t for t in titles if words & set(keywords(t))]
     return out[:n]
+
+
+FRESH = re.compile(r"\b(latest|newest|recent(ly)?|today|tonight|yesterday|tomorrow|this (week|month|year|season)|"
+                   r"current(ly)?|right now|nowadays|news|price|cost|stock|score|weather|forecast|release date|"
+                   r"coming out|upcoming|next (week|month|year)|20(2[5-9]|[3-9]\d))\b", re.I)
+
+
+def encyclopedic(question: str) -> bool:
+    """A question an encyclopedia answers: a plain fact about the world ("how tall is the Eiffel Tower",
+    "who wrote Dune") -- not a how-to, a game's inner workings, an estimate, or something that changes."""
+    return kind_of(question) == "fact" and not GAME_HINT.search(question) and not wants_estimate(question) \
+        and not FRESH.search(question)
+
+
+def wikipedia_first(ctx: Any, question: str, plan: dict[str, Any], per_page: int) -> dict[str, Any] | None:
+    """The Wikipedia article about what the question asks, as a source -- the downloaded copy if there is
+    one, else wikipedia.org (no key, one small request instead of a search and several pages). None when
+    there's no article that is about it."""
+    from .partials.web import wiki_article, wiki_search
+    goal = plan.get("goal") or question
+    subjects = [c for c in plan.get("context") or [] if c.strip()]
+    asks = list(dict.fromkeys(subjects + [" ".join(keywords(goal)[:6]), goal]))
+    title = text = url = ""
+    wiki = getattr(ctx.engine, "wikipedia", None)
+    if wiki is not None and wiki.available():
+        for q in asks:
+            hit = wiki.lookup(q, 60000, about=goal) if q else None
+            if hit:
+                title, text, url = hit["title"], hit["text"], "offline Wikipedia"
+                break
+    elif ctx.settings.get("research.online_wikipedia", True) and not ctx.dry_run:
+        from ..daemon.wikipedia import is_disambiguation
+        lang = str(ctx.settings.get("models.stt.language", "en") or "en")[:2].lower()
+        base = f"https://{lang if lang.isalpha() else 'en'}.wikipedia.org"
+        ctx.state("researching", "Wikipedia")
+        try:
+            for q in asks[:2]:
+                for hit in wiki_search(base, q, 3):
+                    body = wiki_article(base, hit["title"])
+                    if not is_disambiguation(hit["title"], body):
+                        title, text, url = hit["title"], body, hit["url"]
+                        break
+                if text:
+                    break
+        except FunctionError as exc:
+            ctx.think(f"  Wikipedia couldn't be reached: {exc}")
+            return None
+    if not text.strip():
+        return None
+    # about the right thing: it names what the question is about (else it's some other article)
+    if subjects and not all(term_in(f"{title}\n{text}", c) >= 0 or _squash(c) in _squash(title) for c in subjects):
+        ctx.think(f"  Wikipedia's '{title}' isn't about {', '.join(subjects)}")
+        return None
+    kws = set(_terms(goal))
+    if kws and len(kws & set(_terms(f"{title} {text}"))) < max(1, (len(kws) + 1) // 2):
+        ctx.think(f"  Wikipedia's '{title}' doesn't cover the question")
+        return None
+    ctx.think(f"Reading Wikipedia: {title}", looking_at=url if url.startswith("http") else title)
+    lead = text[:700].rsplit(". ", 1)[0] + "." if len(text) > 700 else text      # what it is: the opening
+    rest = relevant_passages(text[len(lead):], goal, limit=max(500, per_page - len(lead))) if len(text) > 700 else ""
+    return {"title": f"Wikipedia: {title}", "url": url, "text": f"{lead}\n{rest}".strip()}
 
 
 def read_wiki(ctx: Any, wiki: str, goal: str, terms: list[str], guess: str, queries: list[str],
@@ -563,6 +753,19 @@ def run(ctx: Any, question: str, depth: str | None = None, earlier: str = "", pl
             ctx.think(f"Your source answers it ({', '.join(s['title'] for s in done)}).")
             return done, results_all, notes
         hosts.append(custom_sources.host(site["url"]))
+    # a plain fact about the world: the encyclopedia first -- when its article answers it, that's the
+    # whole research (one read and one check, no searching)
+    asked_wikipedia = False
+    if not sources and ctx.settings.get("research.wikipedia_first", True) and encyclopedic(f"{question} {goal}"):
+        asked_wikipedia = True
+        article = wikipedia_first(ctx, question, plan, per_page)
+        if article is not None:
+            sources.append(article)
+            verdict, detail = assess(ctx, goal, sources)
+            ctx.trace("wikipedia_first", title=article["title"], verdict=verdict)
+            if verdict == "answered":
+                ctx.think(f"That answers it ({article['title']}).")
+                return sources[-1:], results_all, notes
     wiki = None
     for subject in plan["context"]:
         ctx.check_cancelled()
@@ -580,7 +783,8 @@ def run(ctx: Any, question: str, depth: str | None = None, earlier: str = "", pl
         within = " ".join(terms) or (queries[0] if queries else goal)
         queries = [f"site:{h} {within}" for h in dict.fromkeys(hosts)] + queries
 
-    if ctx.engine.wikipedia is not None and ctx.engine.wikipedia.available() and not sources:
+    if ctx.engine.wikipedia is not None and ctx.engine.wikipedia.available() and not sources \
+            and not asked_wikipedia:
         try:
             hit = ctx.call("wikipedia", query=goal, max_chars=40000)
             sources.append({"title": f"Wikipedia: {hit['title']}", "url": "offline Wikipedia",

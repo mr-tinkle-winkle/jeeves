@@ -128,6 +128,11 @@ DEFAULTS: dict[str, Any] = {
         "act_confidence": 0.8,
         "notifications": True,
     },
+    "persona": {
+        "every_line": True,               # functions' plain lines reworded in character (each agent can turn it off)
+        # ...unless the model takes longer than this to reword one (0 = always reword, however slow)
+        "every_line_max_seconds": 2.5,
+    },
     "wake_word": {
         "backup_precheck": True,          # a missed-name check runs Whisper only if the small model heard name-like words
         "backup_desktop": False,          # ...and on desktop audio at all (else: the wake model alone there)
@@ -175,6 +180,8 @@ DEFAULTS: dict[str, Any] = {
         "microphone": "",                 # PipeWire/Pulse source; "" = default
         "desktop": "@DEFAULT_MONITOR@",
         "speaker": "",                    # sink; "" = default
+        # long replies start with their first sentence while the rest is still being synthesized
+        "stream_speech": True,
         "virtual_mic_sink": "jeeves-mic", # null sink that apps can record from (output_to=microphone)
         "virtual_mic_include_mic": True,  # Jeeves-Microphone carries your real mic too (pick it in Discord)
         "vad_threshold": 0.012,           # RMS level that counts as speech (level meter only)
@@ -237,7 +244,12 @@ DEFAULTS: dict[str, Any] = {
                  "engine": "duckduckgo", "searxng_url": "", "pages": 3, "max_chars_per_page": 4000,
                  "depth": "normal",            # quick (1 round, 3 pages) | normal (2 rounds, 5) | deep (3, 8)
                  "auto_for_facts": True,       # factual questions (games, products, people...) get researched
-                 "max_seconds": 90},           # stop reading more pages after this long
+                 "max_seconds": 90,            # stop reading more pages after this long
+                 # plain facts about the world ("how tall is...", "who wrote..."): Wikipedia's article first
+                 # (the downloaded copy, else wikipedia.org if online_wikipedia); the web only if it doesn't answer
+                 "wikipedia_first": True, "online_wikipedia": True,
+                 # searches, pages and what a game/app/person is are kept this long for follow-ups (0 = off)
+                 "cache_minutes": 20},
     # YouTube asks some connections to sign in; yt-dlp can use a browser's YouTube login on this computer:
     # "auto" (only when asked, trying each installed browser), "off", or a browser: firefox, chrome, chromium,
     # brave, vivaldi, edge, librewolf (optionally "firefox:PROFILE"); cookies_file = an exported cookies.txt
