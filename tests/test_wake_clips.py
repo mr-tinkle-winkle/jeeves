@@ -42,7 +42,7 @@ def test_a_wake_up_is_kept_with_what_happened(engine, monkeypatch):
 def test_marking_teaches_decoys_recordings_and_length(engine, monkeypatch):
     for _ in range(3):
         _wake(engine, monkeypatch, "Guh.")
-    assert _wait(lambda: len(engine.clips.list()) == 3 and all(c["path"] for c in engine.clips.list()))
+    assert _wait(lambda: len(engine.clips.list()) == 3 and all(c["path"] for c in engine.clips.list()), t=15)
     for c in engine.clips.list():
         res = engine.clips.mark(c["id"], False, "guh")
     assert engine.settings.get("wake_word.extra_decoys") == ["guh"]
@@ -55,7 +55,10 @@ def test_marking_teaches_decoys_recordings_and_length(engine, monkeypatch):
         s.got_speech, s.voiced_frames = True, 50
         monkeypatch.setattr(engine.models, "stt", lambda agent=None: STT("Jeeves, what time is it"))
         engine.end_session(s)
-    assert _wait(lambda: len(engine.clips.list()) == 6 and all(c["path"] for c in engine.clips.list()))
+    # each clip's audio is written, and speech recognition has filled in what it heard (a good clip with
+    # nothing heard yet has no text to become a recording: on a busy build machine that came second)
+    assert _wait(lambda: len(engine.clips.list()) == 6 and all(
+        c["path"] and (c["verdict"] or c["heard"]) for c in engine.clips.list()), t=15)
     for c in [c for c in engine.clips.list() if not c["verdict"]]:
         res = engine.clips.mark(c["id"], True)
     assert res["recording"] == "Jeeves, what time is it"
