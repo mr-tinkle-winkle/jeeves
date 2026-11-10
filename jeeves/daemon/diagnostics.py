@@ -150,6 +150,38 @@ def gpu(hw: dict[str, Any]) -> list[str]:
     return out
 
 
+def gpu_access() -> list[str]:
+    """Why a GPU build might still find no GPU: the drivers it can see, the device files, and what the
+    Vulkan loader itself says when llama.cpp asks it for devices."""
+    out = []
+    icd = Path("/run/opengl-driver/share/vulkan/icd.d")
+    out.append(f"Vulkan drivers (/run/opengl-driver): {', '.join(sorted(p.name for p in icd.glob('*.json'))) if icd.is_dir() else 'none (hardware.graphics.enable?)'}")
+    try:
+        for d in sorted(Path("/dev/dri").iterdir()):
+            st = d.stat()
+            out.append(f"  {d}: mode {oct(st.st_mode & 0o777)}, readable+writable here: {os.access(d, os.R_OK | os.W_OK)}")
+    except OSError as exc:
+        out.append(f"  /dev/dri: {exc}")
+    try:
+        import grp
+        out.append("  this user's groups: " + ", ".join(sorted(grp.getgrgid(g).gr_name for g in os.getgroups())))
+    except Exception:  # noqa: BLE001
+        pass
+    exe = shutil.which("llama-server")
+    if exe:
+        env = dict(os.environ, VK_LOADER_DEBUG="error,warn,driver")
+        try:
+            r = subprocess.run([exe, "--list-devices"], capture_output=True, text=True, timeout=20, env=env)
+            text = (r.stdout + "\n" + r.stderr).strip().splitlines()
+            keep = [ln for ln in text if re.search(r"vulkan|device|driver|icd|error|warn|fail|GLIBC|cannot|not found|"
+                                                    r"available|radv|amd|nvidia|llvmpipe", ln, re.I)]
+            out.append("llama-server --list-devices (with the Vulkan loader's own messages):")
+            out += ["    " + ln[:300] for ln in (keep or text)[:40]]
+        except (OSError, subprocess.SubprocessError) as exc:
+            out.append(f"llama-server --list-devices failed: {exc}")
+    return out
+
+
 # ---------------------------------------------------------------------------- Jeeves
 def _proc_line(pid: int) -> str:
     try:
@@ -323,6 +355,15 @@ def findings(engine: Any, hw: dict[str, Any]) -> list[str]:
         out.append(f"! The GPU ({vendor.upper() or 'a GPU'}, {max(g.get('vram_mb') or 0 for g in gpus)} MB) is NOT "
                    "used: the llama.cpp / whisper.cpp installed are CPU-only builds, so every model runs on the CPU. "
                    f"Fix: in the NixOS config set  services.jeeves.acceleration = {how};  and rebuild.")
+    said_none = any("no usable GPU found" in ln or "no GPU found" in ln
+                    for inst in list(engine.models.instances.values())
+                    for ln in getattr(getattr(inst, "server", None), "head", []) or [])
+    if gpus and hw.get("llama_gpu") and said_none:
+        out.append("! Built with GPU support (" + ", ".join(hw.get("llama_gpu") or []) + "), but the model servers found "
+                   "no GPU when they started, so they run on the CPU. Usually the GPU driver can't be loaded by "
+                   "Jeeves' programs -- on NixOS, Jeeves built from a different nixpkgs than the system (whose "
+                   "graphics driver is in /run/opengl-driver): make the jeeves input follow the same nixpkgs the "
+                   "system is built from. The Vulkan loader's own messages are under GPU below.")
     writes = sorted(s["write_tok_s"] for s in STATS["llm"] if s.get("write_tok_s") and s["write_tok_s"] < 10000
                     and (s.get("made_tokens") or 0) > 5)
     if writes and writes[len(writes) // 2] < 10:
@@ -370,7 +411,7 @@ def report(engine: Any) -> str:
                     "daemon " + _proc_line(me)]),
         ("What stands out", findings(engine, hw)),
         ("Computer", cpu() + memory()),
-        ("GPU", gpu(hw)),
+        ("GPU", gpu(hw) + gpu_access()),
         ("Models", models(engine)),
         ("How fast they ran", speed() + ([f"Speed test ({time.strftime('%H:%M:%S', time.localtime(SPEED['at']))}):"]
                                           + ["  " + ln for ln in SPEED["result"].splitlines()] if SPEED["result"]

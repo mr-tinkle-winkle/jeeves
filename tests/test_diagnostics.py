@@ -55,3 +55,18 @@ def test_what_stands_out_on_a_cpu_only_amd_machine(engine):
     text = "\n".join(diagnostics.findings(engine, hw))
     assert 'services.jeeves.acceleration = "vulkan"' in text
     assert "4.0 tokens/s" in text and "0.5x realtime" in text and "several at once" in text
+
+
+def test_a_gpu_build_that_finds_no_gpu_is_called_out(engine):
+    from jeeves.daemon import diagnostics
+
+    class Srv:
+        head = ["warning: no usable GPU found, --gpu-layers option will be ignored"]
+
+    class Inst:
+        server = Srv()
+    engine.models.instances["qwen3-1.7b"] = Inst()
+    hw = {"gpus": [{"vendor": "amd", "vram_mb": 16304}], "llama_gpu": ["vulkan"], "gpu_usable": True}
+    text = "\n".join(diagnostics.findings(engine, hw))
+    assert "found no GPU when they started" in text and "follow the same nixpkgs" in text
+    engine.models.instances.pop("qwen3-1.7b")
