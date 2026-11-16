@@ -16,9 +16,82 @@ from .widgets import discard, Page, combo, is_locked, label, row
 from ..models.jeenius import LEVELS
 
 LISTEN = [("Just me (microphone)", "user"), ("Just desktop audio", "desktop"), ("Both", "both"),
-          ("A specific device…", "device")]
+          ("A specific device…", "device"), ("Multiple specific devices…", "devices")]
 OUTPUT = [("Speakers", "speakers"), ("Microphone (Jeeves-Microphone source)", "microphone"), ("Both", "both"),
-          ("A specific device…", "device"), ("A specific device + Jeeves-Microphone", "device_mic")]
+          ("A specific device…", "device"), ("A specific device + Jeeves-Microphone", "device_mic"),
+          ("Multiple specific devices…", "devices"), ("Multiple specific devices + Jeeves-Microphone", "devices_mic")]
+
+
+class DeviceList(QWidget):
+    """Several exact devices: a picker per device, × to take one out, "+ Add device" for another.
+    options: [(label, name)]; edited: called when the user adds, removes or changes one."""
+
+    def __init__(self, add_text: str = "+ Add device", edited: Any = None) -> None:
+        super().__init__()
+        self.options: list[tuple[str, str]] = []
+        self.edited = edited
+        self.lay = QVBoxLayout(self)
+        self.lay.setContentsMargins(0, 0, 0, 0)
+        self.lay.setSpacing(4)
+        self.rows: list[tuple[QWidget, Any]] = []
+        self.add_btn = CustomButton(add_text)
+        self.add_btn.clicked.connect(lambda: self._add_clicked())
+        self.lay.addWidget(row(self.add_btn))
+
+    def _add_clicked(self) -> None:
+        taken = set(self.value())
+        free = next((n for _lab, n in self.options if n not in taken), "")
+        self.add(free)
+        self._edited()
+
+    def _edited(self) -> None:
+        if self.edited is not None:
+            self.edited()
+
+    def add(self, name: str = "") -> Any:
+        box = combo()
+        self._fill(box, name)
+        box.activated.connect(lambda _i: self._edited())
+        remove = CustomButton("×")
+        remove.setToolTip("Take this device out")
+        remove.setFixedWidth(32)
+        r = row(box, remove, stretch=0)
+        remove.clicked.connect(lambda _=False, r=r: self._remove(r))
+        self.lay.insertWidget(self.lay.count() - 1, r)
+        self.rows.append((r, box))
+        return box
+
+    def _remove(self, r: QWidget) -> None:
+        self.rows = [(w, b) for w, b in self.rows if w is not r]
+        r.setParent(None)
+        r.deleteLater()
+        self._edited()
+
+    def _fill(self, box: Any, want: str) -> None:
+        box.clear()
+        for lab, name in self.options:
+            box.addItem(lab, name)
+        if want and box.findData(want) < 0:
+            box.addItem(f"{want}  (not connected)", want)
+        box.setCurrentIndex(max(0, box.findData(want)) if want else (0 if box.count() else -1))
+
+    def set_options(self, options: list[tuple[str, str]]) -> None:
+        """New device list (devices plugged in or out): each picker keeps its choice."""
+        self.options = list(options)
+        for _r, box in self.rows:
+            self._fill(box, box.currentData() or "")
+
+    def set_value(self, names: list[str]) -> None:
+        for r, _b in self.rows:
+            r.setParent(None)
+            r.deleteLater()
+        self.rows = []
+        for n in names:
+            self.add(n)
+
+    def value(self) -> list[str]:
+        """The chosen devices, in order, each once."""
+        return list(dict.fromkeys(b.currentData() for _r, b in self.rows if b.currentData()))
 
 
 # Which agent tab each section of the form is on (the window shows one tab of an agent at a time).
@@ -144,8 +217,15 @@ class AgentsPage(Page):
         self.device = combo()
         self.device_row = row(label("Device", False), self.device, stretch_last=True)
         g.addWidget(self.device_row)
+        self.devices_list = DeviceList(edited=self._device_list_edited)
+        self.devices_row = row(label("Devices", False), self.devices_list, stretch_last=True)
+        lay = self.devices_row.layout()
+        lay.setAlignment(lay.itemAt(0).widget(), Qt.AlignTop)     # (the label beside the first device)
+        lay.itemAt(0).widget().setContentsMargins(0, 7, 0, 0)
+        g.addWidget(self.devices_row)
         self.device_hint = label("Microphones, or an output's monitor (everything that output plays, e.g. the "
-                                 "headphones your voice chat comes through).")
+                                 "headphones your voice chat comes through). With several, each is heard on "
+                                 "its own: a call name on any of them wakes this agent.")
         g.addWidget(self.device_hint)
         self.listen.currentIndexChanged.connect(lambda _i: self._device_visibility())
         self.output = combo()
@@ -155,6 +235,14 @@ class AgentsPage(Page):
         self.out_device = combo()
         self.out_device_row = row(label("Output device", False), self.out_device, stretch_last=True)
         g.addWidget(self.out_device_row)
+        self.out_devices_list = DeviceList(edited=self._device_list_edited)
+        self.out_devices_row = row(label("Output devices", False), self.out_devices_list, stretch_last=True)
+        lay = self.out_devices_row.layout()
+        lay.setAlignment(lay.itemAt(0).widget(), Qt.AlignTop)     # (the label beside the first device)
+        lay.itemAt(0).widget().setContentsMargins(0, 7, 0, 0)
+        g.addWidget(self.out_devices_row)
+        self.out_devices_hint = label("Its voice plays on all of them at once.")
+        g.addWidget(self.out_devices_hint)
         self.output.currentIndexChanged.connect(lambda _i: self._device_visibility())
         self.show_output = CustomCheckBox("Also show responses on screen")
         g.addWidget(self.show_output)
@@ -600,6 +688,7 @@ class AgentsPage(Page):
         self.listen.setCurrentIndex(max(0, self.listen.findData(a.get("listen_to", "user"))))
         self._want_device = a.get("listen_device", "")
         self._fill_devices()
+        self.devices_list.set_value(list(a.get("listen_devices") or []))
         self._device_visibility()
         j = a.get("jump_in") or {}
         self.jump_in.setChecked(bool(j.get("enabled")))
@@ -614,6 +703,7 @@ class AgentsPage(Page):
         self.output.setCurrentIndex(max(0, self.output.findData(a.get("output_to", "speakers"))))
         self._want_out_device = a.get("output_device", "")
         self._fill_out_devices()
+        self.out_devices_list.set_value(list(a.get("output_devices") or []))
         self._device_visibility()
         self.show_output.setChecked(a.get("show_output", True))
         m = a.get("mute") or {}
@@ -712,10 +802,24 @@ class AgentsPage(Page):
             w.setEnabled(on)
 
     def _device_visibility(self) -> None:
-        on = self.listen.currentData() == "device"
-        self.device_row.setVisible(on)
-        self.device_hint.setVisible(on)
-        self.out_device_row.setVisible(self.output.currentData() in ("device", "device_mic"))
+        lt, ot = self.listen.currentData(), self.output.currentData()
+        self.device_row.setVisible(lt == "device")
+        self.devices_row.setVisible(lt == "devices")
+        self.device_hint.setVisible(lt in ("device", "devices"))
+        self.out_device_row.setVisible(ot in ("device", "device_mic"))
+        self.out_devices_row.setVisible(ot in ("devices", "devices_mic"))
+        self.out_devices_hint.setVisible(ot in ("devices", "devices_mic"))
+        # picking "Multiple" starts with one picker to fill in (and the one device already chosen, if any)
+        if lt == "devices" and not self.devices_list.rows:
+            self.devices_list.add(self.device.currentData() or "")
+        if ot in ("devices", "devices_mic") and not self.out_devices_list.rows:
+            self.out_devices_list.add(self.out_device.currentData() or "")
+
+    def _device_list_edited(self) -> None:
+        saver = getattr(self, "autosave", None)
+        if saver is not None:
+            saver.watch()
+            saver._edited()
 
     def _fill_out_devices(self) -> None:
         want = getattr(self, "_want_out_device", "")
@@ -743,6 +847,9 @@ class AgentsPage(Page):
         self.outputs = (res or {}).get("outputs", [])
         self._fill_devices()
         self._fill_out_devices()
+        self.devices_list.set_options([(f"{d['description']}  ({'output' if d['kind'] == 'output' else 'mic'})",
+                                        d["name"]) for d in self.devices])
+        self.out_devices_list.set_options([(d["description"], d["name"]) for d in self.outputs])
 
     def _collect(self) -> dict[str, Any]:
         a = copy.deepcopy(self.agents.get(self.current or "", {}))
@@ -758,6 +865,8 @@ class AgentsPage(Page):
             "listen_to": self.listen.currentData(),
             "listen_device": self.device.currentData() or "" if self.listen.currentData() == "device" else
             a.get("listen_device", ""),
+            "listen_devices": self.devices_list.value() if self.listen.currentData() == "devices" else
+            list(a.get("listen_devices") or []),
             "jump_in": {"enabled": self.jump_in.isChecked(), "frequency": round(self.jump_freq.value(), 2)},
             "memory": {"enabled": self.mem_enabled.isChecked(),
                        "recent": None if self.mem_recent.value() < 0 else self.mem_recent.value(),
@@ -766,6 +875,8 @@ class AgentsPage(Page):
             "mute": {"audio": self.mute_audio.isChecked(), "visual": self.mute_visual.isChecked()},
             "output_device": self.out_device.currentData() or "" if self.output.currentData() in
             ("device", "device_mic") else a.get("output_device", ""),
+            "output_devices": self.out_devices_list.value() if self.output.currentData() in
+            ("devices", "devices_mic") else list(a.get("output_devices") or []),
             "indicator_color": self.color_edit.text().strip() or None,
             "enable_when_open": split(self.enable_open), "enable_when_focused": split(self.enable_focus),
             "disable_when_open": split(self.disable_open), "disable_when_focused": split(self.disable_focus),

@@ -321,7 +321,8 @@ def settings(engine: Any) -> list[str]:
     for aid, a in (s.get("agents", {}) or {}).items():
         fns = a.get("functions") or {}
         out.append(f"agent {aid} ({a.get('name')}): enabled {a.get('enabled')}; names {a.get('call_names')}; listens to "
-                   f"{a.get('listen_to')} {a.get('listen_device') or ''}; jeenius {a.get('jeenius')}; threshold "
+                   f"{a.get('listen_to')} {a.get('listen_device') or ''} {a.get('listen_devices') or ''}; speaks through "
+                   f"{a.get('output_to')} {a.get('output_device') or ''} {a.get('output_devices') or ''}; jeenius {a.get('jeenius')}; threshold "
                    f"{a.get('threshold')}; models {json.dumps(a.get('models'))}; rudimentary "
                    f"{(a.get('rudimentary') or {}).get('function') if (a.get('rudimentary') or {}).get('enabled') else 'no'}; "
                    f"functions on: {', '.join(k for k, v in fns.items() if v)}; every line in character "

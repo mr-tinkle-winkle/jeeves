@@ -45,8 +45,9 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         "call_names": call_names or [name],
         # None -> use wake_word.global_threshold (when the global option is on)
         "threshold": None,
-        "listen_to": "user",          # user | desktop | both | device
+        "listen_to": "user",          # user | desktop | both | device | devices
         "listen_device": "",          # listen_to=device: exact source (a mic, or an output's .monitor)
+        "listen_devices": [],         # listen_to=devices: several exact sources, each heard on its own
         # said when it starts listening and you're waiting ("Yes?"); several separated by | (one is picked
         # at random); "" = say nothing
         "wake_reply": "",
@@ -65,8 +66,9 @@ def default_agent(name: str, call_names: list[str] | None = None, prompt: str = 
         "custom_sources": {"enabled": True, "sites": []},
         # Jump in whenever the AI wants to: 1 = a full part of the conversation, 0 = never
         "jump_in": {"enabled": False, "frequency": 0.3},
-        "output_to": "speakers",      # speakers | microphone | both | device | device_mic
+        "output_to": "speakers",      # speakers | microphone | both | device | device_mic | devices | devices_mic
         "output_device": "",          # output_to=device/device_mic: exact output (sink), e.g. a headset
+        "output_devices": [],         # output_to=devices/devices_mic: several exact outputs, all at once
         "show_output": True,          # also show the response text on screen
         # audio: never speaks (no wake-up reply, nothing synthesized); visual: nothing of it on screen
         # (no indicator, no text) except when it's asking you something
@@ -503,3 +505,23 @@ def get_secret(name: str) -> str | None:
         except OSError:
             pass
     return load_secrets().get(name)
+
+
+def listen_devices(agent: dict[str, Any]) -> list[str]:
+    """The exact sources an agent listens to (Listens to: a specific device, or several)."""
+    lt = agent.get("listen_to", "user")
+    if lt == "device":
+        return [agent["listen_device"]] if agent.get("listen_device") else []
+    if lt == "devices":
+        return list(dict.fromkeys(d for d in agent.get("listen_devices") or [] if d))
+    return []
+
+
+def output_devices(agent: dict[str, Any]) -> list[str]:
+    """The exact outputs an agent speaks through (Speaks through: a specific device, or several)."""
+    ot = agent.get("output_to", "speakers")
+    if ot in ("device", "device_mic"):
+        return [agent["output_device"]] if agent.get("output_device") else []
+    if ot in ("devices", "devices_mic"):
+        return list(dict.fromkeys(d for d in agent.get("output_devices") or [] if d))
+    return []

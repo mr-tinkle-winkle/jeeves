@@ -39,7 +39,7 @@ from .imports import Imports
 from .intent import Decision, IntentProcessor
 from .keyboard import Keyboard
 from .listener import Listener, Session
-from ..config import agent_memory
+from ..config import agent_memory, listen_devices, output_devices
 from .memory import Memory
 from .online import Online
 from .puppetry import Puppetry
@@ -360,20 +360,20 @@ class Engine:
         if self._needs_source("desktop"):
             wanted.add("desktop")
         if self.is_on():
-            for a in self.active_agents().values():          # agents listening to one exact device
-                if a.get("listen_to") == "device" and a.get("listen_device"):
-                    if self._is_the_mic(a["listen_device"]):
+            for a in self.active_agents().values():          # agents listening to exact devices
+                for dev in listen_devices(a):
+                    if self._is_the_mic(dev):
                         # that device IS the microphone: the microphone's listener hears for it. A second
                         # listener on the same mic woke every name twice (and ran Whisper twice)
                         if self._needs_source("microphone") or self.call_names("microphone"):
                             wanted.add("microphone")
                         continue
-                    src = f"device:{a['listen_device']}"
+                    src = f"device:{dev}"
                     said = self.__dict__.setdefault("_said_devices", set())
                     if src not in said and self._mic_name:
                         said.add(src)
                         log.info("%s listens to %s on its own; the microphone listener records %s", a.get("name"),
-                                 a["listen_device"], self._mic_name)
+                                 dev, self._mic_name)
                     if self.call_names(src) or self.jump_in.wants(src):
                         wanted.add(src)
         return wanted
@@ -521,11 +521,11 @@ class Engine:
 
     def _listens(self, agent: dict[str, Any], source: str) -> bool:
         lt = agent.get("listen_to", "user")
-        if lt == "device":
-            dev = agent.get("listen_device") or ""
-            if source == "microphone" and self._is_the_mic(dev):
-                return True
-            return bool(dev) and source == f"device:{dev}"
+        if lt in ("device", "devices"):
+            for dev in listen_devices(agent):
+                if source == f"device:{dev}" or (source == "microphone" and self._is_the_mic(dev)):
+                    return True
+            return False
         return lt == "both" or (lt == "user" and source == "microphone") or (lt == "desktop" and source == "desktop")
 
     def call_names(self, source: str) -> list[str]:
@@ -1169,7 +1169,7 @@ class Engine:
         try:
             pcm, rate = self._wake_reply_audio(agent, phrase)
             # it's for you: where you hear it, even if the agent's answers go into the call (Jeeves-Microphone)
-            mine = agent if agent.get("output_to", "speakers") in ("speakers", "both", "device") else \
+            mine = agent if agent.get("output_to", "speakers") in ("speakers", "both", "device", "devices") else \
                 dict(agent, output_to="speakers")
             pb = Playback(pcm, rate, self.voice_targets(mine))
             log.info("  wake-up reply: %s", phrase)
@@ -1524,7 +1524,8 @@ class Engine:
         if self._refuse_if_off():
             return False
         a = ctx.agent
-        source = f"device:{a['listen_device']}" if a.get("listen_to") == "device" and a.get("listen_device") else \
+        devs = listen_devices(a)                 # (several: the first one it listens to)
+        source = ("microphone" if self._is_the_mic(devs[0]) else f"device:{devs[0]}") if devs else \
             "desktop" if a.get("listen_to") == "desktop" else "microphone"
         self._start_listen(source, ctx.agent_id, "", [], None, 0)
         self.apply_settings()                    # make sure that source is being listened to
@@ -2385,7 +2386,7 @@ class Engine:
         return output_targets(agent.get("output_to", "speakers"), self.settings.get("audio.speaker", ""),
                               self.settings.get("audio.virtual_mic_sink", "jeeves-mic"),
                               bool(self.settings.get("audio.virtual_mic_include_mic", True)),
-                              self.settings.get("audio.microphone", ""), agent.get("output_device", ""))
+                              self.settings.get("audio.microphone", ""), output_devices(agent))
 
     def _synth(self, agent: dict[str, Any], text: str) -> tuple[bytes, int]:
         """The agent's TTS in its voice style; if that fails, eSpeak NG so there's always a voice."""

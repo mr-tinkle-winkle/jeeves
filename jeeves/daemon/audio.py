@@ -458,15 +458,19 @@ def ensure_virtual_mic(sink: str, include_mic: bool = True, mic: str = "") -> bo
 
 
 def output_targets(output_to: str, speaker: str, virtual_sink: str, include_mic: bool = True,
-                   mic: str = "", device: str = "") -> list[str]:
+                   mic: str = "", device: str | list[str] = "") -> list[str]:
     """Where an agent's voice plays. output_to: speakers | microphone | both | device (one exact
-    output, e.g. a headset) | device_mic (that output and Jeeves-Microphone)."""
-    targets = []
-    if output_to in ("speakers", "both") or (output_to in ("device", "device_mic") and not device):
+    output, e.g. a headset) | device_mic (that output and Jeeves-Microphone) | devices (several exact
+    outputs at once) | devices_mic (those and Jeeves-Microphone). device: the exact output(s)."""
+    devices = [d for d in ([device] if isinstance(device, str) else list(device or [])) if d]
+    exact = output_to in ("device", "device_mic", "devices", "devices_mic")
+    targets: list[str] = []
+    if output_to in ("speakers", "both") or (exact and not devices):
         targets.append(speaker or "")
-    if output_to in ("device", "device_mic") and device:
-        targets.append(device)
-    if output_to in ("microphone", "both", "device_mic") and ensure_virtual_mic(virtual_sink, include_mic, mic):
+    if exact:
+        targets += [d for d in dict.fromkeys(devices) if d not in targets]
+    if output_to in ("microphone", "both", "device_mic", "devices_mic") and \
+            ensure_virtual_mic(virtual_sink, include_mic, mic):
         targets.append(virtual_sink)
     return targets or [speaker or ""]
 

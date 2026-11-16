@@ -111,3 +111,35 @@ def test_autosave_off_means_save_button_only(qapp):
         assert d.saves == []
     finally:
         autosave.set_enabled(True)
+
+
+def test_several_devices_are_added_with_a_plus_and_saved(qapp):
+    p, d, _ = _page(qapp)
+    p._got_devices({"devices": [{"name": "mic.a", "description": "Headset mic", "kind": "input"},
+                                {"name": "tv.monitor", "description": "TV", "kind": "output"},
+                                {"name": "mic.b", "description": "Webcam mic", "kind": "input"}],
+                    "outputs": [{"name": "sink.a", "description": "Headphones"},
+                                {"name": "sink.b", "description": "TV speakers"}]})
+    p.listen.setCurrentIndex(p.listen.findData("devices"))
+    assert p.devices_row.isVisibleTo(p) and not p.device_row.isVisibleTo(p)
+    assert p.devices_list.value() == ["mic.a"]                      # starts with one picker to fill in
+    p.devices_list.add_btn.click()                                  # + : the next device not taken yet
+    p.devices_list.add_btn.click()
+    assert p.devices_list.value() == ["mic.a", "tv.monitor", "mic.b"]
+    r, _box = p.devices_list.rows[1]
+    r.findChildren(type(p.devices_list.add_btn))[0].click()         # × on the second
+    assert p.devices_list.value() == ["mic.a", "mic.b"]
+    p.output.setCurrentIndex(p.output.findData("devices_mic"))
+    assert p.out_devices_row.isVisibleTo(p)
+    p.out_devices_list.add_btn.click()
+    assert p.out_devices_list.value() == ["sink.a", "sink.b"]
+    got = p._collect()
+    assert got["listen_to"] == "devices" and got["listen_devices"] == ["mic.a", "mic.b"]
+    assert got["output_to"] == "devices_mic" and got["output_devices"] == ["sink.a", "sink.b"]
+    assert _wait(qapp, lambda: d.saves, 3)                          # adding and removing count as edits
+    # a saved list comes back as it was, an unplugged device marked
+    p.agents[p.current] = dict(got, listen_devices=["mic.b", "gone.mic"])
+    p.select(p.current)
+    qapp.processEvents()
+    assert p.devices_list.value() == ["mic.b", "gone.mic"]
+    assert "not connected" in p.devices_list.rows[1][1].currentText()

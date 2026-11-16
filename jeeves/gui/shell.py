@@ -1127,7 +1127,8 @@ class OverviewPage(Page):
             self.cards["abilities"].set(f"{len(on)} on" if functions else "…", some + ("…" if len(on) > 3 else ""))
         calls = ", ".join(agent.get("call_names") or [])
         hear = {"user": "your microphone", "desktop": "desktop audio", "both": "mic and desktop",
-                "device": "a device"}.get(agent.get("listen_to", "user"), "your microphone")
+                "device": "a device", "devices": f"{len(agent.get('listen_devices') or [])} devices"}.get(
+            agent.get("listen_to", "user"), "your microphone")
         self.cards["personality"].set(f"“{calls}”" if calls else "—", f"hears {hear}")
         if aid != self.aid or animate:
             self.aid = aid

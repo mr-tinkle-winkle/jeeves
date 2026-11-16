@@ -271,3 +271,39 @@ def test_a_dropped_listen_says_so_on_the_indicator(engine):
     s.got_speech, s.voiced_frames = True, 3
     engine.end_session(s)
     assert engine.indicators[s.request_id]["stage"] == "unclear"
+
+
+def test_speaks_through_several_devices(monkeypatch):
+    from jeeves.daemon import audio
+    monkeypatch.setattr(audio, "ensure_virtual_mic", lambda *a, **k: True)
+    t = lambda mode, dev: audio.output_targets(mode, "", "jeeves-mic", True, "", dev)  # noqa: E731
+    assert t("devices", ["headset", "tv"]) == ["headset", "tv"]
+    assert t("devices_mic", ["headset", "tv", "headset"]) == ["headset", "tv", "jeeves-mic"]
+    assert t("devices", []) == [""]                 # none added yet: the default output
+    assert t("device", "headset") == ["headset"]    # (one device still works as before)
+
+
+def test_listens_to_several_devices(engine):
+    from jeeves.config import listen_devices, output_devices
+    a = dict(engine.agents()["jeeves"], listen_to="devices",
+             listen_devices=["alsa_input.usb-headset", "alsa_output.tv.monitor", "", "alsa_input.usb-headset"])
+    assert listen_devices(a) == ["alsa_input.usb-headset", "alsa_output.tv.monitor"]
+    assert listen_devices(dict(a, listen_to="device", listen_device="x")) == ["x"]
+    assert listen_devices(dict(a, listen_to="user")) == []
+    assert output_devices(dict(a, output_to="devices_mic", output_devices=["h", "t"])) == ["h", "t"]
+    engine._mic_name = "alsa_input.laptop"
+    engine._mic_checked = 1e18
+    assert engine._listens(a, "device:alsa_input.usb-headset")
+    assert engine._listens(a, "device:alsa_output.tv.monitor")
+    assert not engine._listens(a, "device:something.else") and not engine._listens(a, "microphone")
+    engine.settings.set("agents.jeeves", a)
+    engine.settings.set("general.enabled", True)
+    engine.is_on = lambda: True
+    wanted = engine._wanted_sources()
+    assert {"device:alsa_input.usb-headset", "device:alsa_output.tv.monitor"} <= wanted
+    # one of them is the microphone itself: the microphone's own listener hears for it (not a second one)
+    a2 = dict(a, listen_devices=["alsa_input.laptop", "alsa_output.tv.monitor"])
+    engine.settings.set("agents.jeeves", a2)
+    assert engine._listens(a2, "microphone")
+    wanted = engine._wanted_sources()
+    assert "device:alsa_input.laptop" not in wanted and "device:alsa_output.tv.monitor" in wanted
