@@ -40,7 +40,7 @@ BUILTIN_PARTIAL_MODULES = [
     "jeeves.functions.partials.flow",
 ]
 BUILTIN_FULL_MODULE = "jeeves.functions.builtins"
-BUILTIN_FULL_MODULES = [BUILTIN_FULL_MODULE, "jeeves.functions.apps"]
+BUILTIN_FULL_MODULES = [BUILTIN_FULL_MODULE, "jeeves.functions.apps", "jeeves.functions.feedback"]
 
 
 def _import_defs(module: str) -> list[FunctionDef]:

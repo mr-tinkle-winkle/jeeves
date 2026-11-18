@@ -270,7 +270,11 @@ DEFAULTS: dict[str, Any] = {
     "puppetry": {"config_dir": "~/.config/macro-daemon", "service": "macro-daemon.service"},
     "wikipedia": {"variant": "wikipedia_en_all_nopic", "mirror": "https://download.kiwix.org/zim/wikipedia/",
                   "file": None, "smart_update": True},
-    "training": {"stt_vocabulary": [], "intent_examples_from_ratings": True, "max_examples": 12},
+    "training": {"stt_vocabulary": [], "intent_examples_from_ratings": True, "max_examples": 12,
+                 # "you shouldn't have responded": what was said then, ignored like talk to someone else after
+                 "not_for_me": [],
+                 # "you should have responded": the missed request is run once it's found
+                 "answer_missed": True},
     "triggers": [],                       # see jeeves.daemon.triggers
     "theme": None,                        # filled from ThemeSettings() by the GUI on first save
     # the settings window: autosave = pages with a Save button (agents, your functions, the Look page's

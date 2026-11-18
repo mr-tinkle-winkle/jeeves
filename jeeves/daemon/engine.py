@@ -233,6 +233,8 @@ class Engine:
         self._reply_tried: set[tuple] = set()
         self.active: dict[str, FunctionContext] = {}       # request id -> ctx
         self.indicators: dict[str, dict[str, Any]] = {}     # request id -> indicator state
+        # source -> (time, frames, speech-or-not per frame): the audio before the last name heard
+        self.before_wake: dict[str, tuple[float, list[bytes], list[bool]]] = {}
         self.sessions: dict[str, Session] = {}              # audio source -> open session
         self.waiters: dict[str, Waiter] = {}                # request id -> waiter
         self.extended: dict[str, dict[str, Any]] = {}       # agent id -> {"parts": [...], ...}
@@ -867,7 +869,7 @@ class Engine:
             self._didnt_catch(s)
             return
         log.info("  heard: %s", text)
-        self.clips.update(clip, outcome=f"ran as a request for {s.agent_id}")
+        self.clips.update(clip, outcome=f"ran as a request for {s.agent_id}", request=s.request_id)
         self.set_indicator(s.request_id, s.agent_id, "thinking")     # on from the intent step, not at "say"
         res = self.handle_text(text, s.agent_id, source=f"voice:{s.source}", request_id=s.request_id,
                                manual=s.manual)
@@ -2069,8 +2071,11 @@ class Engine:
         # meant for the agent (1 - how sure it is of that), or a fair doubt when they only read like chatter.
         # Below "Confidence required to do something" (general.act_confidence) it's ignored. 0.8 is how it
         # always behaved; lower it and it acts on more of what it isn't sure about.
+        said_not_for_me = [t for t in self.settings.get("training.not_for_me", []) or [] if t]
         if decision.not_for_me:
             sure = 1.0 - max(0.0, min(1.0, float(decision.confidence or 0.7)))
+        elif said_not_for_me and max(similarity(normalize(text), normalize(t)) for t in said_not_for_me) >= 0.8:
+            sure = 0.2                       # you said this sort of thing wasn't for it ("you shouldn't have responded")
         elif decision.function in (None, "local_response") and looks_like_chatter(text):
             sure = 0.3
         else:

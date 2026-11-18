@@ -324,6 +324,10 @@ class Listener(threading.Thread):
             # question on this source made every agent deaf to its name until it timed out)
             best = max(hits, key=lambda h: h[1])
             w = self._wake_audio(self.wake_rec, best[0])
+            # what came before the name ("you should have responded" looks there for a missed call)
+            n = len(w["name"] or []) + len(w["after"] or [])
+            ring, vring = list(self.ring), list(self.voiced_ring)
+            eng.before_wake[self.source] = (time.time(), ring[:-n] if n else ring, vring[:-n] if n else vring)
             eng.on_wake(self.source, best[0], best[1], w["after"], threshold=self.threshold(),
                         words=w["trailing"], name_audio=w["name"], after_voiced=w["after_voiced"],
                         **({"wake_words": list(self.wake_rec.last_heard)}

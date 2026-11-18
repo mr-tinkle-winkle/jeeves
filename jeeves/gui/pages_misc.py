@@ -707,6 +707,10 @@ class TrainingPage(Page):
                           "voice recordings; a false one teaches the wake word model what it really was (\"guh\", "
                           "\"cheese\" become words it can tell apart from the name), and with a few of each it "
                           "learns how short a name can be and still count."))
+        w.addWidget(label("Or say it right away: \"Jeeves, you shouldn't have responded\" marks the last wake-up as "
+                          "not a call and ignores that sort of talk from then on; \"Jeeves, you should have "
+                          "responded\" finds what you said just before, keeps it here as a missed call, and "
+                          "answers it. (Functions > Training.)"))
         self.clips = CustomListWidget()
         self.clips.setMinimumHeight(220)
         self.clips.itemDoubleClicked.connect(lambda _i: self.play_clip())
